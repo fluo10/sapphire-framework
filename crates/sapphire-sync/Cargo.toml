@@ -20,4 +20,4 @@ serde_json.workspace = true
 chrono = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true, optional = true }
-git2 = { version = "0.20", optional = true }
+git2 = { version = "0.21", optional = true }
