@@ -5,6 +5,18 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1](https://github.com/fluo10/sapphire-workspace/compare/v0.11.0...v0.11.1) - 2026-05-23
+
+### Fixed
+
+- *(ci)* set publish = false for sapphire-workspace-cli in release-plz config
+- *(ci)* update release-plz action to release-plz/action@v0.5
+
+### Other
+
+- Merge pull request #59 from fluo10/chore/gitignore-ds-store
+- ignore .DS_Store
+
 ## [0.11.0] - 2026-05-16
 
 ### Changed (breaking)
