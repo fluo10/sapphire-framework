@@ -5,6 +5,17 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/fluo10/sapphire-workspace/compare/v0.11.0...v0.12.0) - 2026-05-23
+
+### Changed
+
+- `sapphire-sync`: bump `git2` from 0.20 to 0.21. This pulls in a new major of `libgit2-sys` (a `-sys` crate with a `links` key), released as a minor bump to avoid silent build failures for downstream crates that depend on a different `libgit2-sys` major. See `RELEASING.md` for the `-sys` policy.
+
+### Internal
+
+- Adopt release-plz for automated version bumps, CHANGELOG generation, and crates.io publishing.
+- Add `.DS_Store` to `.gitignore`.
+
 ## [0.11.0] - 2026-05-16
 
 ### Changed (breaking)
