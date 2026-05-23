@@ -1,48 +1,48 @@
 # Releasing
 
-このリポジトリのリリースは [release-plz](https://release-plz.dev/) で自動化しています。
+Releases for this repository are automated with [release-plz](https://release-plz.dev/).
 
-## 通常運用
+## Normal flow
 
-1. `main` に変更が push されると release-plz が自動で release PR を作成・更新します。
-2. release PR の内容（バージョン、`CHANGELOG.md`、`Cargo.toml`）を確認します。
-3. PR をマージすると、`v{version}` タグ・GitHub release・crates.io への publish が自動で行われ、CLI バイナリも各プラットフォーム向けにビルド・アップロードされます。
+1. When changes are pushed to `main`, release-plz automatically creates or updates a release PR.
+2. Review the release PR (version, `CHANGELOG.md`, `Cargo.toml`).
+3. Merging the PR creates the `v{version}` tag, the GitHub release, publishes to crates.io, and builds CLI binaries for each target platform.
 
-## バージョン決定ルール
+## Version bump rules
 
-release-plz は conventional commits からバージョンを推論します（pre-1.0 の `0.x.y` を前提）。
+release-plz infers the version from conventional commits (assuming pre-1.0 `0.x.y`).
 
-- `feat:` / `fix:` / `chore(deps):` などの非破壊的変更 → patch bump
-- `feat!:` / `chore!:` あるいは commit footer の `BREAKING CHANGE:` → minor bump
-- 自分のコードの公開 API を変更した場合（関数シグネチャ、公開構造体のフィールド等） → minor bump（明示的に `!` を付ける）
+- `feat:` / `fix:` / `chore(deps):` and other non-breaking changes → patch bump
+- `feat!:` / `chore!:` or a `BREAKING CHANGE:` footer → minor bump
+- Public API changes you make yourself (function signatures, public struct fields, etc.) → minor bump (mark the commit with `!`)
 
-エラー型に `#[from] some_crate::Error` で外部 crate を露出している場合、依存メジャー bump は理屈上 breaking ですが、実害がほぼないため通常は patch のままで構いません（コミュニティ的にも pragmatic な扱いが多数派）。
+When an error type re-exposes a foreign crate via `#[from] some_crate::Error`, a major bump of that dependency is technically breaking, but the practical impact is usually nil. Patch is generally fine — this is the pragmatic stance most of the Rust ecosystem takes.
 
-## `-sys` crate 依存更新の特例
+## Special case: `-sys` crate updates
 
-`-sys` crate（`libgit2-sys`, `libsqlite3-sys`, `openssl-sys` など、Cargo.toml に `links = "..."` を持つ crate）のメジャーバージョン更新は **必ず minor bump** にします。
+A major bump of a `-sys` crate (`libgit2-sys`, `libsqlite3-sys`, `openssl-sys`, anything with `links = "..."` in its Cargo.toml) **must** become a minor bump on our side.
 
-理由: Cargo は `links` キーが同じ crate の異なるメジャーバージョンが依存グラフ内に同居することを許しません。patch リリースで `-sys` のメジャーを上げると、別の `-sys` メジャーを使うダウンストリームクレートが build 失敗します（API 互換性ではなく hard error）。
+Reason: Cargo refuses to resolve a dependency graph that contains two different majors of the same `links`-bearing crate. If we ship a patch release that pulls in a new `-sys` major, downstream crates that pin a different `-sys` major fail to build. This is a hard error, not an API compatibility break, and the user cannot work around it.
 
-[Cargo SemVer guide の `-sys` セクション](https://doc.rust-lang.org/cargo/reference/semver.html) でも明示的に major change として扱われています。
+The [Cargo SemVer guide's `-sys` section](https://doc.rust-lang.org/cargo/reference/semver.html) explicitly treats this as a major change.
 
-### 対象になる依存（例）
+### Dependencies to watch for
 
-このリポジトリで `-sys` を引き込んでいる主な依存:
+`-sys` crates currently reachable from this workspace:
 
 - `git2` → `libgit2-sys`
 - `rusqlite` → `libsqlite3-sys`
-- `lancedb` の連鎖依存に `arrow-*` 経由で複数の `-sys` クレートが含まれることあり
+- `lancedb` may transitively pull in additional `-sys` crates through `arrow-*`
 
-### 手順
+### How to handle it
 
-依存更新の release PR が出てきたら CHANGELOG を確認し、上記カテゴリの crate が含まれていれば：
+When a release PR includes a dependency update, check the CHANGELOG. If any of the above are involved:
 
-1. PR のブランチに直接 push して `Cargo.toml` の `workspace.package.version` と関連する内部依存指定を patch から minor に書き換える
-2. `CHANGELOG.md` の該当バージョン見出し（および compare URL）も合わせて書き換える
-3. 理由を CHANGELOG エントリに一行添える（例: 「pulls in a new major of `libgit2-sys`」）
+1. Push to the release PR branch and change `workspace.package.version` in `Cargo.toml` (and the matching internal dependency versions) from patch to minor.
+2. Update the version heading (and the compare URL) in `CHANGELOG.md` (and any per-crate `CHANGELOG.md`) to match.
+3. Add a one-line note to the CHANGELOG entry explaining why (e.g. "pulls in a new major of `libgit2-sys`").
 
-## 必要な secrets
+## Required secrets
 
-- `RELEASE_PLZ_TOKEN`: fine-grained PAT、Contents + Pull requests の read/write
-- `CARGO_REGISTRY_TOKEN`: crates.io publish 用
+- `RELEASE_PLZ_TOKEN`: fine-grained PAT with Contents + Pull requests read/write.
+- `CARGO_REGISTRY_TOKEN`: used for crates.io publishing.
