@@ -18,3 +18,7 @@ Cargo.lock
 tmp
 .sapphire-workspace
 .cargo
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
