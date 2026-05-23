@@ -5,17 +5,16 @@ All notable changes to `sapphire-workspace` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.1](https://github.com/fluo10/sapphire-workspace/compare/v0.11.0...v0.11.1) - 2026-05-23
+## [0.12.0](https://github.com/fluo10/sapphire-workspace/compare/v0.11.0...v0.12.0) - 2026-05-23
 
-### Fixed
+### Changed
 
-- *(ci)* set publish = false for sapphire-workspace-cli in release-plz config
-- *(ci)* update release-plz action to release-plz/action@v0.5
+- `sapphire-sync`: bump `git2` from 0.20 to 0.21. This pulls in a new major of `libgit2-sys` (a `-sys` crate with a `links` key), released as a minor bump to avoid silent build failures for downstream crates that depend on a different `libgit2-sys` major. See `RELEASING.md` for the `-sys` policy.
 
-### Other
+### Internal
 
-- Merge pull request #59 from fluo10/chore/gitignore-ds-store
-- ignore .DS_Store
+- Adopt release-plz for automated version bumps, CHANGELOG generation, and crates.io publishing.
+- Add `.DS_Store` to `.gitignore`.
 
 ## [0.11.0] - 2026-05-16
 
