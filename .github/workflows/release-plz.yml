@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
 
-      - uses: MarcoIeni/release-plz-action@v0
+      - uses: release-plz/action@v0.5
         with:
           command: release
         env:
@@ -52,7 +52,7 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
 
-      - uses: MarcoIeni/release-plz-action@v0
+      - uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
