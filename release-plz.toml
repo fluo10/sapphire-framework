@@ -1,0 +1,46 @@
+[workspace]
+# 公開クレートはすべて統一バージョン（workspace.package.version）で運用する。
+# 既存タグ運用に合わせて、ワークスペース全体で 1 つの `v{version}` タグと
+# GitHub release だけを作る。crates.io publish は各クレート個別に行う。
+changelog_update = true
+dependencies_update = true
+publish = true
+release = true
+git_release_enable = false
+git_tag_enable = false
+pr_branch_prefix = "release-plz/"
+pr_labels = ["release"]
+
+# メイン crate がタグと GitHub release を担当する。
+[[package]]
+name = "sapphire-workspace"
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+version_group = "workspace"
+
+[[package]]
+name = "sapphire-retrieve"
+version_group = "workspace"
+
+[[package]]
+name = "sapphire-sync"
+version_group = "workspace"
+
+# CLI は publish = false かつ独自バージョンなので release-plz の対象外。
+[[package]]
+name = "sapphire-workspace-cli"
+release = false
+
+[changelog]
+# 既存 CHANGELOG.md のヘッダーをそのまま維持し、新規エントリは
+# このヘッダーの下に挿入される（既存履歴は保持される）。
+header = """# Changelog
+
+All notable changes to `sapphire-workspace` are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
