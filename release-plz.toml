@@ -28,10 +28,13 @@ version_group = "workspace"
 name = "sapphire-sync"
 version_group = "workspace"
 
-# CLI は publish = false かつ独自バージョンなので release-plz の対象外。
+# CLI は Cargo.toml 側で publish = false かつ独自バージョン管理なので
+# release-plz の対象外。Cargo.toml の publish 設定と整合させるため
+# publish も明示的に false にする。
 [[package]]
 name = "sapphire-workspace-cli"
 release = false
+publish = false
 
 [changelog]
 # 既存 CHANGELOG.md のヘッダーをそのまま維持し、新規エントリは
