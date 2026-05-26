@@ -13,7 +13,7 @@ pub use config::{
 pub use context::AppContext;
 pub use indexer::{
     IndexHook, SyncReport, SyncWithHookError, path_to_doc_id, sync_workspace,
-    sync_workspace_incremental, sync_workspace_with_hook,
+    sync_workspace_full_with_hook, sync_workspace_incremental, sync_workspace_with_hook,
 };
 pub use workspace::Workspace;
 pub use workspace::{DEFAULT_WORKSPACE_MARKER, path_uuid};
