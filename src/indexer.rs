@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
-use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore};
+use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore, TomlChunker};
 
 use crate::{error::Result, workspace::Workspace};
 
@@ -18,6 +18,7 @@ fn file_mtime_secs(path: &Path) -> i64 {
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "org"];
 const JSONL_EXTENSIONS: &[&str] = &["jsonl"];
+const TOML_EXTENSIONS: &[&str] = &["toml"];
 
 /// Generate a stable `i64` document ID from a file path (FNV-1a).
 pub fn path_to_doc_id(path: &Path) -> i64 {
@@ -41,6 +42,7 @@ pub fn path_to_doc_id(path: &Path) -> i64 {
 /// |-----------|----------|-----------------------|
 /// | `md`, `markdown`, `txt`, `rst`, `org` | paragraph split | start/end line of paragraph |
 /// | `jsonl` | one message per line | `line_start == line_end` |
+/// | `toml` | single whole-file chunk | first/last non-blank line |
 pub fn sync_workspace(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
@@ -79,8 +81,9 @@ pub fn sync_workspace(
 
         let is_markdown = MARKDOWN_EXTENSIONS.contains(&ext.as_str());
         let is_jsonl = JSONL_EXTENSIONS.contains(&ext.as_str());
+        let is_toml = TOML_EXTENSIONS.contains(&ext.as_str());
 
-        if !is_markdown && !is_jsonl {
+        if !is_markdown && !is_jsonl && !is_toml {
             continue;
         }
 
@@ -91,12 +94,16 @@ pub fn sync_workspace(
 
         let doc_id = path_to_doc_id(path);
 
-        let doc = if is_jsonl {
+        let doc = if is_jsonl || is_toml {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text_chunks = JsonlChunker.chunk(&file_name, &raw);
+            let text_chunks = if is_jsonl {
+                JsonlChunker.chunk(&file_name, &raw)
+            } else {
+                TomlChunker.chunk(&file_name, &raw)
+            };
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
@@ -189,8 +196,9 @@ pub fn sync_workspace_incremental(
 
         let is_markdown = MARKDOWN_EXTENSIONS.contains(&ext.as_str());
         let is_jsonl = JSONL_EXTENSIONS.contains(&ext.as_str());
+        let is_toml = TOML_EXTENSIONS.contains(&ext.as_str());
 
-        if !is_markdown && !is_jsonl {
+        if !is_markdown && !is_jsonl && !is_toml {
             continue;
         }
 
@@ -211,12 +219,16 @@ pub fn sync_workspace_incremental(
             Err(_) => continue,
         };
 
-        let doc = if is_jsonl {
+        let doc = if is_jsonl || is_toml {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text_chunks = JsonlChunker.chunk(&file_name, &raw);
+            let text_chunks = if is_jsonl {
+                JsonlChunker.chunk(&file_name, &raw)
+            } else {
+                TomlChunker.chunk(&file_name, &raw)
+            };
             let body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())

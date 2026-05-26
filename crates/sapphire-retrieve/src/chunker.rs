@@ -6,6 +6,8 @@
 //! - [`MarkdownChunker`] — paragraph-based chunker for Markdown/plain-text files.
 //! - [`JsonlChunker`] — line-based chunker for JSONL files (one JSON object
 //!   per line; AI conversation logs from apps such as SillyTavern, etc.).
+//! - [`TomlChunker`] — whole-file chunker for TOML config files (always
+//!   returns a single chunk).
 //!
 //! # Source positions
 //!
@@ -213,6 +215,36 @@ impl Chunker for JsonlChunker {
         } else {
             chunks
         }
+    }
+}
+
+// ── TomlChunker ───────────────────────────────────────────────────────────────
+
+/// Whole-file chunker for TOML configuration files.
+///
+/// Always returns exactly one chunk covering the entire file body.  Embedding
+/// a TOML file as a single unit keeps related keys/sections together, which is
+/// usually what callers want when retrieving configuration.
+pub struct TomlChunker;
+
+impl Chunker for TomlChunker {
+    fn chunk(&self, title: &str, content: &str) -> Vec<TextChunk> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return vec![TextChunk {
+                line_start: 0,
+                line_end: 0,
+                text: title.to_owned(),
+            }];
+        }
+        let leading = &content[..content.len() - content.trim_start().len()];
+        let line_start = count_newlines(leading);
+        let line_end = line_start + count_newlines(trimmed);
+        vec![TextChunk {
+            line_start,
+            line_end,
+            text: normalise(content),
+        }]
     }
 }
 
@@ -434,6 +466,38 @@ mod tests {
         let chunks = c.chunk("empty.jsonl", "");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "empty.jsonl");
+    }
+
+    // ── TomlChunker ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn toml_single_chunk() {
+        let c = TomlChunker;
+        let toml = "[package]\nname = \"foo\"\nversion = \"1.0\"\n\n[deps]\nbar = \"2\"";
+        let chunks = c.chunk("Cargo.toml", toml);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].line_start, 0);
+        assert_eq!(chunks[0].line_end, 5);
+        assert!(chunks[0].text.contains("[package]"));
+        assert!(chunks[0].text.contains("[deps]"));
+        assert!(!chunks[0].text.contains("\n\n"));
+    }
+
+    #[test]
+    fn toml_empty_body_returns_title() {
+        let c = TomlChunker;
+        let chunks = c.chunk("Cargo.toml", "");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "Cargo.toml");
+    }
+
+    #[test]
+    fn toml_leading_blank_lines() {
+        let c = TomlChunker;
+        let chunks = c.chunk("Cargo.toml", "\n\n[a]\nx = 1");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].line_start, 2);
+        assert_eq!(chunks[0].line_end, 3);
     }
 
     #[test]

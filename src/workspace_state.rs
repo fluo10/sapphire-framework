@@ -7,7 +7,7 @@ use sapphire_retrieve::db::SCHEMA_VERSION;
 use sapphire_retrieve::open_lancedb;
 use sapphire_retrieve::{
     Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
-    RetrieveStore, VectorQuery,
+    RetrieveStore, TomlChunker, VectorQuery,
 };
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
@@ -328,8 +328,9 @@ impl WorkspaceState {
     /// JSONL files are pre-chunked line-by-line so that an append only
     /// produces new chunks at the tail; existing lines retain their
     /// `(doc_id, line_start)` identity in the chunk store and are not
-    /// re-embedded.  Other file types fall through to the storage layer's
-    /// default paragraph chunker.
+    /// re-embedded.  TOML files are stored as a single whole-file chunk.
+    /// Other file types fall through to the storage layer's default
+    /// paragraph chunker.
     pub fn on_file_updated(&self, path: &Path) -> Result<()> {
         let resolved = self.resolve_path(path)?;
         if !resolved.is_internal() {
@@ -351,18 +352,23 @@ impl WorkspaceState {
         let body = std::fs::read_to_string(abs)?;
         let doc_id = path_to_doc_id(abs);
 
-        let is_jsonl = abs
+        let ext = abs
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("jsonl"))
-            .unwrap_or(false);
+            .map(|e| e.to_ascii_lowercase());
+        let is_jsonl = ext.as_deref() == Some("jsonl");
+        let is_toml = ext.as_deref() == Some("toml");
 
-        let doc = if is_jsonl {
+        let doc = if is_jsonl || is_toml {
             let file_name = abs
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text_chunks = JsonlChunker.chunk(&file_name, &body);
+            let text_chunks = if is_jsonl {
+                JsonlChunker.chunk(&file_name, &body)
+            } else {
+                TomlChunker.chunk(&file_name, &body)
+            };
             let stored_body = text_chunks
                 .iter()
                 .map(|c| c.text.as_str())
