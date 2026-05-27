@@ -16,7 +16,11 @@ use tokio::sync::OnceCell;
 use crate::{
     config::{HybridConfig, RetrieveConfig, VectorDb},
     error::{Error, Result},
-    indexer::{path_to_doc_id, sync_workspace, sync_workspace_incremental},
+    indexer::{
+        IndexHook, SyncReport, SyncWithHookError, build_document_from_disk, file_mtime_secs,
+        is_indexable_path, path_to_doc_id, sync_workspace, sync_workspace_full_with_hook,
+        sync_workspace_incremental, sync_workspace_with_hook,
+    },
     workspace::Workspace,
 };
 
@@ -64,6 +68,13 @@ pub struct DbInfo {
     pub embedding_dim: u32,
     pub vector_count: u64,
     pub pending_count: u64,
+}
+
+/// Convert a `sapphire_retrieve::Error` to a `SyncWithHookError::Workspace`.
+fn map_retrieve_err<E: std::error::Error + Send + Sync + 'static>(
+    e: sapphire_retrieve::Error,
+) -> SyncWithHookError<E> {
+    SyncWithHookError::Workspace(Error::from(e))
 }
 
 // ── path resolution helpers ──────────────────────────────────────────────────
@@ -432,6 +443,89 @@ impl WorkspaceState {
         Ok(())
     }
 
+    // ── hook-aware single-file API ────────────────────────────────────────────
+
+    /// Like [`on_file_updated`](Self::on_file_updated) but invokes
+    /// `hook.on_changed` immediately before the retrieve DB is updated, so a
+    /// caller (e.g. sapphire-journal) can update its own per-file caches in
+    /// lockstep with the workspace.
+    ///
+    /// The hook does **not** see or modify the indexed [`Document`]; the
+    /// workspace always reads the file from disk and applies the default
+    /// chunking. Non-indexable extensions and external paths short-circuit
+    /// without invoking the hook.
+    pub fn on_file_updated_with_hook<H: IndexHook>(
+        &self,
+        path: &Path,
+        hook: &mut H,
+    ) -> std::result::Result<(), SyncWithHookError<H::Error>> {
+        let resolved = self
+            .resolve_path(path)
+            .map_err(SyncWithHookError::Workspace)?;
+        if !resolved.is_internal() {
+            return Ok(());
+        }
+        let abs = resolved.as_path();
+        if !is_indexable_path(abs) {
+            return Ok(());
+        }
+        let path_str = abs.to_string_lossy().into_owned();
+        let mtime = file_mtime_secs(abs);
+
+        hook.on_changed(abs, mtime)
+            .map_err(SyncWithHookError::Hook)?;
+
+        let doc_id = path_to_doc_id(abs);
+        let doc = build_document_from_disk(abs, doc_id)
+            .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
+
+        let db = self.retrieve_db();
+        db.upsert_file(&path_str, mtime).map_err(map_retrieve_err)?;
+        db.upsert_document(&doc).map_err(map_retrieve_err)?;
+        db.rebuild_fts().map_err(map_retrieve_err)?;
+
+        if let Some(sync) = &self.sync_backend {
+            sync.add_file(abs)
+                .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Like [`on_file_deleted`](Self::on_file_deleted) but invokes
+    /// `hook.on_removed` immediately before the retrieve DB rows are deleted,
+    /// so the caller can clean up its own caches in lockstep.
+    pub fn on_file_deleted_with_hook<H: IndexHook>(
+        &self,
+        path: &Path,
+        hook: &mut H,
+    ) -> std::result::Result<(), SyncWithHookError<H::Error>> {
+        let resolved = self
+            .resolve_path(path)
+            .map_err(SyncWithHookError::Workspace)?;
+        if !resolved.is_internal() {
+            return Ok(());
+        }
+        let abs = resolved.as_path();
+        let path_str = abs.to_string_lossy().into_owned();
+        let doc_id = path_to_doc_id(abs);
+
+        hook.on_removed(&path_str)
+            .map_err(SyncWithHookError::Hook)?;
+
+        let db = self.retrieve_db();
+        db.remove_document(doc_id).map_err(map_retrieve_err)?;
+        db.remove_file(&path_str).map_err(map_retrieve_err)?;
+        db.rebuild_fts().map_err(map_retrieve_err)?;
+
+        if let Some(sync) = &self.sync_backend {
+            sync.remove_file(abs)
+                .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
+        }
+
+        Ok(())
+    }
+
     // ── path resolution ─────────��──────────────────────��───────────────────────
 
     /// Resolve `path` to an absolute path and classify it as internal or
@@ -655,6 +749,30 @@ impl WorkspaceState {
         sync_workspace_incremental(&self.workspace, self.retrieve_db())
     }
 
+    /// Hook-aware full sync (counterpart of [`sync`](Self::sync)).
+    ///
+    /// Re-indexes every file regardless of mtime and invokes `hook.on_changed`
+    /// / `hook.on_removed` / `hook.after_sweep` so the caller can update its
+    /// own per-file caches in lockstep with the workspace's retrieve DB.
+    pub fn sync_with_hook<H: IndexHook>(
+        &self,
+        hook: &mut H,
+    ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
+        sync_workspace_full_with_hook(&self.workspace, self.retrieve_db(), hook)
+    }
+
+    /// Hook-aware incremental sync (counterpart of
+    /// [`sync_retrieve`](Self::sync_retrieve)).
+    ///
+    /// Skips files whose mtime matches the cached value; the hook is only
+    /// invoked for new / changed / removed paths.
+    pub fn sync_retrieve_with_hook<H: IndexHook>(
+        &self,
+        hook: &mut H,
+    ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
+        sync_workspace_with_hook(&self.workspace, self.retrieve_db(), hook)
+    }
+
     /// Run a full git sync cycle (commit → pull → push), if a sync backend is
     /// configured.  Does **not** update the retrieve cache.
     pub fn sync_git(&self) -> Result<()> {
@@ -859,6 +977,158 @@ impl WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sqlite-store")]
+    mod hook {
+        use super::super::*;
+        use crate::AppContext;
+        use std::cell::Cell;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn ctx() -> &'static AppContext {
+            static CTX: std::sync::OnceLock<AppContext> = std::sync::OnceLock::new();
+            CTX.get_or_init(|| AppContext::new("ws-state-hook-test"))
+        }
+
+        fn make_state() -> (tempfile::TempDir, WorkspaceState) {
+            // Avoid dotted prefix: the workspace walker filters dotted dirs at
+            // any depth including the root.
+            let tmp = tempfile::Builder::new().prefix("ws-").tempdir().unwrap();
+            // Each tempdir gets a fresh cache root: setting `set_cache_dir` is
+            // first-writer-wins, so we accept whatever the first test puts
+            // there. Use a process-wide tmp subdir as the shared cache.
+            ctx().set_cache_dir(std::env::temp_dir().join("ws-state-hook-cache"));
+            fs::create_dir_all(tmp.path().join(".ws-state-hook-test")).unwrap();
+            let ws = Workspace::from_root(ctx(), tmp.path()).unwrap();
+            let state = WorkspaceState::open(ws).unwrap();
+            (tmp, state)
+        }
+
+        struct RecordingHook {
+            changed: Vec<PathBuf>,
+            removed: Vec<String>,
+            after_sweep_count: Cell<usize>,
+        }
+        impl RecordingHook {
+            fn new() -> Self {
+                Self {
+                    changed: Vec::new(),
+                    removed: Vec::new(),
+                    after_sweep_count: Cell::new(0),
+                }
+            }
+        }
+        impl IndexHook for RecordingHook {
+            type Error = std::convert::Infallible;
+            fn on_changed(&mut self, p: &Path, _m: i64) -> std::result::Result<(), Self::Error> {
+                self.changed.push(p.to_path_buf());
+                Ok(())
+            }
+            fn on_removed(&mut self, p: &str) -> std::result::Result<(), Self::Error> {
+                self.removed.push(p.to_owned());
+                Ok(())
+            }
+            fn after_sweep(&mut self) -> std::result::Result<(), Self::Error> {
+                self.after_sweep_count.set(self.after_sweep_count.get() + 1);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn sync_retrieve_with_hook_invokes_hook_per_changed_file() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("a.md"), "a").unwrap();
+            fs::write(tmp.path().join("b.md"), "b").unwrap();
+
+            let mut hook = RecordingHook::new();
+            let report = state.sync_retrieve_with_hook(&mut hook).unwrap();
+
+            assert_eq!(report.upserted, 2);
+            assert_eq!(report.removed, 0);
+            assert_eq!(hook.changed.len(), 2);
+            assert_eq!(hook.after_sweep_count.get(), 1);
+        }
+
+        #[test]
+        fn sync_retrieve_with_hook_skips_unchanged_files() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("stable.md"), "x").unwrap();
+
+            let mut h1 = RecordingHook::new();
+            state.sync_retrieve_with_hook(&mut h1).unwrap();
+            assert_eq!(h1.changed.len(), 1);
+
+            let mut h2 = RecordingHook::new();
+            let r = state.sync_retrieve_with_hook(&mut h2).unwrap();
+            assert_eq!(h2.changed.len(), 0);
+            assert_eq!(r.upserted, 0);
+        }
+
+        #[test]
+        fn sync_with_hook_runs_full_re_index() {
+            let (tmp, state) = make_state();
+            fs::write(tmp.path().join("stable.md"), "x").unwrap();
+
+            // Prime the incremental cache so mtimes are recorded.
+            let mut h1 = RecordingHook::new();
+            state.sync_retrieve_with_hook(&mut h1).unwrap();
+
+            // Full sync must invoke the hook even though nothing changed.
+            let mut h2 = RecordingHook::new();
+            let r = state.sync_with_hook(&mut h2).unwrap();
+            assert_eq!(h2.changed.len(), 1);
+            assert_eq!(r.upserted, 1);
+        }
+
+        #[test]
+        fn on_file_updated_with_hook_indexes_and_fires_hook() {
+            let (tmp, state) = make_state();
+            let file = tmp.path().join("note.md");
+            fs::write(&file, "body").unwrap();
+
+            let mut hook = RecordingHook::new();
+            state.on_file_updated_with_hook(&file, &mut hook).unwrap();
+
+            assert_eq!(hook.changed, vec![file.canonicalize().unwrap()]);
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 1);
+        }
+
+        #[test]
+        fn on_file_updated_with_hook_skips_non_indexable_extension() {
+            let (tmp, state) = make_state();
+            let file = tmp.path().join("blob.bin");
+            fs::write(&file, "data").unwrap();
+
+            let mut hook = RecordingHook::new();
+            state.on_file_updated_with_hook(&file, &mut hook).unwrap();
+
+            assert!(hook.changed.is_empty());
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 0);
+        }
+
+        #[test]
+        fn on_file_deleted_with_hook_calls_hook_then_removes() {
+            let (tmp, state) = make_state();
+            let file = tmp.path().join("doomed.md");
+            fs::write(&file, "bye").unwrap();
+            state
+                .on_file_updated_with_hook(&file, &mut RecordingHook::new())
+                .unwrap();
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 1);
+
+            let mut hook = RecordingHook::new();
+            state.on_file_deleted_with_hook(&file, &mut hook).unwrap();
+
+            assert_eq!(hook.removed.len(), 1);
+            assert!(
+                hook.removed[0].ends_with("doomed.md"),
+                "got {:?}",
+                hook.removed[0]
+            );
+            assert_eq!(state.retrieve_db().document_count().unwrap(), 0);
+        }
+    }
 
     /// Regression for #48: `canonicalize_or_parent` previously returned a path
     /// with a trailing separator for not-yet-existing files, which caused
