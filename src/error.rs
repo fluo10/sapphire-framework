@@ -56,6 +56,9 @@ pub enum Error {
     Sync(#[from] sapphire_sync::Error),
 
     #[error(transparent)]
+    Track(#[from] sapphire_track::Error),
+
+    #[error(transparent)]
     Walkdir(#[from] walkdir::Error),
 }
 

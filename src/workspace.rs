@@ -209,6 +209,14 @@ impl Workspace {
         #[cfg(not(feature = "sqlite-store"))]
         self.cache_dir().join("retrieve.db")
     }
+
+    /// Path to the [`sapphire-track`](sapphire_track) mtime database file.
+    ///
+    /// The filename is versioned so an incompatible redb format bump simply
+    /// orphans the old file; the store is a rebuildable cache.
+    pub fn track_db_path(&self) -> PathBuf {
+        self.cache_dir().join("track_v1.redb")
+    }
 }
 
 fn resolve_cwd() -> Result<PathBuf> {

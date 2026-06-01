@@ -7,7 +7,6 @@
 //! All methods are **synchronous**.  Async backends must wrap their async
 //! operations inside a dedicated Tokio runtime.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{embed::Embedder, error::Result, vector_store::VecInfo};
@@ -215,13 +214,6 @@ pub struct FileSearchResult {
 /// - [`LanceDbBackend`](crate::lancedb_store::LanceDbBackend) — LanceDB backend
 ///   (requires the `lancedb-store` feature).
 pub trait RetrieveStore: Send + Sync {
-    // ── file tracking ──────────────────────────────────────────────────────────
-
-    fn file_mtimes(&self) -> Result<HashMap<String, i64>>;
-    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()>;
-    fn remove_file(&self, path: &str) -> Result<()>;
-    fn file_count(&self) -> Result<u64>;
-
     // ── document management ────────────────────────────────────────────────────
 
     fn upsert_document(&self, doc: &Document) -> Result<()>;

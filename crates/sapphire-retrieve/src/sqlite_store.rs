@@ -43,14 +43,11 @@ use crate::{
 /// - 3: replace `chunk_index` with `line` + `column` (source positions)
 /// - 4: chunk-level FTS (`chunks_fts`), `line_start`/`line_end`, drop
 ///   `documents.body` and `documents_fts`
-pub const SCHEMA_VERSION: i32 = 4;
+/// - 5: drop the `files` table; mtime-based file-change tracking moved to the
+///   `sapphire-track` crate
+pub const SCHEMA_VERSION: i32 = 5;
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS files (
-    path       TEXT    PRIMARY KEY,
-    file_mtime INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS documents (
     id    INTEGER PRIMARY KEY,
     path  TEXT    NOT NULL DEFAULT ''
@@ -123,41 +120,6 @@ impl SqliteStore {
 }
 
 impl RetrieveStore for SqliteStore {
-    // ── file tracking ──────────────────────────────────────────────────────────
-
-    fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        let conn = self.open_conn()?;
-        let mut stmt = conn.prepare("SELECT path, file_mtime FROM files")?;
-        let result = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?
-            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-        Ok(result)
-    }
-
-    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        let conn = self.open_conn()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO files (path, file_mtime) VALUES (?1, ?2)",
-            params![path, mtime],
-        )?;
-        Ok(())
-    }
-
-    fn remove_file(&self, path: &str) -> Result<()> {
-        let conn = self.open_conn()?;
-        conn.execute("DELETE FROM files WHERE path = ?1", [path])?;
-        Ok(())
-    }
-
-    fn file_count(&self) -> Result<u64> {
-        let conn = self.open_conn()?;
-        let count: u64 =
-            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))? as u64;
-        Ok(count)
-    }
-
     // ── document management ────────────────────────────────────────────────────
 
     fn upsert_document(&self, doc: &Document) -> Result<()> {

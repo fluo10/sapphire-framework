@@ -2,6 +2,7 @@
 members = [
     "crates/sapphire-sync",
     "crates/sapphire-retrieve",
+    "crates/sapphire-track",
     "crates/sapphire-workspace-cli",
 ]
 resolver = "3"
@@ -54,6 +55,7 @@ git-sync        = ["sapphire-sync/git"]
 [dependencies]
 sapphire-retrieve = { version = "0.12.1", path = "crates/sapphire-retrieve", default-features = false }
 sapphire-sync     = { version = "0.12.1", path = "crates/sapphire-sync", default-features = false }
+sapphire-track    = { version = "0.12.1", path = "crates/sapphire-track" }
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true

@@ -1,8 +1,8 @@
 //! Unified retrieve database: FTS5 + vector search.
 //!
 //! [`RetrieveDb`] is the main entry point.  It manages one of the available
-//! storage backends and exposes a unified API for file tracking, document
-//! management, full-text search, and vector search.
+//! storage backends and exposes a unified API for document management,
+//! full-text search, and vector search.
 
 use std::{
     collections::HashMap,
@@ -39,7 +39,6 @@ struct InMemoryStore {
 
 #[derive(Default)]
 struct InMemoryState {
-    files: HashMap<String, i64>,
     documents: HashMap<i64, Document>,
 }
 
@@ -52,28 +51,6 @@ impl InMemoryStore {
 }
 
 impl RetrieveStore for InMemoryStore {
-    fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        Ok(self.state.lock().unwrap().files.clone())
-    }
-
-    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .files
-            .insert(path.to_owned(), mtime);
-        Ok(())
-    }
-
-    fn remove_file(&self, path: &str) -> Result<()> {
-        self.state.lock().unwrap().files.remove(path);
-        Ok(())
-    }
-
-    fn file_count(&self) -> Result<u64> {
-        Ok(self.state.lock().unwrap().files.len() as u64)
-    }
-
     fn upsert_document(&self, doc: &Document) -> Result<()> {
         self.state
             .lock()
@@ -296,24 +273,6 @@ impl RetrieveDb {
 
     pub fn document_count(&self) -> Result<u64> {
         self.store().document_count()
-    }
-
-    // ── file tracking ─────────────────────────────────────────────────────────
-
-    pub fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        self.store().file_mtimes()
-    }
-
-    pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.store().upsert_file(path, mtime)
-    }
-
-    pub fn remove_file(&self, path: &str) -> Result<()> {
-        self.store().remove_file(path)
-    }
-
-    pub fn file_count(&self) -> Result<u64> {
-        self.store().file_count()
     }
 }
 
