@@ -5,20 +5,17 @@ use std::{
 };
 
 use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore, TomlChunker};
+use sapphire_track::TrackStore;
 use thiserror::Error;
 
 use crate::{error::Result, workspace::Workspace};
 
 /// Return the mtime of `path` as seconds since UNIX epoch, or 0 on error.
+///
+/// Thin re-export of [`sapphire_track::mtime_secs`] kept under the indexer's
+/// name for the single-file update paths in `workspace_state`.
 pub(crate) fn file_mtime_secs(path: &Path) -> i64 {
-    path.metadata()
-        .and_then(|m| m.modified())
-        .map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-        })
-        .unwrap_or(0)
+    sapphire_track::mtime_secs(path)
 }
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "org"];
@@ -121,13 +118,15 @@ pub(crate) fn build_document_from_disk(path: &Path, doc_id: i64) -> std::io::Res
 pub fn sync_workspace(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+    track: &dyn TrackStore,
 ) -> Result<(usize, usize)> {
     let mut hook = NoopHook;
-    let report =
-        sync_workspace_full_with_hook(workspace, retrieve_db, &mut hook).map_err(|e| match e {
+    let report = sync_workspace_full_with_hook(workspace, retrieve_db, track, &mut hook).map_err(
+        |e| match e {
             SyncWithHookError::Workspace(e) => e,
             SyncWithHookError::Hook(never) => match never {},
-        })?;
+        },
+    )?;
     Ok((report.upserted, report.removed))
 }
 
@@ -239,9 +238,10 @@ fn collect_candidates(root: &Path) -> Result<Vec<PathBuf>> {
 pub fn sync_workspace_with_hook<H: IndexHook>(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+    track: &dyn TrackStore,
     hook: &mut H,
 ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-    sync_inner(workspace, retrieve_db, hook, /* full = */ false)
+    sync_inner(workspace, retrieve_db, track, hook, /* full = */ false)
 }
 
 /// Hook-driven **full** sync.
@@ -252,18 +252,20 @@ pub fn sync_workspace_with_hook<H: IndexHook>(
 pub fn sync_workspace_full_with_hook<H: IndexHook>(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+    track: &dyn TrackStore,
     hook: &mut H,
 ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-    sync_inner(workspace, retrieve_db, hook, /* full = */ true)
+    sync_inner(workspace, retrieve_db, track, hook, /* full = */ true)
 }
 
 fn sync_inner<H: IndexHook>(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+    track: &dyn TrackStore,
     hook: &mut H,
     full: bool,
 ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-    let known_mtimes = retrieve_db.file_mtimes().map_err(crate::Error::from)?;
+    let known_mtimes = track.mtimes().map_err(crate::Error::from)?;
     let existing_ids: HashSet<i64> = retrieve_db
         .document_ids()
         .map_err(crate::Error::from)?
@@ -298,11 +300,16 @@ fn sync_inner<H: IndexHook>(
             continue;
         };
 
-        retrieve_db
-            .upsert_file(&path_str, disk_mtime)
-            .map_err(crate::Error::from)?;
+        // Index into the retrieve DB first, then record the mtime. If we crash
+        // between the two, the file is re-detected as changed next run and
+        // re-indexed (idempotent via the stable `doc_id`) — never silently
+        // skipped, which the reverse order would risk. See the crate-split
+        // atomicity note in the design.
         retrieve_db
             .upsert_document(&doc)
+            .map_err(crate::Error::from)?;
+        track
+            .upsert(&path_str, disk_mtime)
             .map_err(crate::Error::from)?;
         upserted += 1;
     }
@@ -316,9 +323,6 @@ fn sync_inner<H: IndexHook>(
             continue;
         }
         hook.on_removed(path_str).map_err(SyncWithHookError::Hook)?;
-        retrieve_db
-            .remove_file(path_str)
-            .map_err(crate::Error::from)?;
         let doc_id = path_to_doc_id(Path::new(path_str));
         if existing_ids.contains(&doc_id) && removed_doc_ids.insert(doc_id) {
             retrieve_db
@@ -326,6 +330,7 @@ fn sync_inner<H: IndexHook>(
                 .map_err(crate::Error::from)?;
             removed += 1;
         }
+        track.remove(path_str).map_err(crate::Error::from)?;
     }
 
     // Orphan documents: IDs in the DB with no corresponding file row.
@@ -378,8 +383,8 @@ pub(crate) fn unwrap_infallible(err: SyncWithHookError<std::convert::Infallible>
     }
 }
 
-/// Walk the workspace and update only files whose mtime has changed since the
-/// last sync. Also removes documents (and their file rows) for files that no
+/// Walk the workspace and update only files whose mtime (tracked in `track`)
+/// has changed since the last sync. Also removes documents for files that no
 /// longer exist.
 ///
 /// Returns `(upserted, removed)`.
@@ -388,10 +393,11 @@ pub(crate) fn unwrap_infallible(err: SyncWithHookError<std::convert::Infallible>
 pub fn sync_workspace_incremental(
     workspace: &Workspace,
     retrieve_db: Arc<dyn RetrieveStore + Send + Sync>,
+    track: &dyn TrackStore,
 ) -> Result<(usize, usize)> {
     let mut hook = NoopHook;
-    let report =
-        sync_workspace_with_hook(workspace, retrieve_db, &mut hook).map_err(unwrap_infallible)?;
+    let report = sync_workspace_with_hook(workspace, retrieve_db, track, &mut hook)
+        .map_err(unwrap_infallible)?;
     Ok((report.upserted, report.removed))
 }
 
@@ -412,7 +418,12 @@ mod tests {
         CTX.get_or_init(|| AppContext::new("indexer-hook-test"))
     }
 
-    fn make_workspace() -> (TempDir, Workspace, Arc<dyn RetrieveStore + Send + Sync>) {
+    fn make_workspace() -> (
+        TempDir,
+        Workspace,
+        Arc<dyn RetrieveStore + Send + Sync>,
+        sapphire_track::InMemoryTrackStore,
+    ) {
         // Use a non-dotted prefix: hook-aware sync skips dotted directories at
         // any depth (matching `sync_workspace_incremental`), which includes the
         // workspace root.
@@ -422,7 +433,8 @@ mod tests {
         let workspace = Workspace::from_root(ctx(), &root).unwrap();
         let db_path = root.join(".indexer-hook-test").join("retrieve.sqlite");
         let db = open_sqlite_fts(&db_path);
-        (tmp, workspace, db)
+        let track = sapphire_track::open_in_memory();
+        (tmp, workspace, db, track)
     }
 
     struct RecordingHook {
@@ -466,12 +478,12 @@ mod tests {
 
     #[test]
     fn hook_sees_changed_and_workspace_indexes_default() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         let file = tmp.path().join("note.md");
         fs::write(&file, "hello world").unwrap();
 
         let mut hook = RecordingHook::new();
-        let report = sync_workspace_with_hook(&ws, db.clone(), &mut hook).unwrap();
+        let report = sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook).unwrap();
 
         assert_eq!(report.upserted, 1);
         assert_eq!(report.removed, 0);
@@ -480,22 +492,22 @@ mod tests {
         assert_eq!(hook.after_sweep_count.get(), 1);
 
         assert_eq!(db.document_count().unwrap(), 1);
-        let mtimes = db.file_mtimes().unwrap();
+        let mtimes = track.mtimes().unwrap();
         assert!(mtimes.contains_key(file.to_string_lossy().as_ref()));
     }
 
     #[test]
     fn unchanged_file_skips_hook_on_second_run() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         let file = tmp.path().join("stable.md");
         fs::write(&file, "stable").unwrap();
 
         let mut hook = RecordingHook::new();
-        let first = sync_workspace_with_hook(&ws, db.clone(), &mut hook).unwrap();
+        let first = sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook).unwrap();
         assert_eq!(first.upserted, 1);
 
         let mut hook2 = RecordingHook::new();
-        let second = sync_workspace_with_hook(&ws, db.clone(), &mut hook2).unwrap();
+        let second = sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook2).unwrap();
         assert_eq!(second.upserted, 0);
         assert!(hook2.changed.is_empty());
         assert_eq!(hook2.after_sweep_count.get(), 1);
@@ -503,55 +515,55 @@ mod tests {
 
     #[test]
     fn full_sync_with_hook_visits_every_file_regardless_of_mtime() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         let file = tmp.path().join("stable.md");
         fs::write(&file, "stable").unwrap();
 
         let mut h1 = RecordingHook::new();
-        sync_workspace_with_hook(&ws, db.clone(), &mut h1).unwrap();
+        sync_workspace_with_hook(&ws, db.clone(), &track, &mut h1).unwrap();
         assert_eq!(h1.changed.len(), 1);
 
         // Second incremental call: mtime unchanged → hook skipped.
         let mut h2 = RecordingHook::new();
-        sync_workspace_with_hook(&ws, db.clone(), &mut h2).unwrap();
+        sync_workspace_with_hook(&ws, db.clone(), &track, &mut h2).unwrap();
         assert_eq!(h2.changed.len(), 0);
 
         // Second full call: mtime unchanged but hook is still invoked.
         let mut h3 = RecordingHook::new();
-        let r = sync_workspace_full_with_hook(&ws, db, &mut h3).unwrap();
+        let r = sync_workspace_full_with_hook(&ws, db, &track, &mut h3).unwrap();
         assert_eq!(h3.changed.len(), 1);
         assert_eq!(r.upserted, 1);
     }
 
     #[test]
     fn removed_file_triggers_on_removed_before_db_delete() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         let file = tmp.path().join("doomed.md");
         fs::write(&file, "bye").unwrap();
 
         let mut hook = RecordingHook::new();
-        sync_workspace_with_hook(&ws, db.clone(), &mut hook).unwrap();
+        sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook).unwrap();
         let file_str = file.to_string_lossy().into_owned();
-        assert!(db.file_mtimes().unwrap().contains_key(&file_str));
+        assert!(track.mtimes().unwrap().contains_key(&file_str));
 
         fs::remove_file(&file).unwrap();
         let mut hook2 = RecordingHook::new();
-        let report = sync_workspace_with_hook(&ws, db.clone(), &mut hook2).unwrap();
+        let report = sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook2).unwrap();
 
         assert_eq!(report.removed, 1);
         assert_eq!(hook2.removed, vec![file_str.clone()]);
-        assert!(!db.file_mtimes().unwrap().contains_key(&file_str));
+        assert!(!track.mtimes().unwrap().contains_key(&file_str));
         assert_eq!(db.document_count().unwrap(), 0);
     }
 
     #[test]
     fn after_sweep_runs_exactly_once_per_call() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         fs::write(tmp.path().join("a.md"), "a").unwrap();
         fs::write(tmp.path().join("b.md"), "b").unwrap();
 
         let mut hook = RecordingHook::new();
-        sync_workspace_with_hook(&ws, db, &mut hook).unwrap();
+        sync_workspace_with_hook(&ws, db, &track, &mut hook).unwrap();
         assert_eq!(hook.after_sweep_count.get(), 1);
         assert_eq!(hook.changed.len(), 2);
     }
@@ -577,24 +589,24 @@ mod tests {
 
     #[test]
     fn hook_error_is_propagated_as_hook_variant() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         fs::write(tmp.path().join("a.md"), "a").unwrap();
         let mut hook = ErrorOnFirstChange;
-        let err = sync_workspace_with_hook(&ws, db, &mut hook).unwrap_err();
+        let err = sync_workspace_with_hook(&ws, db, &track, &mut hook).unwrap_err();
         assert!(matches!(err, SyncWithHookError::Hook(Boom)));
     }
 
     #[test]
     fn wrapper_preserves_legacy_signature_and_counts() {
-        let (tmp, ws, db) = make_workspace();
+        let (tmp, ws, db, track) = make_workspace();
         fs::write(tmp.path().join("a.md"), "a").unwrap();
         fs::write(tmp.path().join("b.md"), "b").unwrap();
 
-        let (up, rm) = sync_workspace_incremental(&ws, db.clone()).unwrap();
+        let (up, rm) = sync_workspace_incremental(&ws, db.clone(), &track).unwrap();
         assert_eq!((up, rm), (2, 0));
 
         fs::remove_file(tmp.path().join("a.md")).unwrap();
-        let (up2, rm2) = sync_workspace_incremental(&ws, db).unwrap();
+        let (up2, rm2) = sync_workspace_incremental(&ws, db, &track).unwrap();
         assert_eq!((up2, rm2), (0, 1));
     }
 }

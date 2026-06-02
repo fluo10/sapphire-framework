@@ -1,0 +1,17 @@
+[package]
+name = "sapphire-track"
+version.workspace = true
+edition.workspace = true
+description = "File-type-agnostic mtime-based file-change detection"
+license.workspace = true
+repository.workspace = true
+keywords = ["filesystem", "mtime", "change-detection", "cache"]
+categories = ["filesystem"]
+
+[dependencies]
+redb = "2"
+thiserror.workspace = true
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

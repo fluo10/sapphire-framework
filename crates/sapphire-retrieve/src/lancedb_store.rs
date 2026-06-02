@@ -8,7 +8,6 @@
 //!
 //! | table           | columns                                                                                          |
 //! |-----------------|--------------------------------------------------------------------------------------------------|
-//! | `files`         | `path Utf8, mtime Int64`                                                                         |
 //! | `documents`     | `id Int64, path Utf8`                                                                            |
 //! | `chunks_meta`   | `doc_id Int64, line_start Int32, line_end Int32, text Utf8, doc_path Utf8`                       |
 //! | `chunk_vectors` | `doc_id Int64, line_start Int32, line_end Int32, doc_path Utf8, text Utf8, embedding FixedSizeList<Float32>` |
@@ -61,19 +60,11 @@ pub fn data_dir(root: &Path) -> PathBuf {
 
 // ── table names ───────────────────────────────────────────────────────────────
 
-const TBL_FILES: &str = "files";
 const TBL_DOCUMENTS: &str = "documents";
 const TBL_CHUNKS_META: &str = "chunks_meta";
 const TBL_CHUNK_VECTORS: &str = "chunk_vectors";
 
 // ── Arrow schemas ─────────────────────────────────────────────────────────────
-
-fn files_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("path", DataType::Utf8, false),
-        Field::new("mtime", DataType::Int64, false),
-    ]))
-}
 
 fn documents_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -142,7 +133,6 @@ fn make_embedding_array(embeddings: &[Vec<f32>], dim: i32) -> Result<FixedSizeLi
 // ── async inner ───────────────────────────────────────────────────────────────
 
 struct LanceFullStore {
-    files: lancedb::Table,
     documents: lancedb::Table,
     chunks_meta: lancedb::Table,
     chunk_vectors: lancedb::Table,
@@ -157,72 +147,17 @@ impl LanceFullStore {
             .await?;
         let dim = embedding_dim as i32;
 
-        let files = open_or_create(&db, TBL_FILES, files_schema()).await?;
         let documents = open_or_create(&db, TBL_DOCUMENTS, documents_schema()).await?;
         let chunks_meta = open_or_create(&db, TBL_CHUNKS_META, chunks_meta_schema()).await?;
         let chunk_vectors =
             open_or_create(&db, TBL_CHUNK_VECTORS, chunk_vectors_schema(dim)).await?;
 
         Ok(Self {
-            files,
             documents,
             chunks_meta,
             chunk_vectors,
             dim,
         })
-    }
-
-    // ── file tracking ─────────────────────────────────────────────────────────
-
-    async fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        let batches: Vec<RecordBatch> = self.files.query().execute().await?.try_collect().await?;
-
-        let mut map = HashMap::new();
-        for batch in &batches {
-            let paths = batch
-                .column_by_name("path")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let mtimes = batch
-                .column_by_name("mtime")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            if let (Some(ps), Some(ms)) = (paths, mtimes) {
-                for i in 0..batch.num_rows() {
-                    map.insert(ps.value(i).to_owned(), ms.value(i));
-                }
-            }
-        }
-        Ok(map)
-    }
-
-    async fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        let schema = files_schema();
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec![path])),
-                Arc::new(Int64Array::from(vec![mtime])),
-            ],
-        )
-        .map_err(|e| Error::Embed(e.to_string()))?;
-
-        let mut merge = self.files.merge_insert(&["path"]);
-        merge
-            .when_matched_update_all(None)
-            .when_not_matched_insert_all();
-        merge
-            .execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
-            .await?;
-        Ok(())
-    }
-
-    async fn remove_file(&self, path: &str) -> Result<()> {
-        let safe = escape_sql_string(path);
-        self.files.delete(&format!("path = '{safe}'")).await?;
-        Ok(())
-    }
-
-    async fn file_count(&self) -> Result<u64> {
-        Ok(self.files.count_rows(None).await? as u64)
     }
 
     // ── document management ───────────────────────────────────────────────────
@@ -682,24 +617,6 @@ impl LanceDbBackend {
         Self::block_on_with(&self.rt, f)
     }
 
-    // ── file tracking ─────────────────────────────────────────────────────────
-
-    pub fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        self.block_on(self.inner.file_mtimes())
-    }
-
-    pub fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.block_on(self.inner.upsert_file(path, mtime))
-    }
-
-    pub fn remove_file(&self, path: &str) -> Result<()> {
-        self.block_on(self.inner.remove_file(path))
-    }
-
-    pub fn file_count(&self) -> Result<u64> {
-        self.block_on(self.inner.file_count())
-    }
-
     // ── document management ───────────────────────────────────────────────────
 
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
@@ -774,22 +691,6 @@ impl LanceDbBackend {
 // ── RetrieveStore impl ────────────────────────────────────────────────────────
 
 impl RetrieveStore for LanceDbBackend {
-    fn file_mtimes(&self) -> Result<HashMap<String, i64>> {
-        self.file_mtimes()
-    }
-
-    fn upsert_file(&self, path: &str, mtime: i64) -> Result<()> {
-        self.upsert_file(path, mtime)
-    }
-
-    fn remove_file(&self, path: &str) -> Result<()> {
-        self.remove_file(path)
-    }
-
-    fn file_count(&self) -> Result<u64> {
-        self.file_count()
-    }
-
     fn upsert_document(&self, doc: &Document) -> Result<()> {
         self.upsert_document(doc)
     }

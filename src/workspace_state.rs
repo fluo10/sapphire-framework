@@ -11,6 +11,7 @@ use sapphire_retrieve::{
 };
 #[cfg(feature = "sqlite-store")]
 use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
+use sapphire_track::TrackStore;
 use tokio::sync::OnceCell;
 
 use crate::{
@@ -56,6 +57,9 @@ pub struct RetrieveParams<'a> {
 pub struct WorkspaceState {
     pub workspace: Workspace,
     retrieve_db: Mutex<Arc<dyn RetrieveStore + Send + Sync>>,
+    /// mtime-based change-detection store (see [`sapphire_track`]). Unlike the
+    /// retrieve backend it is never swapped at runtime, so it needs no lock.
+    track_db: Arc<dyn TrackStore + Send + Sync>,
     embedder: OnceCell<Option<Box<dyn Embedder + Send + Sync>>>,
     sync_backend: Option<Box<dyn sapphire_sync::SyncBackend + Send + Sync>>,
 }
@@ -138,8 +142,10 @@ impl WorkspaceState {
     /// git repository.  Silently falls back to no backend if git is not found.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace);
+        let track_db = Self::open_initial_track(&workspace)?;
         let mut state = Self {
             retrieve_db: Mutex::new(backend),
+            track_db,
             workspace,
             embedder: OnceCell::new(),
             sync_backend: None,
@@ -160,9 +166,14 @@ impl WorkspaceState {
             use sapphire_retrieve::lancedb_store;
             let _ = std::fs::remove_dir_all(lancedb_store::data_dir(&workspace.cache_dir()));
         }
+        // Drop the mtime snapshot too, so the rebuilt retrieve index and the
+        // track store start from a consistent (empty) state.
+        let _ = std::fs::remove_file(workspace.track_db_path());
         let backend = Self::open_initial_backend(&workspace);
+        let track_db = Self::open_initial_track(&workspace)?;
         Ok(Self {
             retrieve_db: Mutex::new(backend),
+            track_db,
             workspace,
             embedder: OnceCell::new(),
             sync_backend: None,
@@ -324,6 +335,11 @@ impl WorkspaceState {
         Arc::clone(&*self.retrieve_db.lock().unwrap())
     }
 
+    /// Borrow the mtime change-detection store.
+    pub fn track_db(&self) -> &(dyn TrackStore + Send + Sync) {
+        self.track_db.as_ref()
+    }
+
     pub fn embedder(&self) -> Option<&dyn Embedder> {
         Some(self.embedder.get()?.as_ref()?.as_ref())
     }
@@ -350,15 +366,7 @@ impl WorkspaceState {
         let abs = resolved.as_path();
         let path_str = abs.to_string_lossy().into_owned();
 
-        let mtime = abs
-            .metadata()
-            .and_then(|m| m.modified())
-            .map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64
-            })
-            .unwrap_or(0);
+        let mtime = file_mtime_secs(abs);
 
         let body = std::fs::read_to_string(abs)?;
         let doc_id = path_to_doc_id(abs);
@@ -404,10 +412,12 @@ impl WorkspaceState {
             }
         };
 
+        // Index first, then record the mtime (see the atomicity note in
+        // `indexer::sync_inner`).
         let db = self.retrieve_db();
-        db.upsert_file(&path_str, mtime)?;
         db.upsert_document(&doc)?;
         db.rebuild_fts()?;
+        self.track_db().upsert(&path_str, mtime)?;
 
         if let Some(sync) = &self.sync_backend {
             sync.add_file(abs)?;
@@ -433,8 +443,8 @@ impl WorkspaceState {
 
         let db = self.retrieve_db();
         db.remove_document(doc_id)?;
-        db.remove_file(&path_str)?;
         db.rebuild_fts()?;
+        self.track_db().remove(&path_str)?;
 
         if let Some(sync) = &self.sync_backend {
             sync.remove_file(abs)?;
@@ -480,9 +490,11 @@ impl WorkspaceState {
             .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
 
         let db = self.retrieve_db();
-        db.upsert_file(&path_str, mtime).map_err(map_retrieve_err)?;
         db.upsert_document(&doc).map_err(map_retrieve_err)?;
         db.rebuild_fts().map_err(map_retrieve_err)?;
+        self.track_db()
+            .upsert(&path_str, mtime)
+            .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
 
         if let Some(sync) = &self.sync_backend {
             sync.add_file(abs)
@@ -515,8 +527,10 @@ impl WorkspaceState {
 
         let db = self.retrieve_db();
         db.remove_document(doc_id).map_err(map_retrieve_err)?;
-        db.remove_file(&path_str).map_err(map_retrieve_err)?;
         db.rebuild_fts().map_err(map_retrieve_err)?;
+        self.track_db()
+            .remove(&path_str)
+            .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
 
         if let Some(sync) = &self.sync_backend {
             sync.remove_file(abs)
@@ -736,7 +750,7 @@ impl WorkspaceState {
 
     /// Scan the workspace and incrementally sync all files into the retrieve DB.
     pub fn sync(&self) -> Result<(usize, usize)> {
-        sync_workspace(&self.workspace, self.retrieve_db())
+        sync_workspace(&self.workspace, self.retrieve_db(), self.track_db())
     }
 
     /// Run a mtime-based incremental retrieve cache refresh.
@@ -746,7 +760,7 @@ impl WorkspaceState {
     ///
     /// Returns `(upserted, removed)`.
     pub fn sync_retrieve(&self) -> Result<(usize, usize)> {
-        sync_workspace_incremental(&self.workspace, self.retrieve_db())
+        sync_workspace_incremental(&self.workspace, self.retrieve_db(), self.track_db())
     }
 
     /// Hook-aware full sync (counterpart of [`sync`](Self::sync)).
@@ -758,7 +772,7 @@ impl WorkspaceState {
         &self,
         hook: &mut H,
     ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-        sync_workspace_full_with_hook(&self.workspace, self.retrieve_db(), hook)
+        sync_workspace_full_with_hook(&self.workspace, self.retrieve_db(), self.track_db(), hook)
     }
 
     /// Hook-aware incremental sync (counterpart of
@@ -770,7 +784,7 @@ impl WorkspaceState {
         &self,
         hook: &mut H,
     ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-        sync_workspace_with_hook(&self.workspace, self.retrieve_db(), hook)
+        sync_workspace_with_hook(&self.workspace, self.retrieve_db(), self.track_db(), hook)
     }
 
     /// Run a full git sync cycle (commit → pull → push), if a sync backend is
@@ -798,7 +812,8 @@ impl WorkspaceState {
     ///
     /// Returns `(upserted, removed, embedded)`.
     pub async fn sync_and_embed(&self, retrieve: &RetrieveConfig) -> Result<(usize, usize, usize)> {
-        let (upserted, removed) = sync_workspace(&self.workspace, self.retrieve_db())?;
+        let (upserted, removed) =
+            sync_workspace(&self.workspace, self.retrieve_db(), self.track_db())?;
 
         let Some(embed_cfg) = retrieve.embedding.as_ref() else {
             return Ok((upserted, removed, 0));
@@ -932,6 +947,30 @@ impl WorkspaceState {
         {
             let _ = workspace;
             sapphire_retrieve::open_in_memory()
+        }
+    }
+
+    /// Create the mtime change-detection store appropriate for the compiled
+    /// features.
+    ///
+    /// Mirrors [`open_initial_backend`](Self::open_initial_backend): a
+    /// persistent redb store when a persistent retrieve backend is in use
+    /// (`sqlite-store`), otherwise an ephemeral in-memory store so the two
+    /// never drift (a persistent mtime snapshot paired with an empty in-memory
+    /// index would make changed files look unchanged).
+    fn open_initial_track(
+        workspace: &Workspace,
+    ) -> Result<Arc<dyn TrackStore + Send + Sync>> {
+        #[cfg(feature = "sqlite-store")]
+        {
+            Ok(Arc::new(sapphire_track::open_redb(
+                &workspace.track_db_path(),
+            )?))
+        }
+        #[cfg(not(feature = "sqlite-store"))]
+        {
+            let _ = workspace;
+            Ok(Arc::new(sapphire_track::open_in_memory()))
         }
     }
 
