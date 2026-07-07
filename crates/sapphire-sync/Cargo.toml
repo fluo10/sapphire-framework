@@ -1,0 +1,23 @@
+[package]
+name = "sapphire-sync"
+edition.workspace = true
+version.workspace = true
+description = "Git-based workspace synchronization library"
+license.workspace = true
+repository.workspace = true
+keywords = ["sync", "git", "workspace"]
+categories = ["filesystem"]
+
+[features]
+default = ["git"]
+git = ["dep:git2", "dep:dirs"]
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true, optional = true }
+git2 = { version = "0.21", default-features = false, features = ["ssh", "https"], optional = true }

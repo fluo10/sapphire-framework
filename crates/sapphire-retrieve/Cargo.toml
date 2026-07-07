@@ -1,0 +1,32 @@
+[package]
+name = "sapphire-retrieve"
+edition.workspace = true
+version.workspace = true
+description = "Document retrieval and semantic search library with SQLite (FTS5/sqlite-vec) and LanceDB backends"
+license.workspace = true
+repository.workspace = true
+keywords = ["search", "retrieval", "embeddings", "sqlite", "lancedb"]
+categories = ["database"]
+
+[features]
+default = ["sqlite-store", "lancedb-store", "fastembed-embed"]
+# SQLite FTS + sqlite-vec backend. Pulls in rusqlite / libsqlite3-sys.
+# Disable this feature to avoid the sqlite3 native-library link conflict when
+# another dependency (e.g. matrix-sdk-sqlite) already provides libsqlite3-sys.
+sqlite-store    = ["dep:rusqlite", "dep:sqlite-vec"]
+lancedb-store   = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:futures"]
+fastembed-embed = ["dep:fastembed"]
+
+[dependencies]
+thiserror.workspace = true
+rusqlite   = { workspace = true, optional = true }
+sqlite-vec = { version = "0.1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "3.3", features = ["json"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+lancedb = { version = "0.29", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+futures = { version = "0.3", optional = true }
+fastembed = { version = "5.13", optional = true }
