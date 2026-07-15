@@ -57,7 +57,6 @@ impl Default for HybridConfig {
 /// |--------------|----------------------------------------------------------|
 /// | `none`       | Vector search disabled (default, no extra dependencies)  |
 /// | `redb`       | Brute-force vectors in the pure-Rust redb cache (default backend) |
-/// | `sqlite_vec` | sqlite-vec extension, stored inside the SQLite cache DB  |
 /// | `lancedb`    | LanceDB — suitable for larger-scale / multimodal use     |
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -67,8 +66,6 @@ pub enum VectorDb {
     None,
     /// Brute-force vector search stored in the pure-Rust redb cache.
     Redb,
-    /// sqlite-vec extension stored in the existing SQLite cache database.
-    SqliteVec,
     /// LanceDB stored in a separate data directory alongside the cache.
     #[serde(rename = "lancedb")]
     LanceDb,
@@ -80,7 +77,6 @@ impl VectorDb {
         match self {
             VectorDb::None => "none",
             VectorDb::Redb => "redb",
-            VectorDb::SqliteVec => "sqlite_vec",
             VectorDb::LanceDb => "lancedb",
         }
     }
@@ -111,7 +107,7 @@ pub struct EmbeddingConfig {
     pub base_url: Option<String>,
 
     /// Output vector dimension of the model.
-    /// Required when `db = "sqlite_vec"`.
+    /// Required when `db` selects a vector backend (`redb` / `lancedb`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dimension: Option<u32>,
 }

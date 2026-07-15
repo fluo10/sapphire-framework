@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[cfg(feature = "sqlite-store")]
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
     #[cfg(feature = "redb-store")]
     #[error("redb error: {0}")]
     Redb(String),

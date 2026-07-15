@@ -36,10 +36,6 @@ pub enum Error {
     #[error("lancedb support is not compiled in (enable the `lancedb-store` feature)")]
     LanceDbNotEnabled,
 
-    /// SQLite store feature not compiled in.
-    #[error("sqlite-store support is not compiled in (enable the `sqlite-store` feature)")]
-    SqliteStoreNotEnabled,
-
     /// redb store feature not compiled in.
     #[error("redb-store support is not compiled in (enable the `redb-store` feature)")]
     RedbStoreNotEnabled,

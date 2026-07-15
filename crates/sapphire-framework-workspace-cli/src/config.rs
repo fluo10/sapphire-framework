@@ -34,7 +34,7 @@ use crate::WORKSPACE_CTX;
 /// remote = "origin"
 ///
 /// [retrieve]
-/// db = "sqlite_vec"
+/// db = "redb"
 ///
 /// [retrieve.embedding]
 /// enabled = true
@@ -96,7 +96,6 @@ impl UserConfig {
             .and_then(|v| match v.as_str() {
                 "none" => Some(VectorDb::None),
                 "redb" => Some(VectorDb::Redb),
-                "sqlite_vec" => Some(VectorDb::SqliteVec),
                 "lancedb" => Some(VectorDb::LanceDb),
                 _ => None,
             });

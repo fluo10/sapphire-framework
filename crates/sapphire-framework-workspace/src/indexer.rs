@@ -403,11 +403,11 @@ pub fn sync_workspace_incremental(
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, feature = "sqlite-store"))]
+#[cfg(all(test, feature = "redb-store"))]
 mod tests {
     use std::{cell::Cell, fs};
 
-    use sapphire_retrieve::open_sqlite_fts;
+    use sapphire_retrieve::open_redb;
     use tempfile::TempDir;
 
     use super::*;
@@ -431,8 +431,8 @@ mod tests {
         let root = tmp.path().to_path_buf();
         fs::create_dir_all(root.join(".indexer-hook-test")).unwrap();
         let workspace = Workspace::from_root(ctx(), &root).unwrap();
-        let db_path = root.join(".indexer-hook-test").join("retrieve.sqlite");
-        let db = open_sqlite_fts(&db_path);
+        let db_path = root.join(".indexer-hook-test").join("retrieve.db");
+        let db = open_redb(&db_path).unwrap();
         let track = sapphire_track::open_in_memory();
         (tmp, workspace, db, track)
     }
@@ -478,8 +478,11 @@ mod tests {
 
     #[test]
     fn hook_sees_changed_and_workspace_indexes_default() {
-        let (tmp, ws, db, track) = make_workspace();
-        let file = tmp.path().join("note.md");
+        let (_tmp, ws, db, track) = make_workspace();
+        // Build paths from the canonicalized workspace root, not the raw
+        // tempdir: the indexer walks `ws.root`, and on Windows canonicalization
+        // adds a `\\?\` prefix that would not match a raw tempdir path.
+        let file = ws.root.join("note.md");
         fs::write(&file, "hello world").unwrap();
 
         let mut hook = RecordingHook::new();
@@ -537,8 +540,8 @@ mod tests {
 
     #[test]
     fn removed_file_triggers_on_removed_before_db_delete() {
-        let (tmp, ws, db, track) = make_workspace();
-        let file = tmp.path().join("doomed.md");
+        let (_tmp, ws, db, track) = make_workspace();
+        let file = ws.root.join("doomed.md");
         fs::write(&file, "bye").unwrap();
 
         let mut hook = RecordingHook::new();

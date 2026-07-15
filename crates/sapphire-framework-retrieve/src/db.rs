@@ -19,17 +19,11 @@ use crate::{
     vector_store::VecInfo,
 };
 
-#[cfg(feature = "sqlite-store")]
-use crate::sqlite_store::SqliteStore;
-
 #[cfg(feature = "redb-store")]
 use crate::redb_store::RedbStore;
 
 #[cfg(feature = "lancedb-store")]
 use crate::lancedb_store::LanceDbBackend;
-
-#[cfg(feature = "sqlite-store")]
-pub use crate::sqlite_store::SCHEMA_VERSION;
 
 /// Derive the redb store directory for a given retrieve DB file path.
 ///
@@ -156,8 +150,6 @@ enum BackendState {
     InMemory(Arc<InMemoryStore>),
     #[cfg(feature = "redb-store")]
     Redb(Arc<RedbStore>),
-    #[cfg(feature = "sqlite-store")]
-    Sqlite(Arc<SqliteStore>),
     #[cfg(feature = "lancedb-store")]
     LanceDb(Arc<LanceDbBackend>),
 }
@@ -168,8 +160,6 @@ impl BackendState {
             BackendState::InMemory(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
             #[cfg(feature = "redb-store")]
             BackendState::Redb(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
-            #[cfg(feature = "sqlite-store")]
-            BackendState::Sqlite(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
             #[cfg(feature = "lancedb-store")]
             BackendState::LanceDb(l) => Arc::clone(l) as Arc<dyn RetrieveStore>,
         }
@@ -180,8 +170,6 @@ impl BackendState {
             BackendState::InMemory(_) => true,
             #[cfg(feature = "redb-store")]
             BackendState::Redb(s) => s.dim().is_none(),
-            #[cfg(feature = "sqlite-store")]
-            BackendState::Sqlite(s) => s.dim().is_none(),
             #[cfg(feature = "lancedb-store")]
             BackendState::LanceDb(_) => false,
         }
@@ -206,16 +194,7 @@ impl RetrieveDb {
             });
         }
 
-        #[cfg(all(not(feature = "redb-store"), feature = "sqlite-store"))]
-        {
-            let store = SqliteStore::new_fts_only(db_path.to_owned());
-            return Ok(Self {
-                db_path: db_path.to_owned(),
-                backend: Mutex::new(BackendState::Sqlite(Arc::new(store))),
-            });
-        }
-
-        #[cfg(all(not(feature = "redb-store"), not(feature = "sqlite-store")))]
+        #[cfg(not(feature = "redb-store"))]
         Ok(Self {
             db_path: db_path.to_owned(),
             backend: Mutex::new(BackendState::InMemory(Arc::new(InMemoryStore::new()))),
@@ -225,8 +204,6 @@ impl RetrieveDb {
     pub fn rebuild(db_path: &Path) -> Result<Self> {
         #[cfg(feature = "redb-store")]
         crate::redb_store::wipe_store(&redb_dir_for(db_path));
-        #[cfg(all(not(feature = "redb-store"), feature = "sqlite-store"))]
-        crate::sqlite_store::wipe_db_files(db_path);
         Self::open(db_path)
     }
 
@@ -237,16 +214,6 @@ impl RetrieveDb {
         if guard.needs_init() {
             let store = RedbStore::open(&redb_dir_for(&self.db_path), Some(embedding_dim))?;
             *guard = BackendState::Redb(Arc::new(store));
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "sqlite-store")]
-    pub fn init_sqlite_vec(&self, embedding_dim: u32) -> Result<()> {
-        let mut guard = self.backend.lock().unwrap();
-        if guard.needs_init() {
-            let store = SqliteStore::new_with_vec(self.db_path.clone(), embedding_dim)?;
-            *guard = BackendState::Sqlite(Arc::new(store));
         }
         Ok(())
     }
@@ -438,19 +405,6 @@ pub fn open_redb_vec(
     dim: u32,
 ) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
     Ok(Arc::new(RedbStore::open(&redb_dir_for(db_path), Some(dim))?))
-}
-
-#[cfg(feature = "sqlite-store")]
-pub fn open_sqlite_fts(db_path: &Path) -> Arc<dyn RetrieveStore + Send + Sync> {
-    Arc::new(SqliteStore::new_fts_only(db_path.to_owned()))
-}
-
-#[cfg(feature = "sqlite-store")]
-pub fn open_sqlite_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
-    Ok(Arc::new(SqliteStore::new_with_vec(
-        db_path.to_owned(),
-        dim,
-    )?))
 }
 
 #[cfg(feature = "lancedb-store")]

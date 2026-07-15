@@ -12,8 +12,6 @@ categories = ["filesystem", "database"]
 default = ["redb-store", "fastembed-embed", "git-sync"]
 # Pure-Rust cache backend (redb + tantivy). Default; no SQLite/libsqlite3-sys.
 redb-store      = ["sapphire-retrieve/redb-store"]
-# Legacy SQLite backend (opt-in). Pulls in rusqlite / libsqlite3-sys.
-sqlite-store    = ["sapphire-retrieve/sqlite-store"]
 lancedb-store   = ["sapphire-retrieve/lancedb-store"]
 fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 git-sync        = ["sapphire-sync/git"]

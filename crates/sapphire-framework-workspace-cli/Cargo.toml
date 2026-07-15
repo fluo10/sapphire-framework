@@ -14,7 +14,6 @@ path = "src/main.rs"
 [features]
 default = ["redb-store", "fastembed-embed", "git-sync"]
 redb-store      = ["sapphire-workspace/redb-store"]
-sqlite-store    = ["sapphire-workspace/sqlite-store"]
 lancedb-store   = ["sapphire-workspace/lancedb-store"]
 fastembed-embed = ["sapphire-workspace/fastembed-embed"]
 git-sync        = ["sapphire-workspace/git-sync"]

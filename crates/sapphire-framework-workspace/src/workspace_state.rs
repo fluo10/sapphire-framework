@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "sqlite-store")]
-use sapphire_retrieve::db::SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
 #[cfg(feature = "redb-store")]
@@ -11,8 +9,6 @@ use sapphire_retrieve::{
     Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
     RetrieveStore, TomlChunker, VectorQuery,
 };
-#[cfg(feature = "sqlite-store")]
-use sapphire_retrieve::{open_sqlite_fts, open_sqlite_vec};
 use sapphire_track::TrackStore;
 use tokio::sync::OnceCell;
 
@@ -161,8 +157,6 @@ impl WorkspaceState {
 
     /// Delete and recreate the retrieve DB from scratch.
     pub fn rebuild(workspace: Workspace) -> Result<Self> {
-        #[cfg(feature = "sqlite-store")]
-        sapphire_retrieve::sqlite_store::wipe_db_files(&workspace.retrieve_db_path());
         #[cfg(feature = "lancedb-store")]
         {
             use sapphire_retrieve::lancedb_store;
@@ -868,9 +862,6 @@ impl WorkspaceState {
         });
         Ok(DbInfo {
             db_path,
-            #[cfg(feature = "sqlite-store")]
-            schema_version: SCHEMA_VERSION,
-            #[cfg(not(feature = "sqlite-store"))]
             schema_version: 0,
             document_count,
             embedding_dim: vec_info.embedding_dim,
@@ -941,8 +932,8 @@ impl WorkspaceState {
 
     /// Create the initial (non-vector) backend appropriate for the compiled features.
     ///
-    /// Priority: pure-Rust redb+tantivy (`redb-store`, default) → SQLite
-    /// (`sqlite-store`) → ephemeral in-memory.
+    /// Priority: pure-Rust redb+tantivy (`redb-store`, default) → ephemeral
+    /// in-memory.
     fn open_initial_backend(
         workspace: &Workspace,
     ) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
@@ -950,11 +941,7 @@ impl WorkspaceState {
         {
             return Ok(open_redb(&workspace.retrieve_db_path())?);
         }
-        #[cfg(all(not(feature = "redb-store"), feature = "sqlite-store"))]
-        {
-            return Ok(open_sqlite_fts(&workspace.retrieve_db_path()));
-        }
-        #[cfg(all(not(feature = "redb-store"), not(feature = "sqlite-store")))]
+        #[cfg(not(feature = "redb-store"))]
         {
             let _ = workspace;
             Ok(sapphire_retrieve::open_in_memory())
@@ -966,19 +953,19 @@ impl WorkspaceState {
     ///
     /// Mirrors [`open_initial_backend`](Self::open_initial_backend): a
     /// persistent redb store when a persistent retrieve backend is in use
-    /// (`sqlite-store`), otherwise an ephemeral in-memory store so the two
+    /// (`redb-store`), otherwise an ephemeral in-memory store so the two
     /// never drift (a persistent mtime snapshot paired with an empty in-memory
     /// index would make changed files look unchanged).
     fn open_initial_track(
         workspace: &Workspace,
     ) -> Result<Arc<dyn TrackStore + Send + Sync>> {
-        #[cfg(any(feature = "redb-store", feature = "sqlite-store"))]
+        #[cfg(feature = "redb-store")]
         {
             Ok(Arc::new(sapphire_track::open_redb(
                 &workspace.track_db_path(),
             )?))
         }
-        #[cfg(not(any(feature = "redb-store", feature = "sqlite-store")))]
+        #[cfg(not(feature = "redb-store"))]
         {
             let _ = workspace;
             Ok(Arc::new(sapphire_track::open_in_memory()))
@@ -1012,13 +999,6 @@ impl WorkspaceState {
             )?)),
             #[cfg(not(feature = "redb-store"))]
             VectorDb::Redb => Err(crate::error::Error::RedbStoreNotEnabled),
-            #[cfg(feature = "sqlite-store")]
-            VectorDb::SqliteVec => Ok(Some(open_sqlite_vec(
-                &self.workspace.retrieve_db_path(),
-                dim,
-            )?)),
-            #[cfg(not(feature = "sqlite-store"))]
-            VectorDb::SqliteVec => Err(crate::error::Error::SqliteStoreNotEnabled),
             #[cfg(feature = "lancedb-store")]
             VectorDb::LanceDb => {
                 use sapphire_retrieve::lancedb_store;
@@ -1035,7 +1015,7 @@ impl WorkspaceState {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "sqlite-store")]
+    #[cfg(feature = "redb-store")]
     mod hook {
         use super::super::*;
         use crate::AppContext;
