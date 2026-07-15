@@ -11,52 +11,68 @@
 - crate を `git mv` で `sapphire-framework-*` にリネーム（rename として履歴追跡）:
   - `crates/sapphire-framework-track` / `-retrieve` / `-sync` / `-workspace`（旧ルートlib） / `-workspace-cli`
 - 依存宣言は Cargo の `package = "sapphire-framework-*"` エイリアスを使い、**コード内 extern 名（`sapphire_retrieve` 等）は不変**。
-- root `Cargo.toml` を純 `[workspace]` 化（version `0.1.0`）。`release-plz.toml` / `.github/workflows/release.yml` / `README.md` も新名へ。
+- root `Cargo.toml` を純 `[workspace]` 化（version `0.1.0`）。
 
 ### ✅ Phase 0c — キャッシュ SQLite 脱却（完了・検証済）
-- **`sapphire-framework-retrieve` に `RedbStore`（redb + tantivy + brute-force vectors）を実装し、既定バックエンドに。**
-  - `crates/sapphire-framework-retrieve/src/redb_store.rs`（新規、単体テスト2本付き）。
-  - redb=レコード保管、tantivy=trigram 転置インデックス（FTS5 trigram 相当・CJK対応・BM25）、ベクトルは redb 上を L2 で総当たり。
-  - 共有ヘルパー（`ChunkRow`/`group_by_file`/`vec_serialize`/`vec_deserialize`/`l2_distance`）を `src/vector_store.rs` に集約。
-- **feature 再編**: `redb-store`（既定）/ `sqlite-store`（optional-legacy）/ `lancedb-store` / `fastembed-embed`。
-  retrieve・workspace・workspace-cli の各 `Cargo.toml` の `default` から sqlite/lancedb を外し `redb-store` に。
-- `db.rs`: `BackendState::Redb` + `open`/`rebuild`/`init_redb_vec` + factory `open_redb`/`open_redb_vec`。
-- `config.rs`: `VectorDb::Redb` 追加。`workspace_state.rs`: `open_initial_backend`/`make_vector_backend`/`open_initial_track` を redb 優先に。
-- `workspace/src/error.rs`: `RedbStoreNotEnabled` 追加。`workspace/src/lib.rs`: `RETRIEVE_SCHEMA_VERSION` に redb 時 `0` のフォールバック。
+- `RedbStore`（redb + tantivy + brute-force vectors）を実装し既定バックエンドに。
+- **`sqlite-store` は optional 化ではなく削除した**（後述の落とし穴を参照）。
 
-### 検証結果（この時点で緑）
-- `cargo check --workspace`（default=redb-store）→ 成功（既存 dead_code 警告2件のみ: workspace-cli の `RecallServer.tool_router`）。
-- `cargo test -p sapphire-framework-retrieve --no-default-features --features redb-store` → **21 passed, 0 failed**（redb FTS/ベクトル/永続化の実挙動を含む）。
-- `cargo tree --workspace`（default）→ **libsqlite3-sys = 0 / rusqlite = 0**（SQLite 完全排除）、redb・tantivy 在り。
+### 🟡 Phase 1 — アプリ側差し替え（進行中）
 
-> ⚠️ 未実行: `lancedb-store` / `fastembed-embed` のフル default ビルド（fastembed=ONNX で重い）。
-> `fastembed-embed` は default に残っているので `cargo build --workspace`（check ではなく build）は ONNX ビルドで時間がかかる点に注意。
-> リネーム以外コードは変えていないので通る見込みだが未確認。
+| 項目 | 状態 |
+|---|---|
+| リモートを `sapphire-framework` にリネーム | ✅ 完了済（旧 `sapphire-workspace` リポジトリは消滅） |
+| 親 `project-sapphire` の `.gitmodules` 更新 | ✅ workspace エントリ削除・framework 登録済 |
+| framework の `sqlite-store` 削除 | ✅ ブランチ `feat/framework-migration` の `5b5d826` |
+| `sapphire-journal` の依存差し替え | ✅ ブランチ `feat/framework-migration`（journal リポジトリ側） |
+| `sapphire-agent` の依存差し替え | ✅ ブランチ `feat/framework-migration`（agent リポジトリ側） |
+| `sapphire-ledger` を framework 初依存に | ⬜ **未着手**（何を使わせるかの設計から） |
+| journal `cache.rs`（entries/tags）の redb 化 | ⬜ **未着手** |
+| crates.io へ publish | ⬜ 未着手（アプリは暫定で git 依存） |
 
-## 現在のリポジトリ状態
+### 検証結果（この時点で緑・Windows ホストで実施）
+- framework: `cargo check --workspace --all-targets` → 既存 dead_code 警告2件のみ。
+  `cargo test -p sapphire-framework-retrieve --no-default-features --features redb-store` → **21 passed**。
+  `cargo test -p sapphire-framework-workspace` → **15 passed**。`cargo tree --workspace` → **libsqlite3-sys / rusqlite = 0**。
+- journal: `cargo check --workspace` 緑・全テストパス。`cargo tree -i libsqlite3-sys` → **grain-id / 自前 cache.rs 由来の単一系統のみ**。
+- agent: `cargo check --workspace` 緑。**`cargo tree -i libsqlite3-sys` → matrix-sdk-sqlite 由来の単一系統のみ**（Phase 1 の受け入れ条件を達成）。
 
-- ブランチ: `main`。マージコミット（旧 workspace 履歴取り込み）まではコミット済み。
-- **Phase 0a/0c の変更は作業ツリー（未コミット or 引継ぎ用の単一コミット、下記参照）にある。**
-  `git status` / `git log` で確認。
-- `.gitmodules`（親 project-sapphire 側）の framework 登録・workspace 削除は**未実施**（Phase 1 で行う）。
+## いまの依存の繋ぎ方（重要）
 
-## 次にやること — Phase 1
+アプリは framework を **git 依存**で参照している（crates.io 未公開のため）:
 
-1. **旧 `sapphire-workspace` の後始末**: リモートを `sapphire-framework` にリネーム（GitHub 設定）。
-   親 `project-sapphire` の `.gitmodules` を framework 追加・workspace 削除に更新。
-2. **`sapphire-framework-retrieve` の DocStore/VectorStore 論理仕上げ**: 現状 `RetrieveStore` 一枚に統合済み。
-   同期層で「Change はドキュメントのみ運ぶ（vectors 非同期）」を守る前提。trait を物理分割する必要は当面なし（ユーザー合意）。
-3. **アプリ側の依存差し替え**（別リポジトリ）:
-   - `sapphire-journal`（`sapphire-journal-core` 他）・`sapphire-agent` の `sapphire-workspace = "0.12.1"` を
-     `{ package = "sapphire-framework-workspace", version = "0.1", ... }` などへ（extern 名 `sapphire_workspace` は維持できる）。
-   - **journal-core `cache.rs`（rusqlite 直使用）を redb 化**（journal も SQLite を落とす方向。journal は matrix 非依存なので急がないが方針として）。
-   - `sapphire-ledger` を framework 初依存に。
-   - 各アプリの feature 既定から sqlite/lancedb を外し redb に寄せる。agent は既に lancedb 使用なので据え置き可。
-4. 検証: 3アプリ native `cargo build/test`。agent の matrix 共存で `cargo tree -i libsqlite3-sys` が matrix 由来の単一系統のみになること。
+```toml
+sapphire-workspace = { package = "sapphire-framework-workspace",
+                       git = "https://github.com/fluo10/sapphire-framework",
+                       branch = "feat/framework-migration", default-features = false }
+```
+
+- **アプリは crates.io に publish できない**（git 依存が含まれるため）。publish 前に framework を publish → version 依存へ差し替えが必要。
+- **framework 側を直した場合、push しないとアプリ側に反映されない**。ローカルで回すときは各アプリの root `Cargo.toml` に
+  一時的な `[patch."https://github.com/fluo10/sapphire-framework"]`（sibling submodule への path）を入れると速い。**コミットしないこと**。
+
+## 次にやること
+
+1. **`sapphire-ledger` を framework 初依存に**。ledger は現状 framework 依存ゼロ。何を使わせるか（workspace / retrieve / sync）の設計から。
+2. **journal `cache.rs`（entries/tags の SQLite キャッシュ）の redb 化**。journal から SQLite を落とすには
+   **grain-id の `rusqlite` feature も外す**必要がある（現在 `grain-id = { version = "0.15", features = ["serde", "rusqlite", "schemars"] }`）。
+3. `feat/framework-migration` の **PR 作成 → main へマージ**（PR は未作成）。
+4. crates.io へ `sapphire-framework-*` 0.1.0 を publish → アプリを version 依存へ。
 
 ## 落とし穴メモ
 
-- **tantivy 0.24** / **redb 2.6** 使用。tantivy の trigram は `NgramTokenizer(3,3,false)`＋`LowerCaser`。3文字未満クエリは無マッチ（FTS5 trigram と同じ）。
+- **Cargo は feature が無効な optional 依存もバージョン解決し、`links` 衝突を検査する。**
+  これが `sqlite-store` を optional で残せなかった理由（詳細は ARCHITECTURE.md）。同種の C ライブラリを足すときは同じ罠に注意。
+- **`redb-store` を切ると永続ストアが消えて in-memory にフォールバックする**（エラーにならない）。
+  `lancedb-store` はベクトル索引しか担わないので、**単独で有効にしても FTS/レコードは揮発する**。agent が実際にこの状態だったので既定に `redb-store` を追加した。
+- **agent は `#![recursion_limit = "256"]` が必要**（`src/main.rs`）。framework 経由で redb/tantivy が型グラフに入ると、
+  matrix-sdk の E2EE future の `Send` 証明が既定の再帰上限を超える。
+- **tantivy 0.24** / **redb 2.6**。trigram は `NgramTokenizer(3,3,false)`＋`LowerCaser`。3文字未満クエリは無マッチ（FTS5 trigram と同じ）。
+- **`RedbStore` は開いている間 tantivy の `IndexWriter`（50MB budget）を保持し続ける**（`redb_store.rs` の `index.writer(50_000_000)`）。
+  読み取り専用でも常駐し、writer ロックを握るので同一ストアを複数プロセスから開けない。将来の改善候補。
+- **ベクトル検索は全チャンクのスコアを一旦 Vec に貯めて全体ソートしている**（`search_similar`）。O(N) メモリ・O(N log N)。
+  `over_fetch` 件の `BinaryHeap` にすれば O(k) にできる。10万チャンクで約2.4MB なので実害は小さい。
+- **Windows: `Workspace::from_root` は root を canonicalize する**（`\\?\` UNC 接頭辞が付く）。
+  テストでパスを比較するときは `tmp.path()` ではなく `ws.root` 起点で組むこと。
 - rust-analyzer の cfg 判定が feature 再編で一時的にズレることがある。**権威は `cargo check --manifest-path <framework>/Cargo.toml`**。
-- このホストは低スペック VM。`cargo build`（特に fastembed/lancedb/tantivy 初回）は重い。`cargo check` と feature 限定（`--no-default-features --features redb-store`）で回すのが速い。
 - シェルの cwd がたまに親 `project-sapphire`（Cargo.toml 無し）に戻る。`--manifest-path` 指定が安全。
