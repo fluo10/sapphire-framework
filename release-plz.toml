@@ -13,26 +13,30 @@ pr_labels = ["release"]
 
 # メイン crate がタグと GitHub release を担当する。
 [[package]]
-name = "sapphire-workspace"
+name = "sapphire-framework-workspace"
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
-version_group = "workspace"
+version_group = "framework"
 
 [[package]]
-name = "sapphire-retrieve"
-version_group = "workspace"
+name = "sapphire-framework-retrieve"
+version_group = "framework"
 
 [[package]]
-name = "sapphire-sync"
-version_group = "workspace"
+name = "sapphire-framework-sync"
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-track"
+version_group = "framework"
 
 # CLI は Cargo.toml 側で publish = false かつ独自バージョン管理なので
 # release-plz の対象外。Cargo.toml の publish 設定と整合させるため
 # publish も明示的に false にする。
 [[package]]
-name = "sapphire-workspace-cli"
+name = "sapphire-framework-workspace-cli"
 release = false
 publish = false
 

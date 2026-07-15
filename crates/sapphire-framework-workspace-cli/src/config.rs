@@ -95,6 +95,7 @@ impl UserConfig {
             .ok()
             .and_then(|v| match v.as_str() {
                 "none" => Some(VectorDb::None),
+                "redb" => Some(VectorDb::Redb),
                 "sqlite_vec" => Some(VectorDb::SqliteVec),
                 "lancedb" => Some(VectorDb::LanceDb),
                 _ => None,

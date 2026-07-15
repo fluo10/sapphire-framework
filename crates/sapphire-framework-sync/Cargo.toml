@@ -1,5 +1,5 @@
 [package]
-name = "sapphire-sync"
+name = "sapphire-framework-sync"
 edition.workspace = true
 version.workspace = true
 description = "Git-based workspace synchronization library"

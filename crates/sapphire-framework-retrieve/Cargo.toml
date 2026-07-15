@@ -1,0 +1,42 @@
+[package]
+name = "sapphire-framework-retrieve"
+edition.workspace = true
+version.workspace = true
+description = "Document retrieval and semantic search library with a pure-Rust redb+tantivy backend (SQLite/LanceDB optional)"
+license.workspace = true
+repository.workspace = true
+keywords = ["search", "retrieval", "embeddings", "redb", "tantivy"]
+categories = ["database"]
+
+[features]
+# Default is the pure-Rust redb + tantivy backend (no SQLite / libsqlite3-sys),
+# so downstream binaries are never tied to another crate's rusqlite version
+# (e.g. matrix-sdk-sqlite in sapphire-agent).
+default = ["redb-store", "fastembed-embed"]
+# Pure-Rust cache backend: redb (record storage) + tantivy (full-text index) +
+# brute-force vector search. No C dependencies.
+redb-store      = ["dep:redb", "dep:tantivy"]
+# Legacy SQLite FTS5 + sqlite-vec backend. Pulls in rusqlite / libsqlite3-sys;
+# only enable in binaries that don't also link another libsqlite3-sys major.
+sqlite-store    = ["dep:rusqlite", "dep:sqlite-vec"]
+lancedb-store   = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:futures"]
+fastembed-embed = ["dep:fastembed"]
+
+[dependencies]
+thiserror.workspace = true
+redb       = { version = "2", optional = true }
+tantivy    = { version = "0.24", optional = true }
+rusqlite   = { workspace = true, optional = true }
+sqlite-vec = { version = "0.1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "3.3", features = ["json"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+lancedb = { version = "0.29", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+futures = { version = "0.3", optional = true }
+fastembed = { version = "5.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

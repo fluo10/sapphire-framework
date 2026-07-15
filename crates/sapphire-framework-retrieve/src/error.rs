@@ -5,6 +5,12 @@ pub enum Error {
     #[cfg(feature = "sqlite-store")]
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[cfg(feature = "redb-store")]
+    #[error("redb error: {0}")]
+    Redb(String),
+    #[cfg(feature = "redb-store")]
+    #[error("tantivy error: {0}")]
+    Tantivy(String),
     #[error("embedding error: {0}")]
     Embed(String),
     #[error("I/O error: {0}")]

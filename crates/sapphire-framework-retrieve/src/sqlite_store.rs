@@ -18,7 +18,7 @@
 //! The SQLite schema version is stored in `PRAGMA user_version`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Once,
 };
@@ -29,8 +29,8 @@ use crate::{
     chunker::chunk_document,
     embed::Embedder,
     error::{Error, Result},
-    retrieve_store::{ChunkHit, Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
-    vector_store::{Chunk, VecInfo, vec_serialize},
+    retrieve_store::{Document, FileSearchResult, FtsQuery, RetrieveStore, VectorQuery},
+    vector_store::{Chunk, ChunkRow, VecInfo, group_by_file, vec_serialize},
 };
 
 // ── schema ────────────────────────────────────────────────────────────────────
@@ -417,15 +417,6 @@ fn ensure_vec_tables(conn: &Connection, dim: u32) -> Result<()> {
 
 // ── chunk row / grouping helpers ─────────────────────────────────────────────
 
-struct ChunkRow {
-    doc_id: i64,
-    path: String,
-    line_start: usize,
-    line_end: usize,
-    text: String,
-    score: f64,
-}
-
 fn map_chunk_row(row: &rusqlite::Row) -> rusqlite::Result<ChunkRow> {
     Ok(ChunkRow {
         doc_id: row.get::<_, i64>(0)?,
@@ -437,59 +428,6 @@ fn map_chunk_row(row: &rusqlite::Row) -> rusqlite::Result<ChunkRow> {
     })
 }
 
-/// Group chunk-level rows by `doc_id` into `FileSearchResult`s.
-///
-/// `is_better(a, b)` returns true when score `a` is better than `b` (used
-/// both for picking the representative score and for sorting files).  The
-/// chunks within each file are sorted by the same comparator.
-fn group_by_file<F>(rows: Vec<ChunkRow>, limit: usize, is_better: F) -> Vec<FileSearchResult>
-where
-    F: Fn(f64, f64) -> bool + Copy,
-{
-    let mut by_doc: HashMap<i64, FileSearchResult> = HashMap::new();
-
-    for r in rows {
-        let entry = by_doc.entry(r.doc_id).or_insert_with(|| FileSearchResult {
-            id: r.doc_id,
-            path: r.path.clone(),
-            score: r.score,
-            chunks: Vec::new(),
-        });
-        if is_better(r.score, entry.score) {
-            entry.score = r.score;
-        }
-        entry.chunks.push(ChunkHit {
-            line_start: r.line_start,
-            line_end: r.line_end,
-            text: r.text,
-            score: r.score,
-        });
-    }
-
-    let mut files: Vec<FileSearchResult> = by_doc.into_values().collect();
-    for f in &mut files {
-        f.chunks.sort_by(|a, b| {
-            if is_better(a.score, b.score) {
-                std::cmp::Ordering::Less
-            } else if is_better(b.score, a.score) {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
-    }
-    files.sort_by(|a, b| {
-        if is_better(a.score, b.score) {
-            std::cmp::Ordering::Less
-        } else if is_better(b.score, a.score) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
-    files.truncate(limit);
-    files
-}
 
 // ── chunk helpers ─────────────────────────────────────────────────────────────
 

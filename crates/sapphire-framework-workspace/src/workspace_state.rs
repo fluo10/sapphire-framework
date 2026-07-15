@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use sapphire_retrieve::db::SCHEMA_VERSION;
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
+#[cfg(feature = "redb-store")]
+use sapphire_retrieve::{open_redb, open_redb_vec};
 use sapphire_retrieve::{
     Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
     RetrieveStore, TomlChunker, VectorQuery,
@@ -141,7 +143,7 @@ impl WorkspaceState {
     /// [`sapphire_sync::GitSync`] backend if the workspace root is inside a
     /// git repository.  Silently falls back to no backend if git is not found.
     pub fn open(workspace: Workspace) -> Result<Self> {
-        let backend = Self::open_initial_backend(&workspace);
+        let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
         let mut state = Self {
             retrieve_db: Mutex::new(backend),
@@ -169,7 +171,7 @@ impl WorkspaceState {
         // Drop the mtime snapshot too, so the rebuilt retrieve index and the
         // track store start from a consistent (empty) state.
         let _ = std::fs::remove_file(workspace.track_db_path());
-        let backend = Self::open_initial_backend(&workspace);
+        let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
         Ok(Self {
             retrieve_db: Mutex::new(backend),
@@ -938,15 +940,24 @@ impl WorkspaceState {
     // ── private helpers ───────────────────────────────────────────────────────
 
     /// Create the initial (non-vector) backend appropriate for the compiled features.
-    fn open_initial_backend(workspace: &Workspace) -> Arc<dyn RetrieveStore + Send + Sync> {
-        #[cfg(feature = "sqlite-store")]
+    ///
+    /// Priority: pure-Rust redb+tantivy (`redb-store`, default) → SQLite
+    /// (`sqlite-store`) → ephemeral in-memory.
+    fn open_initial_backend(
+        workspace: &Workspace,
+    ) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
+        #[cfg(feature = "redb-store")]
         {
-            open_sqlite_fts(&workspace.retrieve_db_path())
+            return Ok(open_redb(&workspace.retrieve_db_path())?);
         }
-        #[cfg(not(feature = "sqlite-store"))]
+        #[cfg(all(not(feature = "redb-store"), feature = "sqlite-store"))]
+        {
+            return Ok(open_sqlite_fts(&workspace.retrieve_db_path()));
+        }
+        #[cfg(all(not(feature = "redb-store"), not(feature = "sqlite-store")))]
         {
             let _ = workspace;
-            sapphire_retrieve::open_in_memory()
+            Ok(sapphire_retrieve::open_in_memory())
         }
     }
 
@@ -961,13 +972,13 @@ impl WorkspaceState {
     fn open_initial_track(
         workspace: &Workspace,
     ) -> Result<Arc<dyn TrackStore + Send + Sync>> {
-        #[cfg(feature = "sqlite-store")]
+        #[cfg(any(feature = "redb-store", feature = "sqlite-store"))]
         {
             Ok(Arc::new(sapphire_track::open_redb(
                 &workspace.track_db_path(),
             )?))
         }
-        #[cfg(not(feature = "sqlite-store"))]
+        #[cfg(not(any(feature = "redb-store", feature = "sqlite-store")))]
         {
             let _ = workspace;
             Ok(Arc::new(sapphire_track::open_in_memory()))
@@ -994,6 +1005,13 @@ impl WorkspaceState {
     ) -> Result<Option<Arc<dyn RetrieveStore + Send + Sync>>> {
         match vector_db {
             VectorDb::None => Ok(None),
+            #[cfg(feature = "redb-store")]
+            VectorDb::Redb => Ok(Some(open_redb_vec(
+                &self.workspace.retrieve_db_path(),
+                dim,
+            )?)),
+            #[cfg(not(feature = "redb-store"))]
+            VectorDb::Redb => Err(crate::error::Error::RedbStoreNotEnabled),
             #[cfg(feature = "sqlite-store")]
             VectorDb::SqliteVec => Ok(Some(open_sqlite_vec(
                 &self.workspace.retrieve_db_path(),

@@ -56,6 +56,7 @@ impl Default for HybridConfig {
 /// | Variant      | Description                                              |
 /// |--------------|----------------------------------------------------------|
 /// | `none`       | Vector search disabled (default, no extra dependencies)  |
+/// | `redb`       | Brute-force vectors in the pure-Rust redb cache (default backend) |
 /// | `sqlite_vec` | sqlite-vec extension, stored inside the SQLite cache DB  |
 /// | `lancedb`    | LanceDB — suitable for larger-scale / multimodal use     |
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -64,6 +65,8 @@ pub enum VectorDb {
     /// Vector search is disabled. No embedding model is required.
     #[default]
     None,
+    /// Brute-force vector search stored in the pure-Rust redb cache.
+    Redb,
     /// sqlite-vec extension stored in the existing SQLite cache database.
     SqliteVec,
     /// LanceDB stored in a separate data directory alongside the cache.
@@ -76,6 +79,7 @@ impl VectorDb {
     pub fn as_str(self) -> &'static str {
         match self {
             VectorDb::None => "none",
+            VectorDb::Redb => "redb",
             VectorDb::SqliteVec => "sqlite_vec",
             VectorDb::LanceDb => "lancedb",
         }
