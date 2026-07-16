@@ -1,17 +1,18 @@
 [workspace]
-members = [
-    "crates/sapphire-sync",
-    "crates/sapphire-retrieve",
-    "crates/sapphire-track",
-    "crates/sapphire-workspace-cli",
-]
 resolver = "3"
+members = [
+    "crates/sapphire-framework-track",
+    "crates/sapphire-framework-retrieve",
+    "crates/sapphire-framework-sync",
+    "crates/sapphire-framework-workspace",
+    "crates/sapphire-framework-workspace-cli",
+]
 
 [workspace.package]
-version = "0.12.1"
-description = "Workspace management library for indexing, search, and sync of file-based documents"
+version = "0.1.0"
+description = "Local-first framework for file-based workspaces: indexing, search, sync, remote and WASM backends"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/fluo10/sapphire-workspace"
+repository = "https://github.com/fluo10/sapphire-framework"
 edition = "2024"
 
 [workspace.dependencies]
@@ -20,7 +21,6 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 indexmap = { version = "2", features = ["serde"] }
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
 schemars = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,38 +34,3 @@ dirs = "5"
 
 [profile.dev.package."*"]
 opt-level = 1
-
-[package]
-name = "sapphire-workspace"
-edition.workspace = true
-version.workspace = true
-description.workspace = true
-license.workspace = true
-repository.workspace = true
-keywords = ["workspace", "markdown", "search", "sync"]
-categories = ["filesystem", "database"]
-
-[features]
-default = ["sqlite-store", "lancedb-store", "fastembed-embed", "git-sync"]
-sqlite-store    = ["sapphire-retrieve/sqlite-store"]
-lancedb-store   = ["sapphire-retrieve/lancedb-store"]
-fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
-git-sync        = ["sapphire-sync/git"]
-
-[dependencies]
-sapphire-retrieve = { version = "0.12.1", path = "crates/sapphire-retrieve", default-features = false }
-sapphire-sync     = { version = "0.12.1", path = "crates/sapphire-sync", default-features = false }
-sapphire-track    = { version = "0.12.1", path = "crates/sapphire-track" }
-thiserror.workspace = true
-serde.workspace = true
-toml.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tracing.workspace = true
-indexmap.workspace = true
-walkdir = "2"
-uuid.workspace = true
-chrono = { workspace = true }
-md-5 = "0.11"
-
-[dev-dependencies]
-tempfile = "3"

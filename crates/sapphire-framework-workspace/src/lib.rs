@@ -20,8 +20,10 @@ pub use workspace::{DEFAULT_WORKSPACE_MARKER, path_uuid};
 pub use workspace_state::{DbInfo, RetrieveParams, SearchMode, WorkspaceState};
 
 // Re-export sapphire-retrieve public API so callers can use a single dependency.
-#[cfg(feature = "sqlite-store")]
-pub use sapphire_retrieve::db::SCHEMA_VERSION as RETRIEVE_SCHEMA_VERSION;
+/// Retrieve cache schema version. Retained for API compatibility with the
+/// retired SQLite backend; the pure-Rust redb backend manages its own on-disk
+/// format, so this is always `0`.
+pub const RETRIEVE_SCHEMA_VERSION: i32 = 0;
 #[cfg(feature = "lancedb-store")]
 pub use sapphire_retrieve::lancedb_store;
 pub use sapphire_retrieve::{

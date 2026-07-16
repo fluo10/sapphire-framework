@@ -27,7 +27,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use sapphire_retrieve::chunker::{Chunker, JsonlChunker, MarkdownChunker};
+//! use sapphire_framework_retrieve::chunker::{Chunker, JsonlChunker, MarkdownChunker};
 //!
 //! let md = MarkdownChunker;
 //! let chunks = md.chunk("My note", "First paragraph.\n\nSecond paragraph.");

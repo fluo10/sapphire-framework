@@ -1,0 +1,35 @@
+[package]
+name = "sapphire-framework-workspace"
+edition.workspace = true
+version.workspace = true
+description = "Workspace management library for indexing, search, and sync of file-based documents"
+license.workspace = true
+repository.workspace = true
+keywords = ["workspace", "markdown", "search", "sync"]
+categories = ["filesystem", "database"]
+
+[features]
+default = ["redb-store", "fastembed-embed", "git-sync"]
+# Pure-Rust cache backend (redb + tantivy). Default; no SQLite/libsqlite3-sys.
+redb-store      = ["sapphire-retrieve/redb-store"]
+lancedb-store   = ["sapphire-retrieve/lancedb-store"]
+fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
+git-sync        = ["sapphire-sync/git"]
+
+[dependencies]
+sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.1.0", path = "../sapphire-framework-retrieve", default-features = false }
+sapphire-sync     = { package = "sapphire-framework-sync", version = "0.1.0", path = "../sapphire-framework-sync", default-features = false }
+sapphire-track    = { package = "sapphire-framework-track", version = "0.1.0", path = "../sapphire-framework-track" }
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+indexmap.workspace = true
+walkdir = "2"
+uuid.workspace = true
+chrono = { workspace = true }
+md-5 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,5 +1,5 @@
 [package]
-name = "sapphire-workspace-cli"
+name = "sapphire-framework-workspace-cli"
 edition.workspace = true
 version = "0.1.0"
 description.workspace = true
@@ -12,14 +12,14 @@ name = "sapphire-workspace"
 path = "src/main.rs"
 
 [features]
-default = ["sqlite-store", "lancedb-store", "fastembed-embed", "git-sync"]
-sqlite-store    = ["sapphire-workspace/sqlite-store"]
+default = ["redb-store", "fastembed-embed", "git-sync"]
+redb-store      = ["sapphire-workspace/redb-store"]
 lancedb-store   = ["sapphire-workspace/lancedb-store"]
 fastembed-embed = ["sapphire-workspace/fastembed-embed"]
 git-sync        = ["sapphire-workspace/git-sync"]
 
 [dependencies]
-sapphire-workspace = { version = "0.12.1", path = "../..", default-features = false }
+sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.1.0", path = "../sapphire-framework-workspace", default-features = false }
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

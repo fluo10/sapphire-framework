@@ -1,9 +1,12 @@
-# sapphire-workspace
+# sapphire-framework
 
-Workspace management library for indexing, search, and sync of Markdown documents.
+Local-first framework for file-based workspaces: indexing, search, sync, and (planned)
+remote / WASM backends. Formerly published as `sapphire-workspace`; the reusable crates
+now live here under the `sapphire-framework-*` prefix.
 
-`sapphire-workspace` ties together [`sapphire-retrieve`] (full-text + vector search) and
-[`sapphire-sync`] (git-based synchronisation) into a single, ergonomic API.
+The `sapphire-framework-workspace` crate ties together `sapphire-framework-retrieve`
+(full-text + vector search) and `sapphire-framework-sync` (git-based synchronisation)
+into a single, ergonomic API.
 
 ## Features
 

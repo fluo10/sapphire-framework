@@ -57,14 +57,17 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
 
             match retrieve.db {
                 VectorDb::None => {}
-                VectorDb::SqliteVec => {
+                VectorDb::Redb => {
                     if embed_cfg.dimension.is_some() {
                         state
                             .load_retrieve_backend(&config.retrieve)
                             .map_err(anyhow::Error::msg)?;
                         match state.retrieve_db().vec_info() {
                             Ok(vi) => {
-                                println!("vector backend: sqlite_vec (dim={})", vi.embedding_dim);
+                                println!(
+                                    "vector backend: redb (brute-force, dim={})",
+                                    vi.embedding_dim
+                                );
                                 println!(
                                     "vectors:        {} indexed, {} pending",
                                     vi.vector_count, vi.pending_count
@@ -73,7 +76,7 @@ pub fn run(workspace_dir: Option<&Path>) -> Result<()> {
                             Err(e) => eprintln!("warn: could not read vector stats: {e}"),
                         }
                     } else {
-                        println!("vector backend: sqlite_vec (dimension not configured)");
+                        println!("vector backend: redb (dimension not configured)");
                     }
                 }
                 #[cfg(feature = "lancedb-store")]

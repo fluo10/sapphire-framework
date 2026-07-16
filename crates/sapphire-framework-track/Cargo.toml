@@ -1,5 +1,5 @@
 [package]
-name = "sapphire-track"
+name = "sapphire-framework-track"
 version.workspace = true
 edition.workspace = true
 description = "File-type-agnostic mtime-based file-change detection"

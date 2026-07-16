@@ -193,20 +193,12 @@ impl Workspace {
         self.ctx.cache_dir().join(self.uuid.to_string())
     }
 
-    /// Path to the SQLite retrieve database file.
+    /// Base path identifying the retrieve cache.
     ///
-    /// The filename is versioned when the `sqlite-store` feature is enabled so
-    /// that schema upgrades are detected automatically.  When only `lancedb-store`
-    /// (or no storage feature) is compiled in, the file is never actually opened
-    /// for SQLite, so a fixed name is used.
+    /// The redb backend derives its own store directory from this path
+    /// (`retrieve.redb/`) rather than opening the file itself, so a fixed name
+    /// is used.
     pub fn retrieve_db_path(&self) -> PathBuf {
-        #[cfg(feature = "sqlite-store")]
-        {
-            use sapphire_retrieve::db::SCHEMA_VERSION;
-            self.cache_dir()
-                .join(format!("retrieve_v{SCHEMA_VERSION}.db"))
-        }
-        #[cfg(not(feature = "sqlite-store"))]
         self.cache_dir().join("retrieve.db")
     }
 
