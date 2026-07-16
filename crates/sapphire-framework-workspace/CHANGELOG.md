@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [0.1.0](https://github.com/fluo10/sapphire-framework/releases/tag/sapphire-framework-retrieve-v0.1.0) - 2026-07-16
+## [0.1.0](https://github.com/fluo10/sapphire-framework/releases/tag/v0.1.0) - 2026-07-16
 
 ### Added
 

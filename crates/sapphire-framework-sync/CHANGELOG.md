@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.1.0](https://github.com/fluo10/sapphire-framework/releases/tag/sapphire-framework-sync-v0.1.0) - 2026-07-16
+
+### Added
+
+- migrate sapphire-workspace into sapphire-framework; pure-Rust redb+tantivy cache
+
 ## [0.12.1](https://github.com/fluo10/sapphire-workspace/compare/sapphire-sync-v0.12.0...sapphire-sync-v0.12.1) - 2026-05-24
 
 ### Fixed
