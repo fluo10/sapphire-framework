@@ -20,6 +20,24 @@ use crate::{BackendEvent, Result, SyncSummary, WorkspaceBackend};
 /// this far behind observe a lagged receiver rather than blocking producers.
 const EVENT_CAPACITY: usize = 128;
 
+/// Run a search against a [`WorkspaceState`] (blocking). Shared by
+/// [`LocalBackend`] and the remote backend's local cache so both search the
+/// same way.
+pub(crate) fn search_state(
+    state: &WorkspaceState,
+    query: &str,
+    limit: usize,
+    mode: SearchMode,
+) -> sapphire_workspace::Result<Vec<FileSearchResult>> {
+    let params = RetrieveParams {
+        query,
+        limit,
+        mode,
+        folder: None,
+    };
+    state.retrieve_files(&params, &HybridConfig::default())
+}
+
 /// A [`WorkspaceBackend`] backed by a local [`WorkspaceState`].
 pub struct LocalBackend {
     state: Arc<WorkspaceState>,
@@ -54,16 +72,8 @@ impl WorkspaceBackend for LocalBackend {
     ) -> Result<Vec<FileSearchResult>> {
         let state = Arc::clone(&self.state);
         let query = query.to_owned();
-        let hits = tokio::task::spawn_blocking(move || {
-            let params = RetrieveParams {
-                query: &query,
-                limit,
-                mode,
-                folder: None,
-            };
-            state.retrieve_files(&params, &HybridConfig::default())
-        })
-        .await??;
+        let hits =
+            tokio::task::spawn_blocking(move || search_state(&state, &query, limit, mode)).await??;
         Ok(hits)
     }
 

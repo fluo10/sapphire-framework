@@ -23,5 +23,7 @@ tracing.workspace = true
 chrono = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.1.0", path = "../sapphire-framework-remote-server" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+axum.workspace = true
 tempfile = "3"
