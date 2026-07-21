@@ -141,6 +141,9 @@ impl WorkspaceState {
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
+        // `state` is only mutated to attach a git backend, so without the
+        // `git-sync` feature the binding is never modified.
+        #[cfg_attr(not(feature = "git-sync"), allow(unused_mut))]
         let mut state = Self {
             retrieve_db: Mutex::new(backend),
             track_db,

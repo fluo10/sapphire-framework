@@ -27,13 +27,20 @@ use tokio::sync::broadcast;
 mod error;
 mod local;
 mod remote;
+mod source;
 
 pub use error::{Error, Result};
 pub use local::LocalBackend;
 pub use remote::RemoteBackend;
+pub use source::{DEFAULT_WS, WorkspaceLocator, WorkspaceSource};
 
-// Re-export the search mode + result types so callers depend only on this crate.
-pub use sapphire_workspace::{FileSearchResult, SearchMode};
+// Re-export the search mode + result types (and the underlying state, which the
+// factory needs) so callers depend only on this crate.
+pub use sapphire_workspace::{FileSearchResult, SearchMode, WorkspaceState};
+
+// Re-export the remote client so callers can build a `WorkspaceSource::Remote`
+// without a separate dependency.
+pub use sapphire_remote_client::RemoteClient;
 
 /// Result of a sync cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
