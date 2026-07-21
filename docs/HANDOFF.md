@@ -59,9 +59,17 @@
 ### 🟡 Phase 2 — 非同期 Backend（framework 側・完了 / journal GUI は残）
 
 - `sapphire-framework-backend`: `WorkspaceBackend`（async）+ `BackendEvent`（broadcast）+
-  `LocalBackend`（`WorkspaceState` を `spawn_blocking`）/ `RemoteBackend`（JSON-RPC 経由）。2 passed。
+  `LocalBackend`（`WorkspaceState` を `spawn_blocking`）/ `RemoteBackend`。
+- **`RemoteBackend` はローカルキャッシュ鏡写し（#86 Step A・完了）**: read/list/search はキャッシュ（オフライン可・
+  ローカル FTS）、write はキャッシュ適用→push、`sync` は pull→キャッシュ適用。`WorkspaceLocator`（path か
+  `http(s)://…#ws`）→ `WorkspaceSource::into_backend()` で local/remote を統一。9 passed（E2E 含む）。
 - **残**: `sapphire-journal` desktop GUI を `JournalBackend`（entries 粒度）へリファクタ → **別リポジトリ・別 PR**。
   framework を push（or path patch）してから消費すること。
+
+### 次の実装単位（#86 のロードマップ）
+
+- **Step B（timer）**: `TimerState`/CLI を `WorkspaceBackend`＋`WorkspaceLocator` 経由へ。`--remote <url>` でリモートWSを開く → バイナリ① CLI。
+- 以降 Step C（GUI）/ D（WASM 有効化）/ E（WASM frontend）/ F（server 静的配信）。
 
 ## 検証台: sapphire-timer
 
