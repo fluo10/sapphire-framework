@@ -1,8 +1,12 @@
 use std::path::Path;
 
+pub mod change_source;
 pub mod config;
 pub mod devices;
 mod error;
+pub use change_source::{Change, ChangeKind, ChangeSource, Cursor, PullBatch, PushOutcome, Snapshot};
+#[cfg(feature = "git")]
+pub use change_source::GitChangeSource;
 pub use config::{SyncBackendKind, SyncConfig};
 pub use devices::{DeviceContext, DeviceDefaults, DeviceRecord, DeviceRegistry, MergeOutcome};
 pub use error::{Error, Result};

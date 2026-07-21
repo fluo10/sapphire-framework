@@ -1,0 +1,27 @@
+[package]
+name = "sapphire-framework-backend"
+version.workspace = true
+edition.workspace = true
+description = "Async GUI-facing backend trait (local + remote) over a sapphire-framework workspace"
+license.workspace = true
+repository.workspace = true
+keywords = ["backend", "async", "gui", "workspace"]
+categories = ["asynchronous"]
+
+[features]
+default = ["redb-store"]
+redb-store = ["sapphire-workspace/redb-store"]
+
+[dependencies]
+sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.1.0", path = "../sapphire-framework-workspace", default-features = false }
+sapphire-remote-client = { package = "sapphire-framework-remote-client", version = "0.1.0", path = "../sapphire-framework-remote-client" }
+sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.1.0", path = "../sapphire-framework-rpc" }
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

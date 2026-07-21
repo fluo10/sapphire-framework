@@ -34,6 +34,12 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    /// A [`ChangeSource`](crate::ChangeSource) backed by a remote transport
+    /// failed. Carries the transport-layer message (e.g. a JSON-RPC error) so
+    /// the low-level `sync` crate need not depend on the client crate.
+    #[error("remote change source error: {0}")]
+    Remote(String),
+
     #[cfg(feature = "git")]
     #[error(transparent)]
     Git(#[from] git2::Error),

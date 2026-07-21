@@ -2,10 +2,20 @@
 # 公開クレートはすべて統一バージョン（workspace.package.version）で運用する。
 # 既存タグ運用に合わせて、ワークスペース全体で 1 つの `v{version}` タグと
 # GitHub release だけを作る。crates.io publish は各クレート個別に行う。
+#
+# ── リリースは当面停止中（2026-07 時点） ──────────────────────────────────
+# framework は移行フェーズの途中で API 安定前。アプリは crates.io ではなく
+# git 依存で framework を参照している（docs/HANDOFF.md 参照）ため、当面は
+# 自動 publish を止める。`release = false` でワークスペース全体の
+# 「バージョン bump PR のマージ → crates.io publish / タグ / GitHub release」
+# を無効化する。既存 0.1.0（workspace/sync/retrieve/track）は publish 済みで
+# あり、その再 publish も含めて起きない。
+# リリースを再開するときは `release = true` に戻し、そのタイミングで未公開
+# crate（下記 release=false の面々）を publish 対象に加える。
 changelog_update = true
 dependencies_update = true
-publish = true
-release = true
+publish = false
+release = false
 git_release_enable = false
 git_tag_enable = false
 pr_branch_prefix = "release-plz/"
@@ -39,6 +49,34 @@ version_group = "framework"
 name = "sapphire-framework-workspace-cli"
 release = false
 publish = false
+
+# ── Phase 2/3 で追加した新規クレート（crates.io 未公開・API 安定前） ──────
+# ワークスペース全体の release を再開（`[workspace] release = true`）しても、
+# これらが準備できるまで勝手に publish されないよう個別に明示 false にする。
+# 公開する準備ができたクレートから、この release=false を外していく。
+#
+# 注意: 公開済みの `sapphire-framework-sync` は `sapphire-framework-rpc` に
+# 依存するようになった。sync を再 publish する際は rpc も同時に publish
+# 対象へ戻さないと `cargo publish` が「rpc が crates.io に無い」で失敗する。
+[[package]]
+name = "sapphire-framework-rpc"
+release = false
+
+[[package]]
+name = "sapphire-framework-blob"
+release = false
+
+[[package]]
+name = "sapphire-framework-remote-server"
+release = false
+
+[[package]]
+name = "sapphire-framework-remote-client"
+release = false
+
+[[package]]
+name = "sapphire-framework-backend"
+release = false
 
 [changelog]
 # 既存 CHANGELOG.md のヘッダーをそのまま維持し、新規エントリは

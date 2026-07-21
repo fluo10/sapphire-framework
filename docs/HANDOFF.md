@@ -40,6 +40,29 @@
 - timer: `cargo tree -i libsqlite3-sys` / `rusqlite` → **該当なし**（rusqlite ゼロの最初のアプリ）。
   TOML/JSONL チャンカーの実地稼働・横断検索・JSONL 追記安定性を実測で確認済み。
 
+### ✅ Phase 3 — remote 同期基盤（framework 側・完了・検証済 / 2026-07-20）
+
+新規 crate（すべて `cargo check --workspace --all-targets` 緑・テスト緑）:
+
+| crate | 内容 | テスト |
+|---|---|---|
+| `sapphire-framework-rpc` | serde-only 共有型 + JSON-RPC エンベロープ（wasm-safe） | 9 passed |
+| `sapphire-framework-blob` | `BlobStore` + `FsBlobStore`（sha256・content-addressed） | 5 passed |
+| `sapphire-framework-remote-server` | axum 単一 `POST /rpc`。origin+redb cache+change_log+blob | 10 + 結合 6 passed |
+| `sapphire-framework-remote-client` | reqwest JSON-RPC client + `RemoteChangeSource` | 結合 3 passed |
+| `sapphire-framework-sync`（追記） | `ChangeSource` trait + `GitChangeSource` | 16 passed |
+
+- change_log = redb `seq(u64)->Change(json)`。cursor=最後の seq。push は LWW(`updated_at`)+conflict 検出。
+- 結合テスト: `remote-server/tests/rpc.rs`（tower oneshot）・`remote-client/tests/roundtrip.rs`（実 `axum::serve` へ 1 往復）。
+- **SQLite ゼロ維持**: `cargo tree --workspace -i libsqlite3-sys` / `rusqlite` → 該当なし。
+
+### 🟡 Phase 2 — 非同期 Backend（framework 側・完了 / journal GUI は残）
+
+- `sapphire-framework-backend`: `WorkspaceBackend`（async）+ `BackendEvent`（broadcast）+
+  `LocalBackend`（`WorkspaceState` を `spawn_blocking`）/ `RemoteBackend`（JSON-RPC 経由）。2 passed。
+- **残**: `sapphire-journal` desktop GUI を `JournalBackend`（entries 粒度）へリファクタ → **別リポジトリ・別 PR**。
+  framework を push（or path patch）してから消費すること。
+
 ## 検証台: sapphire-timer
 
 `sapphire-timer` は framework の消費面のうち他アプリが触っていない部分を叩くために作った最小の実アプリ:
