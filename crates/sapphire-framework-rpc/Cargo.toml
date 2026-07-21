@@ -1,0 +1,17 @@
+[package]
+name = "sapphire-framework-rpc"
+version.workspace = true
+edition.workspace = true
+description = "Serde-only shared types for the sapphire-framework remote sync JSON-RPC protocol"
+license.workspace = true
+repository.workspace = true
+keywords = ["json-rpc", "sync", "protocol", "serde"]
+categories = ["encoding", "data-structures"]
+
+# Intentionally dependency-light and wasm-safe: no tokio, no reqwest, no I/O.
+# Both the remote client and server share these definitions.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true }
+uuid = { workspace = true }

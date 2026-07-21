@@ -1,0 +1,16 @@
+[package]
+name = "sapphire-framework-blob"
+version.workspace = true
+edition.workspace = true
+description = "Content-addressed binary blob storage abstraction (BlobStore) for sapphire-framework"
+license.workspace = true
+repository.workspace = true
+keywords = ["blob", "content-addressed", "storage", "sha256"]
+categories = ["filesystem"]
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

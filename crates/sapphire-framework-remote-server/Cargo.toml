@@ -1,0 +1,28 @@
+[package]
+name = "sapphire-framework-remote-server"
+version.workspace = true
+edition.workspace = true
+description = "axum JSON-RPC remote sync/search server for sapphire-framework (file origin + redb cache + change log)"
+license.workspace = true
+repository.workspace = true
+keywords = ["sync", "server", "json-rpc", "axum"]
+categories = ["web-programming::http-server"]
+
+[dependencies]
+sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.1.0", path = "../sapphire-framework-rpc" }
+sapphire-blob = { package = "sapphire-framework-blob", version = "0.1.0", path = "../sapphire-framework-blob" }
+sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.1.0", path = "../sapphire-framework-retrieve", default-features = false, features = ["redb-store"] }
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+chrono = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tempfile = "3"
+http-body-util = "0.1"
