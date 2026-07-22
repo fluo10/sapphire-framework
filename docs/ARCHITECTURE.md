@@ -78,6 +78,7 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 
 | crate | 役割 | 状態 |
 |---|---|---|
+| `sapphire-framework` | **単一依存ファサード**（bevy 方式・feature で各モジュール re-export）。骨格導入済（#95） | ✅ 骨格 |
 | `sapphire-framework-track` | mtime 変更検知 `TrackStore`（redb） | ✅ 移設済 |
 | `sapphire-framework-retrieve` | 検索。`RetrieveStore` + `RedbStore`(redb+tantivy) 既定。sqlite/lancedb は optional | ✅ 移設+redb実装済 |
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済（#90 で git/自動同期/device を撤去） |

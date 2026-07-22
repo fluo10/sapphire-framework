@@ -66,6 +66,11 @@ release = false
 name = "sapphire-framework-backend"
 release = false
 
+# 単一依存ファサード（#95）。骨格導入時点では未公開。
+[[package]]
+name = "sapphire-framework"
+release = false
+
 [changelog]
 # 既存 CHANGELOG.md のヘッダーをそのまま維持し、新規エントリは
 # このヘッダーの下に挿入される（既存履歴は保持される）。
