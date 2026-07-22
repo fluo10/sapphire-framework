@@ -9,7 +9,7 @@
 ### ✅ Phase 0 — framework scaffold（完了・検証済）
 - 旧 `sapphire-workspace` の全履歴（183コミット）を `git merge --allow-unrelated-histories` で取り込み。
 - crate を `git mv` で `sapphire-framework-*` にリネーム（rename として履歴追跡）:
-  - `crates/sapphire-framework-track` / `-retrieve` / `-sync` / `-workspace`（旧ルートlib） / `-workspace-cli`
+  - `crates/sapphire-framework-track` / `-retrieve` / `-sync` / `-workspace`（旧ルートlib）
 - 依存宣言は Cargo の `package = "sapphire-framework-*"` エイリアスを使い、**コード内 extern 名（`sapphire_retrieve` 等）は不変**。
 - root `Cargo.toml` を純 `[workspace]` 化（version `0.1.0`）。
 

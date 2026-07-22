@@ -80,7 +80,6 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 | `sapphire-framework-retrieve` | 検索。`RetrieveStore` + `RedbStore`(redb+tantivy) 既定。sqlite/lancedb は optional | ✅ 移設+redb実装済 |
 | `sapphire-framework-sync` | 同期抽象 `SyncBackend` + 新 `ChangeSource`（git/remote 2実装） | ✅ 移設済 / ✅ ChangeSource(+`GitChangeSource`) |
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済 |
-| `sapphire-framework-workspace-cli` | rmcp ベース MCP サーバ含む参照 CLI | ✅ 移設済 |
 | `sapphire-framework-rpc` | client/server 共有 JSON-RPC 型/メソッド定義（serde-only・wasm-safe） | ✅ |
 | `sapphire-framework-remote-client` | JSON-RPC 差分同期クライアント（reqwest, `RemoteChangeSource`） | ✅ |
 | `sapphire-framework-remote-server` | axum JSON-RPC 同期/検索サーバ（v1=ファイル原本+redb cache+change_log） | ✅ |
