@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use sapphire_framework_remote_client::{RemoteChangeSource, RemoteClient};
+use sapphire_framework_remote_client::RemoteClient;
 use sapphire_remote_server::{ServerState, router};
 use sapphire_rpc::Change;
-use sapphire_sync::ChangeSource as _;
 
 /// Start a server on an ephemeral port and return its base URL + tempdir guard.
 async fn start_server(token: Option<&str>) -> (tempfile::TempDir, String) {
@@ -49,28 +48,6 @@ async fn client_push_pull_blob_search_roundtrip() {
     // search
     let hits = client.search_fts(ws, "quick", 5).await.unwrap();
     assert!(hits.iter().any(|h| h.path == "note.md"), "got {hits:?}");
-}
-
-#[tokio::test]
-async fn remote_change_source_implements_trait() {
-    let (_tmp, url) = start_server(None).await;
-    let source = RemoteChangeSource::new(RemoteClient::new(url), "cs-ws");
-
-    // snapshot on an empty workspace.
-    let snap = source.snapshot().await.unwrap();
-    assert_eq!(snap.cursor, 0);
-    assert!(snap.docs.is_empty());
-
-    // push through the ChangeSource abstraction, then pull it back.
-    let out = source
-        .push(0, vec![Change::upsert("a.md", "body", chrono::Utc::now())])
-        .await
-        .unwrap();
-    assert_eq!(out.cursor, 1);
-
-    let batch = source.pull(0, 10).await.unwrap();
-    assert_eq!(batch.changes.len(), 1);
-    assert_eq!(batch.changes[0].path, "a.md");
 }
 
 #[tokio::test]

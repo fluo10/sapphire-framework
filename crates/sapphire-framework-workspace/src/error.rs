@@ -53,9 +53,6 @@ pub enum Error {
     Retrieve(#[from] sapphire_retrieve::Error),
 
     #[error(transparent)]
-    Sync(#[from] sapphire_sync::Error),
-
-    #[error(transparent)]
     Track(#[from] sapphire_track::Error),
 
     #[error(transparent)]

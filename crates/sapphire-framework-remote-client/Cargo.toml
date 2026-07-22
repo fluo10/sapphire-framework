@@ -2,7 +2,7 @@
 name = "sapphire-framework-remote-client"
 version.workspace = true
 edition.workspace = true
-description = "JSON-RPC remote sync client + RemoteChangeSource for sapphire-framework"
+description = "JSON-RPC remote sync client for sapphire-framework"
 license.workspace = true
 repository.workspace = true
 keywords = ["sync", "client", "json-rpc", "reqwest"]
@@ -10,10 +10,8 @@ categories = ["web-programming::http-client"]
 
 [dependencies]
 sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.1.0", path = "../sapphire-framework-rpc" }
-sapphire-sync = { package = "sapphire-framework-sync", version = "0.1.0", path = "../sapphire-framework-sync", default-features = false }
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt"] }
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true

@@ -49,8 +49,7 @@
 | `sapphire-framework-rpc` | serde-only 共有型 + JSON-RPC エンベロープ（wasm-safe） | 9 passed |
 | `sapphire-framework-blob` | `BlobStore` + `FsBlobStore`（sha256・content-addressed） | 5 passed |
 | `sapphire-framework-remote-server` | axum 単一 `POST /rpc`。origin+redb cache+change_log+blob | 10 + 結合 6 passed |
-| `sapphire-framework-remote-client` | reqwest JSON-RPC client + `RemoteChangeSource` | 結合 3 passed |
-| `sapphire-framework-sync`（追記） | `ChangeSource` trait + `GitChangeSource` | 16 passed |
+| `sapphire-framework-remote-client` | reqwest JSON-RPC client | 結合 3 passed |
 
 - change_log = redb `seq(u64)->Change(json)`。cursor=最後の seq。push は LWW(`updated_at`)+conflict 検出。
 - 結合テスト: `remote-server/tests/rpc.rs`（tower oneshot）・`remote-client/tests/roundtrip.rs`（実 `axum::serve` へ 1 往復）。
@@ -119,7 +118,6 @@ sapphire-workspace = { package = "sapphire-framework-workspace",
   `over_fetch` 件の `BinaryHeap` にすれば O(k) にできる。10万チャンクで約2.4MB なので実害は小さい。
 - **アプリは独自 `Chunker` を差し込めない**（#82）。拡張子→チャンカーが `indexer.rs` と `workspace_state.rs` に二重ハードコード。
   `JsonlChunker` のキー候補はチャット特化（`mes`/`content`/`message`/`text`）で、それ以外は raw フォールバック。
-- **`GitSync` のマージは whole-file・タイムスタンプ勝ちでデータを黙って捨てる**（#83）。追記専用ファイルでは片側の追記が丸ごと消える。
 - **マーカー作成ヘルパが無い / `is_indexable_path` が `pub(crate)`**（#84）。3アプリが同じ init を写経している。
 - **Windows: `Workspace::from_root` は root を canonicalize する**（`\\?\` UNC 接頭辞が付く）。
   そのままユーザーに表示すると `\\?\C:\...` になるので、CLI 側で剥がすこと（timer の `commands::show_path` が例）。

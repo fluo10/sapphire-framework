@@ -35,10 +35,6 @@ name = "sapphire-framework-retrieve"
 version_group = "framework"
 
 [[package]]
-name = "sapphire-framework-sync"
-version_group = "framework"
-
-[[package]]
 name = "sapphire-framework-track"
 version_group = "framework"
 
@@ -47,9 +43,9 @@ version_group = "framework"
 # これらが準備できるまで勝手に publish されないよう個別に明示 false にする。
 # 公開する準備ができたクレートから、この release=false を外していく。
 #
-# 注意: 公開済みの `sapphire-framework-sync` は `sapphire-framework-rpc` に
-# 依存するようになった。sync を再 publish する際は rpc も同時に publish
-# 対象へ戻さないと `cargo publish` が「rpc が crates.io に無い」で失敗する。
+# 注意: 既に publish 済みの framework crate（workspace/retrieve/track）は
+# 未公開の `sapphire-framework-rpc` に依存しうる。これらを再 publish する際は
+# rpc も同時に publish 対象へ戻さないと `cargo publish` が失敗する。
 [[package]]
 name = "sapphire-framework-rpc"
 release = false

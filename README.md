@@ -4,9 +4,10 @@ Local-first framework for file-based workspaces: indexing, search, sync, and (pl
 remote / WASM backends. Formerly published as `sapphire-workspace`; the reusable crates
 now live here under the `sapphire-framework-*` prefix.
 
-The `sapphire-framework-workspace` crate ties together `sapphire-framework-retrieve`
-(full-text + vector search) and `sapphire-framework-sync` (git-based synchronisation)
-into a single, ergonomic API.
+The `sapphire-framework-workspace` crate ties `sapphire-framework-retrieve`
+(full-text + vector search) into a single, ergonomic API over file-based
+documents. Concurrent editing is handled by the central remote server
+(`sapphire-framework-remote-*`), not by local auto-sync; git is used manually.
 
 ## Features
 
@@ -14,8 +15,6 @@ into a single, ergonomic API.
 |---|---|---|
 | `lancedb-store` | LanceDB vector backend for semantic search | yes |
 | `fastembed-embed` | On-device embedding via FastEmbed | yes |
-| `sqlite-store` | SQLite FTS5 + sqlite-vec backend | yes |
-| `git-sync` | Git-based workspace synchronisation via `sapphire-sync` | yes |
 
 ## Quick start
 
@@ -119,13 +118,8 @@ Place `config.toml` inside the marker directory
 (`.sapphire-workspace/config.toml`):
 
 ```toml
-[sync]
-backend  = "git"   # "auto" | "git" | "none"
-remote   = "origin"
-branch   = "main"
-
 [retrieve]
-db = "lancedb"   # "none" | "sqlite_vec" | "lancedb"
+db = "redb"   # "none" | "redb" | "lancedb"
 
 [retrieve.embedding]
 enabled     = true
@@ -163,5 +157,4 @@ processes:
 Licensed under either of [MIT](../LICENSE-MIT) or [Apache-2.0](../LICENSE-APACHE) at your option.
 
 [`sapphire-retrieve`]: ../sapphire-retrieve
-[`sapphire-sync`]: ../sapphire-sync
 [UUIDv8]: https://www.rfc-editor.org/rfc/rfc9562#name-uuid-version-8

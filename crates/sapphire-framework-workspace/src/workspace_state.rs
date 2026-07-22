@@ -59,7 +59,6 @@ pub struct WorkspaceState {
     /// retrieve backend it is never swapped at runtime, so it needs no lock.
     track_db: Arc<dyn TrackStore + Send + Sync>,
     embedder: OnceCell<Option<Box<dyn Embedder + Send + Sync>>>,
-    sync_backend: Option<Box<dyn sapphire_sync::SyncBackend + Send + Sync>>,
 }
 
 /// Database statistics returned by [`WorkspaceState::db_info`].
@@ -134,28 +133,15 @@ fn canonicalize_or_parent(path: &Path) -> std::io::Result<PathBuf> {
 
 impl WorkspaceState {
     /// Open (or create) the retrieve DB for `workspace`.
-    ///
-    /// When the `git-sync` feature is enabled, automatically attaches a
-    /// [`sapphire_sync::GitSync`] backend if the workspace root is inside a
-    /// git repository.  Silently falls back to no backend if git is not found.
     pub fn open(workspace: Workspace) -> Result<Self> {
         let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
-        // `state` is only mutated to attach a git backend, so without the
-        // `git-sync` feature the binding is never modified.
-        #[cfg_attr(not(feature = "git-sync"), allow(unused_mut))]
-        let mut state = Self {
+        Ok(Self {
             retrieve_db: Mutex::new(backend),
             track_db,
             workspace,
             embedder: OnceCell::new(),
-            sync_backend: None,
-        };
-        #[cfg(feature = "git-sync")]
-        if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
-            state.set_sync_backend(Box::new(git));
-        }
-        Ok(state)
+        })
     }
 
     /// Delete and recreate the retrieve DB from scratch.
@@ -175,155 +161,7 @@ impl WorkspaceState {
             track_db,
             workspace,
             embedder: OnceCell::new(),
-            sync_backend: None,
         })
-    }
-
-    /// Open workspace and configure the sync backend from [`SyncConfig`].
-    ///
-    /// - `SyncBackendKind::Auto` (default) — same as [`open`](Self::open):
-    ///   attach git if a repository is found, silently no-op otherwise.
-    /// - `SyncBackendKind::Git` — attach git with the configured remote;
-    ///   returns an error if no repository is found.
-    /// - `SyncBackendKind::None` — disable sync even inside a git repository.
-    ///
-    /// The device context is pulled from the workspace's
-    /// [`AppContext`](crate::AppContext) automatically.  When it is
-    /// available, the git backend tags every auto-sync commit with the
-    /// device id and the `<marker>/devices.jsonl` registry is merged
-    /// with the context (see
-    /// [`DeviceRegistry::merge_device_context`](sapphire_sync::DeviceRegistry::merge_device_context)).
-    /// Any resulting change is saved and staged so the next
-    /// [`sync`](sapphire_sync::SyncBackend::sync) picks it up, and the
-    /// merged record's `(name, updated_at)` is propagated back to the
-    /// context via
-    /// [`update_device_name_if_newer`](crate::AppContext::update_device_name_if_newer).
-    #[cfg(feature = "git-sync")]
-    pub fn open_configured(workspace: Workspace, sync: &crate::config::SyncConfig) -> Result<Self> {
-        use crate::config::SyncBackendKind;
-        let device_ctx = workspace.ctx.device();
-        let device_id = device_ctx.as_ref().map(|c| c.id);
-        let mut state = Self::open(workspace)?;
-        match sync.backend {
-            SyncBackendKind::Auto => {
-                // Re-create the backend so we can apply the device_id commit message.
-                if let Ok(git) = sapphire_sync::GitSync::open(&state.workspace.root) {
-                    state.set_sync_backend(Box::new(Self::apply_device_id(git, device_id)));
-                }
-            }
-            SyncBackendKind::Git => {
-                // Explicit git: use the configured remote and fail hard if
-                // no repository is found.
-                let git =
-                    sapphire_sync::GitSync::with_remote(&state.workspace.root, sync.remote())?;
-                state.set_sync_backend(Box::new(Self::apply_device_id(git, device_id)));
-            }
-            SyncBackendKind::None => {
-                // Explicitly disabled: remove whatever `open` may have set.
-                state.sync_backend = None;
-            }
-        }
-        if let Some(ctx) = device_ctx {
-            state.merge_device_registry(&ctx)?;
-        }
-        Ok(state)
-    }
-
-    /// Merge the per-process device context into this workspace's
-    /// `devices.jsonl`: save+stage the file if anything changed, then
-    /// propagate the merged record's `(name, updated_at)` back to the
-    /// app context so that sibling workspaces opened later observe it.
-    /// Errors from the sync backend's `add_file` are demoted to
-    /// warnings — the registry itself is still consistent on disk.
-    #[cfg(feature = "git-sync")]
-    fn merge_device_registry(&self, ctx: &sapphire_sync::DeviceContext) -> Result<()> {
-        let path = self.workspace.marker_dir().join("devices.jsonl");
-        let mut registry = sapphire_sync::DeviceRegistry::load(&path)?;
-        let outcome = registry.merge_device_context(ctx);
-        if outcome.changed {
-            registry.save()?;
-            if let Some(backend) = self.sync_backend()
-                && let Err(e) = backend.add_file(&path)
-            {
-                tracing::warn!("could not stage devices.jsonl: {e}");
-            }
-        }
-        self.workspace
-            .ctx
-            .update_device_name_if_newer(&outcome.record.name, outcome.record.updated_at);
-        Ok(())
-    }
-
-    /// Rename this device in the workspace's registry, bump
-    /// `updated_at`, save + stage the file via the sync backend, and
-    /// propagate the new `(name, updated_at)` back to the app context.
-    ///
-    /// Fails if the device context hasn't been initialised (e.g. the
-    /// UUID could not be persisted) or if the current device isn't
-    /// already in the registry — the usual caller
-    /// ([`open_configured`](Self::open_configured)) ensures both.
-    #[cfg(feature = "git-sync")]
-    pub fn rename_device(&self, name: &str) -> Result<()> {
-        let id = self
-            .workspace
-            .ctx
-            .device()
-            .ok_or_else(|| {
-                Error::Sync(sapphire_sync::Error::DeviceNotFound {
-                    id: uuid::Uuid::nil(),
-                })
-            })?
-            .id;
-        let path = self.workspace.marker_dir().join("devices.jsonl");
-        let mut registry = sapphire_sync::DeviceRegistry::load(&path)?;
-        registry.set_name(id, name)?;
-        registry.save()?;
-        let record = registry.lookup(id).expect("just wrote this record").clone();
-        self.workspace
-            .ctx
-            .update_device_name_if_newer(&record.name, record.updated_at);
-        if let Some(backend) = self.sync_backend()
-            && let Err(e) = backend.add_file(&path)
-        {
-            tracing::warn!("could not stage devices.jsonl: {e}");
-        }
-        Ok(())
-    }
-
-    /// Tag the git backend's auto-sync commit message with `device_id`.
-    /// Commit formatting (subject + `Device-Id` trailer) is encapsulated
-    /// inside [`sapphire_sync::GitSync`].
-    #[cfg(feature = "git-sync")]
-    fn apply_device_id(
-        git: sapphire_sync::GitSync,
-        device_id: Option<uuid::Uuid>,
-    ) -> sapphire_sync::GitSync {
-        match device_id {
-            Some(id) => git.with_device_id(id),
-            None => git,
-        }
-    }
-
-    /// Open workspace and configure the sync backend from [`SyncConfig`].
-    /// (no-op version when the `git-sync` feature is not compiled in)
-    #[cfg(not(feature = "git-sync"))]
-    pub fn open_configured(
-        workspace: Workspace,
-        _sync: &crate::config::SyncConfig,
-    ) -> Result<Self> {
-        Self::open(workspace)
-    }
-
-    /// Borrow the sync backend, if one is configured.
-    pub fn sync_backend(&self) -> Option<&dyn sapphire_sync::SyncBackend> {
-        self.sync_backend
-            .as_ref()
-            .map(|b| b.as_ref() as &dyn sapphire_sync::SyncBackend)
-    }
-
-    /// Attach a sync backend (e.g. `GitSync`).  Called once after construction.
-    pub fn set_sync_backend(&mut self, backend: Box<dyn sapphire_sync::SyncBackend + Send + Sync>) {
-        self.sync_backend = Some(backend);
     }
 
     /// Clone the active retrieve backend as an `Arc<dyn RetrieveStore>`.
@@ -345,11 +183,9 @@ impl WorkspaceState {
 
     // ── single-file update API ────────────────────────────────────────────────
 
-    /// Update the retrieve index for a single file and stage it via the sync
-    /// backend (if configured).
+    /// Update the retrieve index for a single file.
     ///
-    /// Reads the file from disk, upserts it into the retrieve DB, and calls
-    /// `sync_backend.add_file` when a backend is attached.
+    /// Reads the file from disk and upserts it into the retrieve DB.
     ///
     /// JSONL files are pre-chunked line-by-line so that an append only
     /// produces new chunks at the tail; existing lines retain their
@@ -418,15 +254,10 @@ impl WorkspaceState {
         db.rebuild_fts()?;
         self.track_db().upsert(&path_str, mtime)?;
 
-        if let Some(sync) = &self.sync_backend {
-            sync.add_file(abs)?;
-        }
-
         Ok(())
     }
 
-    /// Remove a file from the retrieve index and unstage it via the sync
-    /// backend (if configured).
+    /// Remove a file from the retrieve index.
     ///
     /// External paths are silently ignored when
     /// [`allow_external_paths`](crate::AppContext::allow_external_paths) is
@@ -444,10 +275,6 @@ impl WorkspaceState {
         db.remove_document(doc_id)?;
         db.rebuild_fts()?;
         self.track_db().remove(&path_str)?;
-
-        if let Some(sync) = &self.sync_backend {
-            sync.remove_file(abs)?;
-        }
 
         Ok(())
     }
@@ -495,11 +322,6 @@ impl WorkspaceState {
             .upsert(&path_str, mtime)
             .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
 
-        if let Some(sync) = &self.sync_backend {
-            sync.add_file(abs)
-                .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
-        }
-
         Ok(())
     }
 
@@ -530,11 +352,6 @@ impl WorkspaceState {
         self.track_db()
             .remove(&path_str)
             .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
-
-        if let Some(sync) = &self.sync_backend {
-            sync.remove_file(abs)
-                .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
-        }
 
         Ok(())
     }
@@ -784,27 +601,6 @@ impl WorkspaceState {
         hook: &mut H,
     ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
         sync_workspace_with_hook(&self.workspace, self.retrieve_db(), self.track_db(), hook)
-    }
-
-    /// Run a full git sync cycle (commit → pull → push), if a sync backend is
-    /// configured.  Does **not** update the retrieve cache.
-    pub fn sync_git(&self) -> Result<()> {
-        if let Some(backend) = &self.sync_backend {
-            backend.sync()?;
-        }
-        Ok(())
-    }
-
-    /// Run the periodic sync cycle: git sync (if configured) followed by an
-    /// mtime-based incremental cache update.
-    ///
-    /// Convenience wrapper that calls [`sync_git`](Self::sync_git) then
-    /// [`sync_retrieve`](Self::sync_retrieve).
-    ///
-    /// Returns `(upserted, removed)`.
-    pub fn periodic_sync(&self) -> Result<(usize, usize)> {
-        self.sync_git()?;
-        self.sync_retrieve()
     }
 
     /// Sync and, when embedding is configured, embed pending chunks.

@@ -7,9 +7,7 @@ pub mod workspace_state;
 mod error;
 pub use error::{Error, Result};
 
-pub use config::{
-    EmbeddingConfig, HybridConfig, RetrieveConfig, SyncBackendKind, SyncConfig, VectorDb,
-};
+pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use context::AppContext;
 pub use indexer::{
     IndexHook, SyncReport, SyncWithHookError, path_to_doc_id, sync_workspace,
@@ -32,9 +30,3 @@ pub use sapphire_retrieve::{
     default_hybrid, merge_rrf_files,
 };
 
-// Re-export sapphire-sync public API.
-#[cfg(feature = "git-sync")]
-pub use sapphire_sync::GitSync;
-pub use sapphire_sync::{
-    DeviceContext, DeviceDefaults, DeviceRecord, DeviceRegistry, MergeOutcome, SyncBackend,
-};
