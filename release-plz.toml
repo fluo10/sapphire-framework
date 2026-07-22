@@ -42,14 +42,6 @@ version_group = "framework"
 name = "sapphire-framework-track"
 version_group = "framework"
 
-# CLI は Cargo.toml 側で publish = false かつ独自バージョン管理なので
-# release-plz の対象外。Cargo.toml の publish 設定と整合させるため
-# publish も明示的に false にする。
-[[package]]
-name = "sapphire-framework-workspace-cli"
-release = false
-publish = false
-
 # ── Phase 2/3 で追加した新規クレート（crates.io 未公開・API 安定前） ──────
 # ワークスペース全体の release を再開（`[workspace] release = true`）しても、
 # これらが準備できるまで勝手に publish されないよう個別に明示 false にする。

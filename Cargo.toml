@@ -5,7 +5,6 @@ members = [
     "crates/sapphire-framework-retrieve",
     "crates/sapphire-framework-sync",
     "crates/sapphire-framework-workspace",
-    "crates/sapphire-framework-workspace-cli",
     "crates/sapphire-framework-rpc",
     "crates/sapphire-framework-blob",
     "crates/sapphire-framework-remote-server",
