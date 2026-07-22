@@ -1,6 +1,4 @@
-//! JSON-RPC client for a `sapphire-framework-remote-server`, plus a
-//! [`RemoteChangeSource`] adapter that plugs remote sync into the
-//! [`ChangeSource`](sapphire_sync::ChangeSource) abstraction.
+//! JSON-RPC client for a `sapphire-framework-remote-server`.
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), sapphire_framework_remote_client::Error> {
@@ -14,7 +12,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
 use base64::Engine as _;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -175,63 +172,4 @@ impl RemoteClient {
             .await?;
         Ok(result.hits)
     }
-}
-
-/// Adapts a [`RemoteClient`] + workspace id to the
-/// [`ChangeSource`](sapphire_sync::ChangeSource) abstraction, so remote sync is
-/// interchangeable with git sync at the call site.
-pub struct RemoteChangeSource {
-    client: RemoteClient,
-    ws: String,
-}
-
-impl RemoteChangeSource {
-    /// Bind `client` to workspace `ws`.
-    pub fn new(client: RemoteClient, ws: impl Into<String>) -> Self {
-        Self {
-            client,
-            ws: ws.into(),
-        }
-    }
-
-    /// The underlying client (e.g. for blob transfer, which is outside the
-    /// `ChangeSource` surface).
-    pub fn client(&self) -> &RemoteClient {
-        &self.client
-    }
-}
-
-#[async_trait]
-impl sapphire_sync::ChangeSource for RemoteChangeSource {
-    async fn snapshot(&self) -> sapphire_sync::Result<sapphire_sync::Snapshot> {
-        self.client.snapshot(&self.ws).await.map_err(to_sync_err)
-    }
-
-    async fn pull(
-        &self,
-        since: sapphire_sync::Cursor,
-        limit: usize,
-    ) -> sapphire_sync::Result<sapphire_sync::PullBatch> {
-        self.client
-            .pull(&self.ws, since, limit)
-            .await
-            .map_err(to_sync_err)
-    }
-
-    async fn push(
-        &self,
-        base: sapphire_sync::Cursor,
-        changes: Vec<sapphire_sync::Change>,
-    ) -> sapphire_sync::Result<sapphire_sync::PushOutcome> {
-        self.client
-            .push(&self.ws, base, changes)
-            .await
-            .map_err(to_sync_err)
-    }
-}
-
-/// Collapse a client error into the low-level sync crate's error type (which
-/// does not depend on this crate).
-fn to_sync_err(e: Error) -> sapphire_sync::Error {
-    sapphire_sync::Error::Remote(e.to_string())
 }

@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/sapphire-framework-track",
     "crates/sapphire-framework-retrieve",
-    "crates/sapphire-framework-sync",
     "crates/sapphire-framework-workspace",
     "crates/sapphire-framework-rpc",
     "crates/sapphire-framework-blob",
