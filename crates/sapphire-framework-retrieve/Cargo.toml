@@ -31,7 +31,7 @@ serde_json.workspace = true
 ureq = { version = "3.3", features = ["json"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 lancedb = { version = "0.29", optional = true }
-arrow-array = { version = "58", optional = true }
+arrow-array = { version = "59", optional = true }
 arrow-schema = { version = "58", optional = true }
 futures = { version = "0.3", optional = true }
 fastembed = { version = "5.13", optional = true }
