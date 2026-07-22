@@ -1,0 +1,47 @@
+[package]
+name = "sapphire-framework"
+version.workspace = true
+edition.workspace = true
+description = "Local-first framework for file-based workspaces — single-dependency facade over the sapphire-framework-* crates"
+license.workspace = true
+repository.workspace = true
+keywords = ["local-first", "workspace", "search", "sync"]
+categories = ["filesystem", "database"]
+
+# Facade crate (bevy-style): depend on this one crate and enable features for the
+# pieces you need. Each feature exposes an internal crate as a module
+# (`sapphire_framework::workspace`, `::backend`, `::remote_server`, …). The
+# internal `sapphire-framework-*` crates stay split for compile isolation.
+[features]
+default = ["workspace", "redb-store"]
+
+# ── modules ──────────────────────────────────────────────────────────────────
+workspace = ["dep:sapphire-framework-workspace"]
+retrieve = ["dep:sapphire-framework-retrieve"]
+track = ["dep:sapphire-framework-track"]
+rpc = ["dep:sapphire-framework-rpc"]
+blob = ["dep:sapphire-framework-blob"]
+backend = ["dep:sapphire-framework-backend", "workspace"]
+remote-client = ["dep:sapphire-framework-remote-client", "rpc"]
+remote-server = ["dep:sapphire-framework-remote-server", "rpc", "blob"]
+
+# Everything usable on a native host.
+native = ["workspace", "backend", "remote-client", "remote-server"]
+
+# ── store / embedding passthrough (apply to whichever crates are enabled) ─────
+redb-store = [
+    "sapphire-framework-workspace?/redb-store",
+    "sapphire-framework-backend?/redb-store",
+]
+lancedb-store = ["sapphire-framework-workspace?/lancedb-store"]
+fastembed-embed = ["sapphire-framework-workspace?/fastembed-embed"]
+
+[dependencies]
+sapphire-framework-workspace = { version = "0.1.0", path = "../sapphire-framework-workspace", optional = true, default-features = false }
+sapphire-framework-retrieve = { version = "0.1.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
+sapphire-framework-track = { version = "0.1.0", path = "../sapphire-framework-track", optional = true }
+sapphire-framework-rpc = { version = "0.1.0", path = "../sapphire-framework-rpc", optional = true }
+sapphire-framework-blob = { version = "0.1.0", path = "../sapphire-framework-blob", optional = true }
+sapphire-framework-backend = { version = "0.1.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
+sapphire-framework-remote-client = { version = "0.1.0", path = "../sapphire-framework-remote-client", optional = true }
+sapphire-framework-remote-server = { version = "0.1.0", path = "../sapphire-framework-remote-server", optional = true }

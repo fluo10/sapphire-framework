@@ -9,6 +9,7 @@ members = [
     "crates/sapphire-framework-remote-server",
     "crates/sapphire-framework-remote-client",
     "crates/sapphire-framework-backend",
+    "crates/sapphire-framework",
 ]
 
 [workspace.package]
