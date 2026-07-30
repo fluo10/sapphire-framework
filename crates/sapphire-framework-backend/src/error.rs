@@ -28,6 +28,11 @@ pub enum Error {
     /// The operation is not available on this backend.
     #[error("operation not supported by this backend: {0}")]
     Unsupported(&'static str),
+
+    /// A workspace registry entry or selection was invalid (e.g. both `path`
+    /// and `url` set, neither set, or an unknown workspace id).
+    #[error("invalid workspace configuration: {0}")]
+    InvalidWorkspace(String),
 }
 
 impl From<tokio::task::JoinError> for Error {

@@ -68,7 +68,7 @@ pub mod prelude {
     #[cfg(feature = "backend")]
     pub use crate::backend::{
         BackendEvent, LocalBackend, RemoteBackend, RemoteClient, SyncSummary, WorkspaceBackend,
-        WorkspaceLocator, WorkspaceSource,
+        WorkspaceEntry, WorkspaceLocator, WorkspaceRegistry, WorkspaceSelection, WorkspaceSource,
     };
 
     // `backend` already re-exports `RemoteClient`; only pull it from the client
