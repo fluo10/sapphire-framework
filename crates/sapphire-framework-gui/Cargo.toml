@@ -1,0 +1,16 @@
+[package]
+name = "sapphire-framework-gui"
+version.workspace = true
+edition.workspace = true
+description = "Shared egui components for sapphire-framework apps (workspace management)"
+license.workspace = true
+repository.workspace = true
+keywords = ["gui", "egui", "workspace", "local-first"]
+categories = ["gui"]
+
+# egui-only (no eframe): these are widgets/screens rendered inside a host app's
+# egui context. All consuming apps must use the same egui major version.
+[dependencies]
+sapphire-backend = { package = "sapphire-framework-backend", version = "0.1.0", path = "../sapphire-framework-backend", default-features = false }
+egui = "0.34"
+rfd = "0.15"

@@ -22,6 +22,7 @@ track = ["dep:sapphire-framework-track"]
 rpc = ["dep:sapphire-framework-rpc"]
 blob = ["dep:sapphire-framework-blob"]
 backend = ["dep:sapphire-framework-backend", "workspace"]
+gui = ["dep:sapphire-framework-gui", "backend"]
 remote-client = ["dep:sapphire-framework-remote-client", "rpc"]
 remote-server = ["dep:sapphire-framework-remote-server", "rpc", "blob"]
 
@@ -43,5 +44,6 @@ sapphire-framework-track = { version = "0.1.0", path = "../sapphire-framework-tr
 sapphire-framework-rpc = { version = "0.1.0", path = "../sapphire-framework-rpc", optional = true }
 sapphire-framework-blob = { version = "0.1.0", path = "../sapphire-framework-blob", optional = true }
 sapphire-framework-backend = { version = "0.1.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
+sapphire-framework-gui = { version = "0.1.0", path = "../sapphire-framework-gui", optional = true }
 sapphire-framework-remote-client = { version = "0.1.0", path = "../sapphire-framework-remote-client", optional = true }
 sapphire-framework-remote-server = { version = "0.1.0", path = "../sapphire-framework-remote-server", optional = true }

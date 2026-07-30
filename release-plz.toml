@@ -66,6 +66,10 @@ release = false
 name = "sapphire-framework-backend"
 release = false
 
+[[package]]
+name = "sapphire-framework-gui"
+release = false
+
 # 単一依存ファサード（#95）。骨格導入時点では未公開。
 [[package]]
 name = "sapphire-framework"
