@@ -21,9 +21,12 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono = { workspace = true }
+serde = { workspace = true }
+indexmap = { workspace = true }
 
 [dev-dependencies]
 sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.1.0", path = "../sapphire-framework-remote-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 tempfile = "3"
+toml.workspace = true

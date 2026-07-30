@@ -32,7 +32,10 @@ mod source;
 pub use error::{Error, Result};
 pub use local::LocalBackend;
 pub use remote::RemoteBackend;
-pub use source::{DEFAULT_WS, WorkspaceLocator, WorkspaceSource};
+pub use source::{
+    DEFAULT_ID, DEFAULT_WS, WorkspaceEntry, WorkspaceLocator, WorkspaceRegistry, WorkspaceSelection,
+    WorkspaceSource,
+};
 
 // Re-export the search mode + result types (and the underlying state, which the
 // factory needs) so callers depend only on this crate.
