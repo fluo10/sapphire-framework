@@ -303,25 +303,14 @@ impl WsStore {
     /// 呼び出し側が回す定期ティックから呼ぶ想定(このメソッド自身はタイマーを
     /// 持たない)。
     pub fn reconcile(&self) -> Result<ReconcileReport> {
-        // 走査そのものは全件を舐めるが、拾うのは同期可能なパスだけ。判定は
-        // 書き込み側(apply_one)と同じ関数なので、規則が二か所に散らない。
-        //
-        // `sapphire_track::scan` は隠しディレクトリ(名前が `.` で始まるもの)を
-        // 無条件に剪定する — walkdir の `filter_entry` はルートエントリにも
-        // 述語を適用するため、`app_dir` 自身を scan のルートに渡しても中身は
-        // 一切見えない。そのため許可された唯一の隠しディレクトリだけは
-        // `scan_dir` で自前に潜る。`.git` はここでも `.git` のままなので
-        // scan からは見えず、これがブリーフの言う「.git/ を舐めるコスト」の
-        // 実体。剪定は行っているが、剪定できるのは `scan` が届く範囲だけ、
-        // という設計上の穴を `app_dir` の分だけ埋めている。
-        let accept = |p: &Path| {
+        // 走査そのものが同期可能なパスだけを剪定する — `is_syncable` が
+        // ディレクトリの descend 可否も決めるので、`.git` のようなディレクトリ
+        // は中身を舐めることすらない。判定は書き込み側(apply_one)と同じ関数
+        // なので、規則が二か所に散らない。
+        let observed = sapphire_track::scan(&self.origin_dir, |p| {
             self.to_ws_path(p)
                 .is_some_and(|rel| is_syncable(&rel, self.app_dir.as_deref()))
-        };
-        let mut observed = sapphire_track::scan(&self.origin_dir, accept)?;
-        if let Some(app) = &self.app_dir {
-            scan_dir(&self.origin_dir.join(app), &accept, &mut observed)?;
-        }
+        })?;
         let stored = self.track.mtimes()?;
         let changes = sapphire_track::diff(&stored, &observed);
 
@@ -352,7 +341,11 @@ impl WsStore {
             self.track.remove(&p.to_string_lossy())?;
         }
 
-        Ok(ReconcileReport { upserted, removed, detection: Detection::Mtime })
+        Ok(ReconcileReport {
+            upserted,
+            removed,
+            detection: Detection::Mtime,
+        })
     }
 
     /// 絶対パスを origin 相対の POSIX パスへ。origin の外なら `None`。
@@ -367,40 +360,6 @@ impl WsStore {
         }
         Some(out)
     }
-}
-
-/// `dir` を再帰的に走査し、`accept` を満たすファイルを `out` に追加する。
-///
-/// [`sapphire_track::scan`] と同じ振る舞い(隠しディレクトリは剪定・シンボリック
-/// リンクは辿らない)だが、`dir` 自身が隠しディレクトリ(`app_dir`)であっても
-/// scan する — `sapphire_track::scan` はルートエントリにも述語を適用してしまう
-/// ため、`app_dir` を素直に scan のルートに渡しても中身が一切見えない。
-fn scan_dir(
-    dir: &Path,
-    accept: &impl Fn(&Path) -> bool,
-    out: &mut Vec<sapphire_track::Observed>,
-) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(Error::Io(e)),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let path = entry.path();
-        if file_type.is_dir() {
-            if !entry.file_name().to_string_lossy().starts_with('.') {
-                scan_dir(&path, accept, out)?;
-            }
-        } else if file_type.is_file() && accept(&path) {
-            out.push(sapphire_track::Observed {
-                mtime: sapphire_track::mtime_secs(&path),
-                path,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// FNV-1a hash of the (workspace-relative) path — the stable document id used

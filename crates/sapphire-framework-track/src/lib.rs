@@ -149,21 +149,19 @@ pub fn mtime_secs(path: &Path) -> i64 {
 /// Walk `root` recursively and return an [`Observed`] entry for every file for
 /// which `accept(path)` is `true`.
 ///
-/// Directories whose name starts with `.` are skipped at any depth (matching
-/// the workspace indexer's hidden-directory filter). Symlinks are not
-/// followed.
+/// `accept` also governs directories: a directory for which `accept` returns
+/// `false` is not descended into, so its contents are never observed (and
+/// never even visited — this is a pruning decision, not just a filter on the
+/// final file list). `root` itself is always entered regardless of what
+/// `accept(root)` would return, so callers don't need a special case for a
+/// root that happens to fail their own predicate (e.g. a hidden directory
+/// used as `root` directly). Symlinks are not followed.
 pub fn scan<F: Fn(&Path) -> bool>(root: &Path, accept: F) -> Result<Vec<Observed>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                !e.file_name().to_string_lossy().starts_with('.')
-            } else {
-                true
-            }
-        })
+        .filter_entry(|e| e.depth() == 0 || accept(e.path()))
     {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -278,5 +276,72 @@ mod tests {
         assert_eq!(changes.added, vec![PathBuf::from("b")]);
         assert!(changes.modified.is_empty());
         assert!(changes.removed.is_empty());
+    }
+
+    #[test]
+    fn scan_prunes_a_directory_the_predicate_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("keep")).unwrap();
+        std::fs::write(tmp.path().join("keep").join("a.txt"), "a").unwrap();
+        std::fs::create_dir_all(tmp.path().join("skip")).unwrap();
+        std::fs::write(tmp.path().join("skip").join("b.txt"), "b").unwrap();
+
+        // Rejects the "skip" directory itself, so its contents must never be
+        // visited — not merely filtered out of the result.
+        let observed = scan(tmp.path(), |p| {
+            !p.components().any(|c| c.as_os_str() == "skip")
+        })
+        .unwrap();
+
+        let names: Vec<_> = observed
+            .iter()
+            .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt"]);
+    }
+
+    #[test]
+    fn scan_allows_a_differently_named_dot_directory_when_the_predicate_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".allowed")).unwrap();
+        std::fs::write(tmp.path().join(".allowed").join("a.txt"), "a").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".blocked")).unwrap();
+        std::fs::write(tmp.path().join(".blocked").join("b.txt"), "b").unwrap();
+
+        // No built-in "skip anything starting with `.`" rule any more: the
+        // predicate alone decides, so one dot-directory can be let through
+        // while a differently-named one is still pruned.
+        let observed = scan(tmp.path(), |p| {
+            !p.components().any(|c| c.as_os_str() == ".blocked")
+        })
+        .unwrap();
+
+        let names: Vec<_> = observed
+            .iter()
+            .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt"]);
+    }
+
+    #[test]
+    fn scan_always_enters_the_root_even_if_the_predicate_would_reject_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hidden_root = tmp.path().join(".hidden_root");
+        std::fs::create_dir_all(&hidden_root).unwrap();
+        std::fs::write(hidden_root.join("a.txt"), "a").unwrap();
+
+        // A predicate that rejects anything hidden would reject the root
+        // itself if applied there — the walk must not let that empty out the
+        // whole scan.
+        let observed = scan(&hidden_root, |p| {
+            !p.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
+        .unwrap();
+
+        let names: Vec<_> = observed
+            .iter()
+            .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.txt"]);
     }
 }
