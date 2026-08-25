@@ -63,6 +63,9 @@ pub struct WsStoreConfig {
     pub state_dir: PathBuf,
     /// アプリが既に持っている retrieve ストア。None なら state_dir 配下に自前で開く。
     pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>>,
+    /// 同期対象に含めてよい唯一の隠しディレクトリ（例 ".sapphire-journal"）。
+    /// None なら隠しファイルは一切同期しない。
+    pub app_dir: Option<String>,
 }
 
 impl WsStore {
@@ -70,18 +73,36 @@ impl WsStore {
 }
 ```
 
-**同期対象を絞るフックは持たない。** ワークスペース内には同期対象外のファイルを置かない運用
-（キャッシュはアプリのキャッシュディレクトリ、鍵ファイルは origin の外）なので、設定可能な
-除外フックは不要。ワークスペース内に残る非エントリファイル（journal なら
-`.sapphire-journal/config.toml`）は**同期されるのが正しい** — ワークスペースレベルの設定は
-端末間で共有したいため。
+**同期対象は許可制にする。** 隠しファイル・隠しディレクトリは原則すべて除外し、`app_dir` に
+名指ししたディレクトリだけを通す。ユーザーが journal ルートを外部ツールとして git 管理する
+運用はあり得る（framework ARCHITECTURE: 「git は外部ツールとして併用する」）ので、`.git/` は
+この規則で自然に外れる。除外一覧を育てる方式（`.git` だけ弾く等）は、次に何を除外し忘れるかを
+常に抱えるため採らない。
 
-唯一の例外として、**整合スキャンは `.git/` を固定で無視する**。ユーザーが journal ルートを
-外部ツールとして git 管理する運用はあり得るため（framework ARCHITECTURE: 「git は外部ツールと
-して併用する」）、ここだけは設定ではなく固定ルールで塞ぐ。
+アプリ固有の設定（journal なら `.sapphire-journal/config.toml`）は `app_dir` を通して
+**同期されるのが正しい** — ワークスペースレベルの設定は端末間で共有したいため。
+キャッシュはアプリのキャッシュディレクトリ、鍵ファイルは origin の外にあるので、
+この規則で漏れる心配はない。
 
 `ServerState` にも、ワークスペース名から `WsStoreConfig` を解決するフックを持たせる
 （既定は現行のレイアウト、アプリは自前の解決関数を差せる）。
+
+### 1b. 書き込み経路のパスガード（既存の穴の修正）
+
+同じ判定関数で `..` と絶対パスも塞ぐ。現状の `apply_one` は受け取ったパスを
+`origin_dir.join(posix_to_native(path))` するだけなので、**`../` を含むパスを push されると
+origin の外に書ける**。これは今回の変更で見つかった既存の欠陥であり、許可制の導入と同じ
+関数で塞ぐ。
+
+```rust
+/// 同期対象に含めてよいワークスペース相対パス（POSIX 区切り）か。
+/// 隠し要素は `app_dir` に一致するもの以外すべて拒否。`..`・絶対パス・空要素も拒否。
+pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool;
+```
+
+判定は**書き込みの一箇所**（`apply_one`）で強制する。そうすれば `push` 経由・
+`record_local_write` 経由・`reconcile` 経由のすべてが同じ規則を通り、規則が散らない。
+拒否は `Error::NotSyncable(path)` とし、JSON-RPC では `INVALID_PARAMS` にする。
 
 ### 2. ローカル書き込みの記録入口
 
@@ -239,7 +260,10 @@ pub struct Authenticated {
   書き戻ること。期限切れ鍵が `authenticate` で弾かれること。`revoke` の label 重複でエラー。
 - 認証: 鍵なしで `/rpc` が 401。`protect()` を通した任意ルートも 401。
 - 鍵 0 件で起動が失敗すること。
-- 整合スキャンが `.git/` 配下を change log に載せないこと。
+- 整合スキャンが隠しファイル（`.git/` 配下、`.gitignore`）を change log に載せないこと。
+- `app_dir` に名指ししたディレクトリだけは、隠しディレクトリでも載ること。
+- `../escaped.md` の push が `Error::NotSyncable` で拒否され、origin の外にファイルが
+  作られないこと。
 
 ## リスク / 留意点
 

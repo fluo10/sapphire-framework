@@ -17,7 +17,7 @@
 - **鍵の `id` は UUID v4。change log の generation は UUID v7。** 取り違えないこと。
 - トークン形式は `<prefix>_<random>`。区切りは**アンダースコア**。乱数部は `getrandom` で 32 バイト取り、`base64` の `URL_SAFE_NO_PAD` で符号化（43 文字）。
 - 鍵ファイルは**平文**保存。書き込みは**全上書き**で、先頭に固定ヘッダコメントを毎回再生成する。`toml_edit` は使わない。
-- **同期対象を絞る設定フックは作らない。** `reconcile` のスキャンだけが `.git/` を固定ルールで無視する。
+- **同期対象は許可制。** 隠しファイル・隠しディレクトリは原則すべて除外し、アプリ固有の `.<app_name>` ディレクトリだけを `WsStoreConfig.app_dir` で名指しして通す。除外一覧を育てる方式は採らない。
 - テスト実行は `cargo test -p <crate>`。全体確認は `cargo test --workspace`。
 - 既存の `WsStore::open(base_dir, ws)` の**ディスク上のレイアウトは変えない**（既存の timer-server のデータを孤立させないため）。
 
@@ -34,9 +34,9 @@
 **Interfaces:**
 - Consumes: 既存の `WsStore::open(base_dir, ws)`、`sapphire_retrieve::{RetrieveStore, open_redb}`、`sapphire_blob::FsBlobStore`、`crate::change_log::ChangeLog`
 - Produces:
-  - `pub struct WsStoreConfig { pub origin_dir: PathBuf, pub state_dir: PathBuf, pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>> }`
+  - `pub struct WsStoreConfig { pub origin_dir: PathBuf, pub state_dir: PathBuf, pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>>, pub app_dir: Option<String> }`
   - `pub fn WsStore::with_config(config: WsStoreConfig) -> Result<WsStore>`
-  - `WsStore` は内部に `track: Box<dyn TrackStore>` を持つ（Task 3 で使う）
+  - `WsStore` は内部に `track: Box<dyn TrackStore>` を持つ（Task 4 で使う）
 
 - [ ] **Step 1: `sapphire-track` を依存に追加する**
 
@@ -61,6 +61,7 @@ fn with_config_uses_the_given_origin_dir() {
         origin_dir: origin.clone(),
         state_dir: tmp.path().join("server-state"),
         retrieve: None,
+        app_dir: None,
     })
     .unwrap();
 
@@ -81,6 +82,7 @@ fn with_config_reuses_an_injected_retrieve_store() {
         origin_dir: tmp.path().join("origin"),
         state_dir: tmp.path().join("state"),
         retrieve: Some(std::sync::Arc::clone(&retrieve)),
+        app_dir: None,
     })
     .unwrap();
 
@@ -112,6 +114,9 @@ pub struct WsStoreConfig {
     pub state_dir: PathBuf,
     /// アプリが既に持っている retrieve ストア。`None` なら `state_dir` 配下に自前で開く。
     pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>>,
+    /// 同期対象に含めてよい唯一の隠しディレクトリ（例 `".sapphire-journal"`）。
+    /// `None` なら隠しファイルは一切同期しない。判定は Task 3 の `is_syncable`。
+    pub app_dir: Option<String>,
 }
 
 /// Storage for a single workspace on the server.
@@ -121,6 +126,7 @@ pub struct WsStore {
     change_log: ChangeLog,
     blobs: FsBlobStore,
     track: Box<dyn sapphire_track::TrackStore>,
+    app_dir: Option<String>,
 }
 
 impl WsStore {
@@ -136,12 +142,13 @@ impl WsStore {
         let track_path = base_dir.join("track").join(format!("{safe}.redb"));
         std::fs::create_dir_all(track_path.parent().unwrap())?;
         let track = Box::new(sapphire_track::open_redb(&track_path)?);
-        Ok(Self { origin_dir, retrieve, change_log, blobs, track })
+        // 従来レイアウトに隠しディレクトリは無いので、許可するものも無い。
+        Ok(Self { origin_dir, retrieve, change_log, blobs, track, app_dir: None })
     }
 
     /// Open the stores for a workspace that already exists on disk.
     pub fn with_config(config: WsStoreConfig) -> Result<Self> {
-        let WsStoreConfig { origin_dir, state_dir, retrieve } = config;
+        let WsStoreConfig { origin_dir, state_dir, retrieve, app_dir } = config;
         std::fs::create_dir_all(&origin_dir)?;
         std::fs::create_dir_all(&state_dir)?;
         let retrieve = match retrieve {
@@ -151,7 +158,7 @@ impl WsStore {
         let change_log = ChangeLog::open(&state_dir.join("changelog.redb"))?;
         let blobs = FsBlobStore::open(state_dir.join("blobs"))?;
         let track = Box::new(sapphire_track::open_redb(&state_dir.join("track_v1.redb"))?);
-        Ok(Self { origin_dir, retrieve, change_log, blobs, track })
+        Ok(Self { origin_dir, retrieve, change_log, blobs, track, app_dir })
     }
 ```
 
@@ -353,7 +360,222 @@ rename lands as a single delete+upsert."
 
 ---
 
-### Task 3: `reconcile` — 取りこぼしを回収する整合スキャン
+### Task 3: 同期可能パスの判定と書き込みガード
+
+同期対象は**許可制**にする。隠しファイル・隠しディレクトリは原則すべて除外し、
+アプリ固有の設定を置く `.<app_name>` ディレクトリだけを例外的に通す。除外一覧を
+育てていく方式（`.git` だけ弾く等）は、次に何を除外し忘れるかを常に抱えるため採らない。
+
+同じ判定で `..` と絶対パスも塞ぐ。現状の `apply_one` は受け取ったパスを
+`origin_dir.join(posix_to_native(path))` するだけなので、`../` を含むパスを push
+されると **origin の外に書ける**。判定を**書き込みの一箇所**（`apply_one`）で強制すれば、
+`push` 経由・`record_local_write` 経由・`reconcile` 経由のすべてが同じ規則を通る。
+
+**Files:**
+- Modify: `crates/sapphire-framework-remote-server/src/ws_store.rs`
+- Modify: `crates/sapphire-framework-remote-server/src/error.rs`
+- Modify: `crates/sapphire-framework-remote-server/src/lib.rs`（re-export）
+- Test: `crates/sapphire-framework-remote-server/src/ws_store.rs`（`mod tests`）
+
+**Interfaces:**
+- Consumes: Task 1 の `WsStore.app_dir`
+- Produces:
+  - `pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool`
+  - `Error::NotSyncable(String)`（JSON-RPC では `INVALID_PARAMS` になる）
+  - `apply_one` が非同期対象パスを拒否する
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`mod tests` に追記:
+
+```rust
+#[test]
+fn is_syncable_allows_ordinary_paths() {
+    assert!(is_syncable("a.md", None));
+    assert!(is_syncable("2026/1_note.md", None));
+}
+
+#[test]
+fn is_syncable_rejects_hidden_components() {
+    assert!(!is_syncable(".gitignore", None));
+    assert!(!is_syncable(".git/config", None));
+    assert!(!is_syncable("2026/.hidden.md", None));
+    assert!(!is_syncable(".sapphire-journal/config.toml", None));
+}
+
+#[test]
+fn is_syncable_allows_only_the_named_app_dir() {
+    let app = Some(".sapphire-journal");
+    assert!(is_syncable(".sapphire-journal/config.toml", app));
+    assert!(!is_syncable(".git/config", app), "許可するのは名指しした 1 つだけ");
+    assert!(
+        !is_syncable(".sapphire-journal/.git/config", app),
+        "許可ディレクトリの中の隠しディレクトリも除外する"
+    );
+}
+
+#[test]
+fn is_syncable_rejects_traversal_and_absolute_paths() {
+    assert!(!is_syncable("../outside.md", None));
+    assert!(!is_syncable("2026/../../outside.md", None));
+    assert!(!is_syncable("/etc/passwd", None));
+    assert!(!is_syncable("", None));
+    assert!(!is_syncable("a//b.md", None));
+    // ワイヤ上のパスは POSIX 区切りのみ。Windows 風のパスは受け付けない。
+    assert!(!is_syncable("C:/windows/system32", None));
+    assert!(!is_syncable("a\\b.md", None));
+}
+
+#[test]
+fn push_cannot_write_outside_the_origin() {
+    let (tmp, store) = store();
+
+    let result = store.push(0, vec![Change::upsert("../escaped.md", "gotcha", Utc::now())]);
+
+    assert!(matches!(result, Err(Error::NotSyncable(_))));
+    assert!(
+        !tmp.path().join("escaped.md").exists(),
+        "origin の外にファイルが作られてはならない"
+    );
+}
+
+#[test]
+fn push_cannot_write_a_hidden_path() {
+    let (_t, store) = store();
+
+    let result = store.push(0, vec![Change::upsert(".git/config", "gotcha", Utc::now())]);
+
+    assert!(matches!(result, Err(Error::NotSyncable(_))));
+}
+
+#[test]
+fn push_accepts_the_configured_app_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = WsStore::with_config(WsStoreConfig {
+        origin_dir: tmp.path().join("origin"),
+        state_dir: tmp.path().join("state"),
+        retrieve: None,
+        app_dir: Some(".sapphire-journal".to_owned()),
+    })
+    .unwrap();
+
+    store
+        .push(
+            0,
+            vec![Change::upsert(".sapphire-journal/config.toml", "k = 1", Utc::now())],
+        )
+        .unwrap();
+
+    let snapshot = store.snapshot().unwrap();
+    assert_eq!(snapshot.docs.len(), 1);
+    assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
+}
+```
+
+- [ ] **Step 2: テストが失敗することを確認する**
+
+Run: `cargo test -p sapphire-framework-remote-server is_syncable`
+Expected: FAIL — `cannot find function is_syncable in this scope`
+
+- [ ] **Step 3: エラー種別を足す**
+
+`crates/sapphire-framework-remote-server/src/error.rs` の `enum Error` に追加:
+
+```rust
+    /// 同期対象として受け付けられないパス（隠しファイル・`..`・絶対パス）。
+    #[error("path is not syncable: {0}")]
+    NotSyncable(String),
+```
+
+`to_jsonrpc` を、これだけ別のコードにするよう変更:
+
+```rust
+    /// Map an internal error to a JSON-RPC error object. 受け付けられないパスは
+    /// クライアント側の誤りなので `INVALID_PARAMS`、それ以外は内部エラー。
+    pub fn to_jsonrpc(&self) -> JsonRpcError {
+        let code = match self {
+            Error::NotSyncable(_) => error_codes::INVALID_PARAMS,
+            _ => error_codes::INTERNAL_ERROR,
+        };
+        JsonRpcError::new(code, self.to_string())
+    }
+```
+
+- [ ] **Step 4: 判定関数を実装する**
+
+`ws_store.rs` の `posix_to_native` の近くに追加:
+
+```rust
+/// 同期対象に含めてよいワークスペース相対パス（POSIX 区切り）か。
+///
+/// 許可制にしてある。隠しファイル・隠しディレクトリは原則すべて除外し、
+/// `app_dir` に名指ししたディレクトリ（例 `.sapphire-journal`）だけを通す。
+/// 除外一覧を育てる方式より、除外し忘れが起きない。
+///
+/// 併せて `..`・絶対パス・空要素も拒否する。これが origin の外へ書かせない唯一の
+/// 防壁なので、[`WsStore::apply_one`] は必ずこれを通す。
+pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool {
+    if rel.is_empty() || rel.starts_with('/') {
+        return false;
+    }
+    // ワイヤ上のパスは POSIX 区切りのみ。逆スラッシュとドライブ指定は受け付けない。
+    if rel.contains('\\') || rel.contains(':') {
+        return false;
+    }
+    rel.split('/').all(|seg| {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+        if seg.starts_with('.') {
+            return app_dir == Some(seg);
+        }
+        true
+    })
+}
+```
+
+- [ ] **Step 5: 書き込み経路で強制する**
+
+`ws_store.rs` の `apply_one` の先頭に追加:
+
+```rust
+    fn apply_one(&self, change: &Change) -> Result<()> {
+        if !is_syncable(&change.path, self.app_dir.as_deref()) {
+            return Err(Error::NotSyncable(change.path.clone()));
+        }
+        let abs = self.origin_dir.join(posix_to_native(&change.path));
+```
+
+`lib.rs` の re-export を更新:
+
+```rust
+pub use ws_store::{WsStore, WsStoreConfig, is_syncable};
+```
+
+- [ ] **Step 6: テストが通ることを確認する**
+
+Run: `cargo test -p sapphire-framework-remote-server`
+Expected: PASS
+
+- [ ] **Step 7: コミット**
+
+```bash
+git add crates/sapphire-framework-remote-server/src/ws_store.rs \
+        crates/sapphire-framework-remote-server/src/error.rs \
+        crates/sapphire-framework-remote-server/src/lib.rs
+git commit -m "fix(remote-server): allow-list syncable paths at the write choke point
+
+Hidden files are excluded wholesale and only the app's own dot directory is
+let through, so there is no exclusion list to forget to extend. The same
+predicate rejects .. and absolute paths, which apply_one previously joined
+straight onto origin_dir — a push of ../escaped.md wrote outside the
+workspace. Enforcing it in apply_one covers push, record_local_write and
+reconcile alike."
+```
+
+---
+
+### Task 4: `reconcile` — 取りこぼしを回収する整合スキャン
 
 **Files:**
 - Modify: `crates/sapphire-framework-remote-server/src/ws_store.rs`
@@ -361,7 +583,7 @@ rename lands as a single delete+upsert."
 - Test: `crates/sapphire-framework-remote-server/src/ws_store.rs`（`mod tests`）
 
 **Interfaces:**
-- Consumes: Task 2 の `record_local_write`、`sapphire_track::{scan, diff, TrackStore, Observed}`
+- Consumes: Task 2 の `record_local_write`、Task 3 の `is_syncable`、`sapphire_track::{scan, diff, TrackStore, Observed}`
 - Produces:
   - `pub enum Detection { Mtime }`
   - `pub struct ReconcileReport { pub upserted: usize, pub removed: usize, pub detection: Detection }`
@@ -398,16 +620,40 @@ fn reconcile_picks_up_a_hand_deleted_file() {
 }
 
 #[test]
-fn reconcile_ignores_the_git_directory() {
+fn reconcile_ignores_hidden_files() {
     let (_t, store) = store();
     let git = store.origin_dir.join(".git").join("objects");
     std::fs::create_dir_all(&git).unwrap();
     std::fs::write(git.join("deadbeef"), "packfile guts").unwrap();
+    std::fs::write(store.origin_dir.join(".gitignore"), "target/").unwrap();
 
     let report = store.reconcile().unwrap();
 
-    assert_eq!(report.upserted, 0, ".git/ は同期対象に載せない");
+    assert_eq!(report.upserted, 0, "隠しファイルは同期対象に載せない");
     assert!(store.snapshot().unwrap().docs.is_empty());
+}
+
+#[test]
+fn reconcile_picks_up_the_configured_app_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = WsStore::with_config(WsStoreConfig {
+        origin_dir: tmp.path().join("origin"),
+        state_dir: tmp.path().join("state"),
+        retrieve: None,
+        app_dir: Some(".sapphire-journal".to_owned()),
+    })
+    .unwrap();
+    let app = store.origin_dir.join(".sapphire-journal");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("config.toml"), "k = 1").unwrap();
+    std::fs::create_dir_all(store.origin_dir.join(".git")).unwrap();
+    std::fs::write(store.origin_dir.join(".git").join("HEAD"), "ref: x").unwrap();
+
+    let report = store.reconcile().unwrap();
+
+    assert_eq!(report.upserted, 1);
+    let snapshot = store.snapshot().unwrap();
+    assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
 }
 
 #[test]
@@ -460,8 +706,13 @@ pub struct ReconcileReport {
     /// 呼び出し側が回す定期ティックから呼ぶ想定（このメソッド自身はタイマーを
     /// 持たない）。
     pub fn reconcile(&self) -> Result<ReconcileReport> {
-        let observed = sapphire_track::scan(&self.origin_dir, |p| !is_inside_git_dir(p))
-            .map_err(|e| Error::Redb(e.to_string()))?;
+        // 走査そのものは全件を舐めるが、拾うのは同期可能なパスだけ。判定は
+        // 書き込み側（apply_one）と同じ関数なので、規則が二か所に散らない。
+        let observed = sapphire_track::scan(&self.origin_dir, |p| {
+            self.to_ws_path(p)
+                .is_some_and(|rel| is_syncable(&rel, self.app_dir.as_deref()))
+        })
+        .map_err(|e| Error::Redb(e.to_string()))?;
         let stored = self.track.mtimes().map_err(|e| Error::Redb(e.to_string()))?;
         let changes = sapphire_track::diff(&stored, &observed);
 
@@ -513,12 +764,6 @@ pub struct ReconcileReport {
     }
 }
 
-/// `.git/` 配下かどうか。ユーザーが journal ルートを外部ツールとして git 管理する
-/// 運用があるため、スキャンは固定でここを無視する（設定項目にはしない）。
-fn is_inside_git_dir(path: &Path) -> bool {
-    path.components()
-        .any(|c| c.as_os_str() == std::ffi::OsStr::new(".git"))
-}
 ```
 
 `lib.rs` の re-export を更新:
@@ -542,12 +787,13 @@ git commit -m "feat(remote-server): reconcile the origin against the change log
 Catches what record_local_write missed: a forgotten call, an edit made on the
 server by hand, an external tool. Detection is mtime at second resolution, so
 ReconcileReport names the method and can be raised to content hashing later.
-The scan skips .git/ by a fixed rule."
+The scan reuses is_syncable, so it inherits the allow-list instead of
+carrying exclusions of its own."
 ```
 
 ---
 
-### Task 4: change log の世代 ID
+### Task 5: change log の世代 ID
 
 **Files:**
 - Modify: `crates/sapphire-framework-remote-server/src/change_log.rs`
@@ -821,7 +1067,7 @@ untouched."
 
 ---
 
-### Task 5: `KeyStore` — ラベル付きトークンの鍵ファイル
+### Task 6: `KeyStore` — ラベル付きトークンの鍵ファイル
 
 **Files:**
 - Create: `crates/sapphire-framework-remote-server/src/keys.rs`
@@ -1226,7 +1472,7 @@ header, so no toml_edit."
 
 ---
 
-### Task 6: 認証 layer — `/rpc` と外部ルートに同じ鍵をかける
+### Task 7: 認証 layer — `/rpc` と外部ルートに同じ鍵をかける
 
 **Files:**
 - Create: `crates/sapphire-framework-remote-server/src/auth.rs`
@@ -1236,7 +1482,7 @@ header, so no toml_edit."
 - Modify: `crates/sapphire-framework-remote-client/tests/roundtrip.rs`
 
 **Interfaces:**
-- Consumes: Task 5 の `KeyStore` / `KeyEntry`
+- Consumes: Task 6 の `KeyStore` / `KeyEntry`
 - Produces:
   - `pub struct Authenticated { pub key_id: Uuid, pub label: Option<String> }`
   - `pub fn protect(state: Arc<ServerState>, router: Router) -> Router`
@@ -1555,7 +1801,7 @@ than a 200 carrying a JSON-RPC error."
 
 ---
 
-### Task 7: `sapphire-timer-server` のコンパイル追従
+### Task 8: `sapphire-timer-server` のコンパイル追従
 
 **別リポジトリ**（`sapphire-timer` サブモジュール）で行う。framework の `with_token` 削除で
 壊れるため、framework 側が main に入るのと前後して追従させる。
@@ -1564,7 +1810,7 @@ than a 200 carrying a JSON-RPC error."
 - Modify: `sapphire-timer/sapphire-timer-server/src/main.rs`
 
 **Interfaces:**
-- Consumes: Task 5 の `KeyStore`、Task 6 の `ServerState::with_keys`
+- Consumes: Task 6 の `KeyStore`、Task 7 の `ServerState::with_keys`
 
 - [ ] **Step 1: sapphire-timer に作業ブランチを作る**
 
