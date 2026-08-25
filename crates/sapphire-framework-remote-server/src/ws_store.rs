@@ -41,9 +41,6 @@ pub struct WsStore {
     // against this store to find writes that bypassed `push`.
     #[allow(dead_code)]
     track: Box<dyn sapphire_track::TrackStore>,
-    // Unused until Task 3 (`is_syncable`), which will consult this to decide
-    // whether a hidden path is allowed to sync.
-    #[allow(dead_code)]
     app_dir: Option<String>,
 }
 
@@ -229,6 +226,9 @@ impl WsStore {
     /// Write one change through to the origin file and the retrieve cache.
     /// Does **not** rebuild FTS (the caller batches that) nor append to the log.
     fn apply_one(&self, change: &Change) -> Result<()> {
+        if !is_syncable(&change.path, self.app_dir.as_deref()) {
+            return Err(Error::NotSyncable(change.path.clone()));
+        }
         let abs = self.origin_dir.join(posix_to_native(&change.path));
         match &change.kind {
             ChangeKind::Upsert { body, .. } => {
@@ -301,6 +301,33 @@ fn path_to_doc_id(path: &str) -> i64 {
 /// Convert a POSIX wire path to a native relative path.
 fn posix_to_native(path: &str) -> PathBuf {
     path.split('/').collect()
+}
+
+/// 同期対象に含めてよいワークスペース相対パス（POSIX 区切り）か。
+///
+/// 許可制にしてある。隠しファイル・隠しディレクトリは原則すべて除外し、
+/// `app_dir` に名指ししたディレクトリ（例 `.sapphire-journal`）だけを通す。
+/// 除外一覧を育てる方式より、除外し忘れが起きない。
+///
+/// 併せて `..`・絶対パス・空要素も拒否する。これが origin の外へ書かせない唯一の
+/// 防壁なので、`WsStore` の書き込み経路は必ずこれを通す。
+pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool {
+    if rel.is_empty() || rel.starts_with('/') {
+        return false;
+    }
+    // ワイヤ上のパスは POSIX 区切りのみ。逆スラッシュとドライブ指定は受け付けない。
+    if rel.contains('\\') || rel.contains(':') {
+        return false;
+    }
+    rel.split('/').all(|seg| {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+        if seg.starts_with('.') {
+            return app_dir == Some(seg);
+        }
+        true
+    })
 }
 
 /// Make a workspace id safe to use as a single path component (no separators,
@@ -526,5 +553,100 @@ mod tests {
         let snapshot = store.snapshot().unwrap();
         let paths: Vec<_> = snapshot.docs.iter().map(|c| c.path.as_str()).collect();
         assert_eq!(paths, vec!["1_new.md"]);
+    }
+
+    #[test]
+    fn is_syncable_allows_ordinary_paths() {
+        assert!(is_syncable("a.md", None));
+        assert!(is_syncable("2026/1_note.md", None));
+    }
+
+    #[test]
+    fn is_syncable_rejects_hidden_components() {
+        assert!(!is_syncable(".gitignore", None));
+        assert!(!is_syncable(".git/config", None));
+        assert!(!is_syncable("2026/.hidden.md", None));
+        assert!(!is_syncable(".sapphire-journal/config.toml", None));
+    }
+
+    #[test]
+    fn is_syncable_allows_only_the_named_app_dir() {
+        let app = Some(".sapphire-journal");
+        assert!(is_syncable(".sapphire-journal/config.toml", app));
+        assert!(
+            !is_syncable(".git/config", app),
+            "許可するのは名指しした 1 つだけ"
+        );
+        assert!(
+            !is_syncable(".sapphire-journal/.git/config", app),
+            "許可ディレクトリの中の隠しディレクトリも除外する"
+        );
+    }
+
+    #[test]
+    fn is_syncable_rejects_traversal_and_absolute_paths() {
+        assert!(!is_syncable("../outside.md", None));
+        assert!(!is_syncable("2026/../../outside.md", None));
+        assert!(!is_syncable("/etc/passwd", None));
+        assert!(!is_syncable("", None));
+        assert!(!is_syncable("a//b.md", None));
+        // ワイヤ上のパスは POSIX 区切りのみ。Windows 風のパスは受け付けない。
+        assert!(!is_syncable("C:/windows/system32", None));
+        assert!(!is_syncable("a\\b.md", None));
+    }
+
+    #[test]
+    fn push_cannot_write_outside_the_origin() {
+        let (tmp, store) = store();
+
+        let result = store.push(
+            0,
+            vec![Change::upsert("../escaped.md", "gotcha", Utc::now())],
+        );
+
+        assert!(matches!(result, Err(Error::NotSyncable(_))));
+        // `store()` の origin は `<tmp>/origin/ws1` なので、`../` の着地点はその親。
+        let escaped = store.origin_dir.parent().unwrap().join("escaped.md");
+        assert!(
+            !escaped.exists(),
+            "origin の外にファイルが作られてはならない"
+        );
+        let _ = &tmp;
+    }
+
+    #[test]
+    fn push_cannot_write_a_hidden_path() {
+        let (_t, store) = store();
+
+        let result = store.push(0, vec![Change::upsert(".git/config", "gotcha", Utc::now())]);
+
+        assert!(matches!(result, Err(Error::NotSyncable(_))));
+    }
+
+    #[test]
+    fn push_accepts_the_configured_app_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WsStore::with_config(WsStoreConfig {
+            origin_dir: tmp.path().join("origin"),
+            state_dir: tmp.path().join("state"),
+            retrieve: None,
+            app_dir: Some(".sapphire-journal".to_owned()),
+        })
+        .unwrap();
+
+        store
+            .push(
+                0,
+                vec![Change::upsert(
+                    ".sapphire-journal/config.toml",
+                    "k = 1",
+                    Utc::now(),
+                )],
+            )
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.docs.len(), 1);
+        assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
     }
 }

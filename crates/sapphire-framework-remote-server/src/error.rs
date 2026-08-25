@@ -31,17 +31,24 @@ pub enum Error {
     /// A base64 body could not be decoded.
     #[error("invalid base64 payload: {0}")]
     Base64(String),
+
+    /// 同期対象として受け付けられないパス（隠しファイル・`..`・絶対パス）。
+    #[error("path is not syncable: {0}")]
+    NotSyncable(String),
 }
 
 /// Convenience alias for server results.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    /// Map an internal error to a JSON-RPC error object (always the internal
-    /// error code — parameter/auth problems are reported separately by the
-    /// dispatcher).
+    /// Map an internal error to a JSON-RPC error object. 受け付けられないパスは
+    /// クライアント側の誤りなので `INVALID_PARAMS`、それ以外は内部エラー。
     pub fn to_jsonrpc(&self) -> JsonRpcError {
-        JsonRpcError::new(error_codes::INTERNAL_ERROR, self.to_string())
+        let code = match self {
+            Error::NotSyncable(_) => error_codes::INVALID_PARAMS,
+            _ => error_codes::INTERNAL_ERROR,
+        };
+        JsonRpcError::new(code, self.to_string())
     }
 }
 
