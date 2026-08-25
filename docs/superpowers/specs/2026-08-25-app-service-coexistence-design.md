@@ -62,8 +62,6 @@ pub struct WsStoreConfig {
     pub state_dir: PathBuf,
     /// アプリが既に持っている retrieve ストア。None なら state_dir 配下に自前で開く。
     pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>>,
-    /// 同期対象に含めるかを判定する。None なら全ファイル。
-    pub accept: Option<Arc<dyn Fn(&Path) -> bool + Send + Sync>>,
 }
 
 impl WsStore {
@@ -71,8 +69,15 @@ impl WsStore {
 }
 ```
 
-`accept` は journal の `.sapphire-journal/` 配下（キャッシュ・設定）を同期対象から外すために要る。
-**鍵ファイルは origin の外に置く方針**だが、`accept` は多層防御として機能する。
+**同期対象を絞るフックは持たない。** ワークスペース内には同期対象外のファイルを置かない運用
+（キャッシュはアプリのキャッシュディレクトリ、鍵ファイルは origin の外）なので、設定可能な
+除外フックは不要。ワークスペース内に残る非エントリファイル（journal なら
+`.sapphire-journal/config.toml`）は**同期されるのが正しい** — ワークスペースレベルの設定は
+端末間で共有したいため。
+
+唯一の例外として、**整合スキャンは `.git/` を固定で無視する**。ユーザーが journal ルートを
+外部ツールとして git 管理する運用はあり得るため（framework ARCHITECTURE: 「git は外部ツールと
+して併用する」）、ここだけは設定ではなく固定ルールで塞ぐ。
 
 `ServerState` にも、ワークスペース名から `WsStoreConfig` を解決するフックを持たせる
 （既定は現行のレイアウト、アプリは自前の解決関数を差せる）。
@@ -118,7 +123,10 @@ impl WsStore {
 
 ### 4. change log の世代 ID
 
-change log 作成時に `generation: Uuid`（v4）を採番し、log 自身に保存する。
+change log 作成時に `generation: Uuid`（**v7**）を採番し、log 自身に保存する。v7 は先頭が
+時刻由来なので、**その change log がいつ初期化されたかが ID から読める**。世代 ID は短縮桁で
+見分ける用途がないため、v7 の「近い時刻の値は上位桁が揃う」性質は欠点にならない。
+（鍵の `id` は識別子として短縮表示するため v4。用途が違うので使い分ける。）
 
 - `SnapshotResult` に `generation` を追加。
 - `ChangesPullParams` / `ChangesPushParams` に `generation: Option<Uuid>` を追加。
@@ -144,8 +152,9 @@ created_at = "2026-08-25T…"  # 任意。空欄なら読み込み時に現在�
 expires_at = "2026-11-23T…"  # 任意。無ければ無期限
 ```
 
-- **UUID は v4**。v7 は先頭が時刻由来のため、近い時刻に発行した鍵ほど上位桁が揃い、
-  短縮表示での識別に向かない。`uuid` 依存に `v4` feature を追加する。
+- **鍵の `id` は UUID v4**。v7 は先頭が時刻由来のため、近い時刻に発行した鍵ほど上位桁が揃い、
+  短縮表示での識別に向かない。`uuid` 依存に `v4` feature を追加する（`v7` は既に有効で、
+  change log の世代 ID がそちらを使う）。
 - **トークンは平文保存**。脅威モデル（プライベート網・鍵ファイルはサーバ上にある）では
   ハッシュ化が守るものが乏しい一方、新しいクライアントを設定するときに既存の鍵を読み直せる
   利便性が効く。ファイルは `0600`（Windows では ACL 相当の最小権限）で作成する。
@@ -219,7 +228,7 @@ pub struct Authenticated {
   書き戻ること。期限切れ鍵が `authenticate` で弾かれること。`revoke` の label 重複でエラー。
 - 認証: 鍵なしで `/rpc` が 401。`protect()` を通した任意ルートも 401。
 - 鍵 0 件で起動が失敗すること。
-- `WsStoreConfig` の `accept` で除外したパスが change log に載らないこと。
+- 整合スキャンが `.git/` 配下を change log に載せないこと。
 
 ## リスク / 留意点
 
