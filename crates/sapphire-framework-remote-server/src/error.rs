@@ -46,11 +46,13 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    /// Map an internal error to a JSON-RPC error object. 受け付けられないパスは
-    /// クライアント側の誤りなので `INVALID_PARAMS`、それ以外は内部エラー。
+    /// Map an internal error to a JSON-RPC error object. 受け付けられないパスと
+    /// blob アドレスとして成立しないハッシュはクライアント側の誤りなので
+    /// `INVALID_PARAMS`、それ以外は内部エラー。
     pub fn to_jsonrpc(&self) -> JsonRpcError {
         let code = match self {
             Error::NotSyncable(_) => error_codes::INVALID_PARAMS,
+            Error::Blob(sapphire_blob::Error::InvalidHash { .. }) => error_codes::INVALID_PARAMS,
             _ => error_codes::INTERNAL_ERROR,
         };
         JsonRpcError::new(code, self.to_string())

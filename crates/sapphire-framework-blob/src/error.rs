@@ -15,6 +15,16 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// The caller supplied something that is not a blob address. Addresses are
+    /// content hashes, so anything that is not one — a relative path, an
+    /// absolute path, a truncated digest — can only be an attempt to name a
+    /// file that is not a blob.
+    #[error("'{hash}' is not a blob address (want 64 lowercase hex characters)")]
+    InvalidHash {
+        /// The rejected input, verbatim.
+        hash: String,
+    },
+
     /// Stored bytes did not hash to the address they were fetched under
     /// (corruption or tampering).
     #[error("blob '{expected}' failed integrity check (got '{actual}')")]

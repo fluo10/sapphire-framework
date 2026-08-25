@@ -45,8 +45,19 @@ async fn client_push_pull_blob_search_roundtrip() {
     let put = client.blob_put(ws, b"binary-payload").await.unwrap();
     let got = client.blob_get(ws, &put.hash).await.unwrap();
     assert_eq!(got.as_deref(), Some(&b"binary-payload"[..]));
-    // Missing blob → None.
-    assert!(client.blob_get(ws, "0000").await.unwrap().is_none());
+    // Missing blob → None. The address has to be well-formed (64 hex chars);
+    // anything else is rejected as not-an-address rather than looked up.
+    assert!(
+        client
+            .blob_get(ws, &"0".repeat(64))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        client.blob_get(ws, "0000").await.is_err(),
+        "a malformed blob address must be refused, not resolved to a path"
+    );
 
     // search
     let hits = client.search_fts(ws, "quick", 5).await.unwrap();

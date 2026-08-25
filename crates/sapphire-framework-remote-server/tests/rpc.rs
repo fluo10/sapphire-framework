@@ -330,3 +330,64 @@ async fn pull_without_a_generation_is_accepted() {
     let response = call(&st, None, methods::CHANGES_PULL, json!({"ws": "w", "since": 0, "limit": 10})).await;
     assert!(response.error.is_none());
 }
+
+#[tokio::test]
+async fn blob_get_cannot_be_steered_at_an_arbitrary_file() {
+    // `blob.get` は認証済みクライアントなら誰でも叩けるので、hash を検証しない
+    // 限りサーバプロセスが読めるファイルは何でも読めてしまう — 平文の keys.toml
+    // を含めて。
+    let (tmp, st) = state(None);
+    let secret = tmp.path().join("keys.toml");
+    std::fs::write(&secret, "[[key]]\ntoken = \"sjt_topsecret\"\n").unwrap();
+
+    let ws = "wsTraversal";
+    // 先にワークスペースを開かせて、blob ルートを実在させる。
+    let _: SnapshotResult =
+        result(call(&st, None, methods::WORKSPACE_SNAPSHOT, json!({"ws": ws})).await);
+
+    for hash in [
+        "../../../keys.toml",
+        "./../../../keys.toml",
+        secret.to_str().unwrap(),
+        "/etc/passwd",
+        // 多バイト文字はシャードの `hash[0..2]` スライスを panic させていた。
+        "€uro",
+        "deadbeef",
+    ] {
+        let response = call(
+            &st,
+            None,
+            methods::BLOB_GET,
+            json!({"ws": ws, "hash": hash}),
+        )
+        .await;
+        let err = response
+            .error
+            .unwrap_or_else(|| panic!("blob.get({hash:?}) must be rejected, got a result"));
+        assert_eq!(
+            err.code,
+            sapphire_rpc::error_codes::INVALID_PARAMS,
+            "blob.get({hash:?}) は不正なアドレスとして弾く"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "[[key]]\ntoken = \"sjt_topsecret\"\n"
+    );
+}
+
+#[tokio::test]
+async fn blob_get_still_reports_a_well_formed_but_absent_address_as_none() {
+    let (_t, st) = state(None);
+    let response = call(
+        &st,
+        None,
+        methods::BLOB_GET,
+        json!({"ws": "wsAbsent", "hash": "0".repeat(64)}),
+    )
+    .await;
+
+    assert!(response.error.is_none(), "got {:?}", response.error);
+    assert!(response.result.unwrap()["bytes_base64"].is_null());
+}
