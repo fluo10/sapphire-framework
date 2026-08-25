@@ -18,14 +18,22 @@ use sapphire_rpc::{
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
+/// 鍵を設定した（`Some`）／認証を明示的に外した（`None`）サーバ状態。
+///
+/// `None` の側が `insecure_for_tests()` を呼ぶのは飾りではない。鍵ストアの無い
+/// ルータは既定で全リクエストを 503 で拒否するので、この明示的な逃げ道を通ら
+/// なければ以下のテストは 1 つも通らない。
 fn state(token: Option<&str>) -> (tempfile::TempDir, Arc<ServerState>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut s = ServerState::new(tmp.path());
-    if let Some(t) = token {
+    match token {
         // テストは固定トークンを使いたいので、生成ではなく直接書いた鍵を読ませる。
-        let key_path = tmp.path().join("keys.toml");
-        std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
-        s = s.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
+        Some(t) => {
+            let key_path = tmp.path().join("keys.toml");
+            std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
+            s = s.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
+        }
+        None => s = s.insecure_for_tests(),
     }
     (tmp, Arc::new(s))
 }
@@ -263,6 +271,9 @@ async fn an_authenticated_request_carries_the_key_id() {
 
 #[tokio::test]
 async fn serve_refuses_to_start_without_a_usable_key() {
+    // `state(None)` は `insecure_for_tests()` 付き。それでも `serve` は起動を
+    // 拒否する — 逃げ道はルータを組むテストのためのもので、本番の待ち受けを
+    // 無認証にする手段ではない。
     let (_t, st) = state(None);
 
     // ポートを掴む前に弾かれるので、bind せずに戻ってくる。
@@ -390,4 +401,73 @@ async fn blob_get_still_reports_a_well_formed_but_absent_address_as_none() {
 
     assert!(response.error.is_none(), "got {:?}", response.error);
     assert!(response.result.unwrap()["bytes_base64"].is_null());
+}
+
+#[tokio::test]
+async fn a_router_without_a_key_store_refuses_every_request() {
+    // 鍵の設定漏れは「素通し」ではなく「何も通さない」に倒す。認証を外すのは
+    // insecure_for_tests() を明示的に呼んだときだけ。
+    let tmp = tempfile::tempdir().unwrap();
+    let st = Arc::new(ServerState::new(tmp.path()));
+
+    let req = JsonRpcRequest::new(
+        Value::from(1),
+        methods::WORKSPACE_SNAPSHOT,
+        json!({"ws": "x"}),
+    );
+    let response = router(Arc::clone(&st))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rpc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn protect_without_a_key_store_refuses_the_app_s_own_routes() {
+    // アプリが /rpc と /mcp を同じポートに載せるとき、アプリは自前の listener を
+    // 持つので `serve` の「鍵が無ければ起動しない」検査を通らない。保証は
+    // レイヤ側に無ければ意味がない。
+    let tmp = tempfile::tempdir().unwrap();
+    let st = Arc::new(ServerState::new(tmp.path()));
+
+    let app = protect(
+        Arc::clone(&st),
+        Router::new().route("/mcp", axum::routing::get(|| async { "ok" })),
+    );
+
+    let response = app
+        .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "鍵ストアが無いのに素通ししてはならない"
+    );
+}
+
+#[tokio::test]
+async fn insecure_for_tests_is_the_only_way_through_without_keys() {
+    let (_t, st) = state(None);
+    assert!(st.is_insecure());
+
+    let app = protect(
+        Arc::clone(&st),
+        Router::new().route("/mcp", axum::routing::get(|| async { "ok" })),
+    );
+    let response = app
+        .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }

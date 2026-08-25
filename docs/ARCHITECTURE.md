@@ -115,16 +115,29 @@ local/remote は `WorkspaceLocator`（path か `http(s)://…#ws`）→ `Workspa
 
 サーバ v1 = ファイル原本 + redb キャッシュ + `change_log`（`seq` 単調増加・tombstone）。cursor = 最後に取り込んだ `seq`。
 型は `sapphire-framework-rpc`（serde-only）、実装は `sapphire-framework-remote-server`（axum・単一 `POST /rpc`）。
-メソッド（Bearer トークン=デバイス単位。未設定なら無認証）:
+**認証は必須**。`Authorization: Bearer <token>` を `KeyStore`（ラベル付き平文の鍵ファイル）に対して
+検証する tower レイヤで、JSON-RPC のディスパッチより手前に立つ。したがって**認証失敗は HTTP 401**
+であって JSON-RPC エラーではない（`error_codes::UNAUTHORIZED` はクライアント側が 401 から合成する
+コードで、サーバは出さない）。鍵ストア未設定のまま `serve` を呼べば起動を拒否し、`protect` で
+組んだルータは全リクエストを HTTP 503 で拒否する。素通しになる経路は無い。
+
+`generation` は change log の世代 ID（UUIDv7・log の作成時に採番）。クライアントが名乗ってきた
+`generation` がサーバの現在値と食い違えば `GENERATION_MISMATCH`(-32003) を返す — サーバ側の log が
+作り直されて `seq` が巻き戻っている状態なので、クライアントは `workspace.snapshot` から取り直す。
+名乗らない（`generation` 省略）クライアントは当面そのまま通す。
 
 ```
-workspace.snapshot  {ws}                         -> {cursor, docs[]}            tombstone 畳み込み後
-changes.pull        {ws, since, limit}           -> {cursor, changes[], more}   textメタ+blob参照
-changes.push        {ws, base_cursor, changes[]} -> {cursor, conflicts[]}       LWW(updated_at)
-blob.get/put        {ws, hash | bytes_base64}    -> content-addressed バイナリ
-search.fts          {ws, q, limit}               -> {hits[]}（tantivy trigram FTS）
-search.semantic     {ws, q, limit}               -> 当面 fts フォールバック（server embedder は後続）
+workspace.snapshot  {ws}                                     -> {cursor, generation, docs[]}  tombstone 畳み込み後
+changes.pull        {ws, since, limit, generation?}          -> {cursor, changes[], more}     textメタ+blob参照
+changes.push        {ws, base_cursor, changes[], generation?}-> {cursor, conflicts[]}         LWW(updated_at)
+blob.get/put        {ws, hash | bytes_base64}                -> content-addressed バイナリ
+search.fts          {ws, q, limit}                           -> {hits[]}（tantivy trigram FTS）
+search.semantic     {ws, q, limit}                           -> 当面 fts フォールバック（server embedder は後続）
 ```
+
+`blob.get` の `hash` は 64 桁の小文字 hex（= 内容の SHA-256）でなければならない。それ以外は
+`INVALID_PARAMS` で弾く — アドレスは内容から導かれるものなので、形の違うものはパスとして
+解釈させる試みでしかない。
 
 クライアントは `RemoteClient`（`sapphire-framework-remote-client`）でこれらを直接呼び、`RemoteBackend` が
 ローカルキャッシュへ pull/apply・push する。競合は MVP で LWW(`updated_at`)+tombstone+`conflicts`再pull。CRDT は後続。

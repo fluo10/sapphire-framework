@@ -10,11 +10,16 @@ use sapphire_rpc::Change;
 async fn start_server(token: Option<&str>) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = ServerState::new(tmp.path());
-    if let Some(t) = token {
+    match token {
         // テストは固定トークンを使いたいので、生成ではなく直接書いた鍵を読ませる。
-        let key_path = tmp.path().join("keys.toml");
-        std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
-        state = state.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
+        Some(t) => {
+            let key_path = tmp.path().join("keys.toml");
+            std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
+            state = state.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
+        }
+        // 鍵ストアの無いルータは既定で全リクエストを 503 で拒否する。無認証で
+        // 待ち受けたいなら明示的に言う。
+        None => state = state.insecure_for_tests(),
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -55,6 +55,18 @@ pub struct WsStore {
     blobs: FsBlobStore,
     track: Box<dyn sapphire_track::TrackStore>,
     app_dir: Option<String>,
+    /// 書き込みバッチの直列化。`push` と `record_local_write` はどちらも
+    /// 「latest_per_path を読む → 判断する → ファイルを書く → append する」を
+    /// 行うが、この間に別の書き手が割り込むと、log の最新エントリと origin の
+    /// 中身が食い違いうる（`snapshot` がディスクに無い内容を配る）。
+    ///
+    /// このブランチが可能にした構成では同居する書き手が 2 つ以上いるのが**常態**
+    /// —— 同期クライアントと MCP ハンドラ —— なので、レースは理論上の話ではない。
+    /// バッチ全体をこのロックで囲って窓を閉じる。
+    ///
+    /// `reconcile` はこのロックを取らない。`record_local_write` を呼ぶので、
+    /// 取れば自己デッドロックになる（std の Mutex は再入不可）。
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl WsStore {
@@ -78,6 +90,7 @@ impl WsStore {
             blobs,
             track,
             app_dir: None,
+            write_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -105,7 +118,17 @@ impl WsStore {
             blobs,
             track,
             app_dir,
+            write_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// 書き込みバッチの入口。ロックが毒されていても中身を取り出して続行する —
+    /// バッチの途中で panic した書き手がいたとして、以後の書き込みを永久に
+    /// 拒み続けるより、`reconcile` に回収させるほうが安全網の設計に合う。
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // ── sync methods ────────────────────────────────────────────────────────
@@ -144,6 +167,9 @@ impl WsStore {
     /// `updated_at`. Paths for which the server holds a newer concurrent edit
     /// are rejected and reported in [`ChangesPushResult::conflicts`].
     pub fn push(&self, base_cursor: Cursor, changes: Vec<Change>) -> Result<ChangesPushResult> {
+        // 書き手が 2 つ以上いるのが常態なので、read-check-append の全体を
+        // 直列化する（`write_lock` のコメント参照）。
+        let _guard = self.lock_writes();
         // Snapshot of the server's latest change per path, used for conflict
         // detection. Updated in-place as we accept changes so two incoming
         // edits to the same path within one batch behave sensibly.
@@ -208,6 +234,7 @@ impl WsStore {
         paths: &[String],
         updated_at: DateTime<Utc>,
     ) -> Result<Cursor> {
+        let _guard = self.lock_writes();
         let mut latest = self.change_log.latest_per_path()?;
         let mut applied = false;
 
@@ -981,5 +1008,93 @@ mod tests {
         let second = store.reconcile().unwrap();
         assert_eq!(second.upserted, 0, "同じ差分を再検出してはならない");
         assert_eq!(second.removed, 0);
+    }
+
+    #[test]
+    fn concurrent_writers_do_not_interleave_a_batch() {
+        // このブランチが可能にした構成では、同期クライアントと MCP ハンドラが
+        // 同じ WsStore に同時に書く。read-check-append がバッチ単位で直列化
+        // されていなければ、2 つのバッチの append が噛み合い、log の最新
+        // エントリが origin の中身と食い違いうる。
+        //
+        // 直列化されていることを、観測しやすい形 —— 1 バッチが log 上で連続した
+        // seq 区間を占めること —— で押さえる。ロックが無ければ 2 つの 40 件
+        // バッチはまず確実に噛み合う。
+        const N: usize = 40;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(WsStore::open(tmp.path(), "race").unwrap());
+
+        let a = Arc::clone(&store);
+        let b = Arc::clone(&store);
+        let ta = std::thread::spawn(move || {
+            let changes = (0..N)
+                .map(|i| Change::upsert(format!("a/{i}.md"), "x", Utc::now()))
+                .collect();
+            a.push(0, changes).unwrap();
+        });
+        let tb = std::thread::spawn(move || {
+            let changes = (0..N)
+                .map(|i| Change::upsert(format!("b/{i}.md"), "y", Utc::now()))
+                .collect();
+            b.push(0, changes).unwrap();
+        });
+        ta.join().unwrap();
+        tb.join().unwrap();
+
+        let (changes, _) = store.change_log.since(0, 10 * N).unwrap();
+        assert_eq!(changes.len(), 2 * N);
+        // 先頭の書き手のパスが連続しているか = バッチが割られていないか。
+        let owners: Vec<char> = changes
+            .iter()
+            .map(|c| c.path.chars().next().unwrap())
+            .collect();
+        let switches = owners.windows(2).filter(|w| w[0] != w[1]).count();
+        assert_eq!(
+            switches, 1,
+            "2 つのバッチは連続した区間を占めるはず。got {owners:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_write_batch_does_not_interleave_with_a_push() {
+        // 上と同じ性質を、このブランチが実際に生む組み合わせ —— 同期クライアント
+        // の `push` と、MCP ハンドラが直接ファイルを書いたあとの
+        // `record_local_write` —— で押さえる。ロックは両方の入口に要る。
+        const N: usize = 40;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(WsStore::open(tmp.path(), "race2").unwrap());
+
+        // record 側のファイルは先に置いておく（record_local_write は書かず読む）。
+        std::fs::create_dir_all(store.origin_dir.join("b")).unwrap();
+        for i in 0..N {
+            std::fs::write(store.origin_dir.join("b").join(format!("{i}.md")), "y").unwrap();
+        }
+
+        let pusher = Arc::clone(&store);
+        let recorder = Arc::clone(&store);
+        let tp = std::thread::spawn(move || {
+            let changes = (0..N)
+                .map(|i| Change::upsert(format!("a/{i}.md"), "x", Utc::now()))
+                .collect();
+            pusher.push(0, changes).unwrap();
+        });
+        let tr = std::thread::spawn(move || {
+            let paths: Vec<String> = (0..N).map(|i| format!("b/{i}.md")).collect();
+            recorder.record_local_write(&paths, Utc::now()).unwrap();
+        });
+        tp.join().unwrap();
+        tr.join().unwrap();
+
+        let (changes, _) = store.change_log.since(0, 10 * N).unwrap();
+        assert_eq!(changes.len(), 2 * N);
+        let owners: Vec<char> = changes
+            .iter()
+            .map(|c| c.path.chars().next().unwrap())
+            .collect();
+        let switches = owners.windows(2).filter(|w| w[0] != w[1]).count();
+        assert_eq!(
+            switches, 1,
+            "push と record_local_write のバッチは互いに割り込まないはず。got {owners:?}"
+        );
     }
 }

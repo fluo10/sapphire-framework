@@ -53,6 +53,7 @@ pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncab
 pub struct ServerState {
     data_dir: PathBuf,
     keys: Option<Arc<KeyStore>>,
+    insecure: bool,
     workspaces: Mutex<HashMap<String, Arc<WsStore>>>,
 }
 
@@ -63,6 +64,7 @@ impl ServerState {
         Self {
             data_dir: data_dir.into(),
             keys: None,
+            insecure: false,
             workspaces: Mutex::new(HashMap::new()),
         }
     }
@@ -73,9 +75,25 @@ impl ServerState {
         self
     }
 
+    /// 鍵ストア無しで**素通しの**ルータを作ることを明示的に許可する。テスト専用。
+    ///
+    /// 既定では鍵ストアが無いルータは全リクエストを 503 で拒否する
+    /// ([`protect`] 参照)。この逃げ道に名前を与えてあるのは、「鍵を設定し忘れた」
+    /// と「認証を意図的に外した」がコード上で見分けられるようにするため。
+    /// [`serve`] はこのフラグを見ない — 鍵の無い待ち受けは依然として拒否する。
+    pub fn insecure_for_tests(mut self) -> Self {
+        self.insecure = true;
+        self
+    }
+
     /// 設定されている鍵ストア。
     pub fn keys(&self) -> Option<&Arc<KeyStore>> {
         self.keys.as_ref()
+    }
+
+    /// [`insecure_for_tests`](Self::insecure_for_tests) が呼ばれているか。
+    pub fn is_insecure(&self) -> bool {
+        self.insecure
     }
 
     /// Get (opening if necessary) the store for workspace `ws`.
@@ -107,7 +125,10 @@ pub async fn serve(addr: SocketAddr, state: Arc<ServerState>) -> std::io::Result
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "no usable API key configured; run `gen-key` first",
+                "no usable API key configured; write a key file containing \
+                 `[[key]]` / `token = \"...\"` and pass it to \
+                 `ServerState::with_keys` (the remaining fields are filled in \
+                 on load)",
             ));
         }
     }
