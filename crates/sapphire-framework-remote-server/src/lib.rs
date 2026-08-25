@@ -145,11 +145,13 @@ async fn dispatch(state: Arc<ServerState>, req: JsonRpcRequest) -> std::result::
         methods::CHANGES_PULL => {
             let p: ChangesPullParams = parse_params(req.params)?;
             let store = open_ws(&state, &p.ws)?;
+            check_generation(&store, p.generation)?;
             run(move || store.pull(p.since, p.limit)).await.and_then(to_value)
         }
         methods::CHANGES_PUSH => {
             let p: ChangesPushParams = parse_params(req.params)?;
             let store = open_ws(&state, &p.ws)?;
+            check_generation(&store, p.generation)?;
             run(move || store.push(p.base_cursor, p.changes)).await.and_then(to_value)
         }
         methods::BLOB_PUT => {
@@ -200,6 +202,26 @@ fn parse_params<T: for<'de> serde::Deserialize<'de>>(
 /// Open (or reuse) a workspace store, mapping failures to an internal error.
 fn open_ws(state: &Arc<ServerState>, ws: &str) -> std::result::Result<Arc<WsStore>, JsonRpcError> {
     state.workspace(ws).map_err(|e| e.to_jsonrpc())
+}
+
+/// クライアントが世代を名乗ってきたときだけ照合する。名乗らないクライアントは
+/// 当面そのまま通す。
+fn check_generation(
+    store: &Arc<WsStore>,
+    claimed: Option<uuid::Uuid>,
+) -> std::result::Result<(), JsonRpcError> {
+    let Some(claimed) = claimed else {
+        return Ok(());
+    };
+    let actual = store.generation().map_err(|e| e.to_jsonrpc())?;
+    if claimed == actual {
+        Ok(())
+    } else {
+        Err(JsonRpcError::new(
+            error_codes::GENERATION_MISMATCH,
+            format!("change log generation is {actual}, client claimed {claimed}; re-snapshot"),
+        ))
+    }
 }
 
 /// Run a blocking store operation on the blocking pool and map its error.

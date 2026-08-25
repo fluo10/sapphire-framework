@@ -10,7 +10,7 @@ use http_body_util::BodyExt as _;
 use sapphire_framework_remote_server::{ServerState, router};
 use sapphire_rpc::{
     BlobPutResult, Change, ChangesPullResult, ChangesPushResult, JsonRpcRequest, JsonRpcResponse,
-    SearchResult, methods,
+    SearchResult, SnapshotResult, methods,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -184,4 +184,43 @@ async fn unknown_method_reports_method_not_found() {
     let resp = call(&state, None, "does.not.exist", json!({})).await;
     let err = resp.error.expect("expected error");
     assert_eq!(err.code, sapphire_rpc::error_codes::METHOD_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn snapshot_reports_a_stable_generation() {
+    let (_t, st) = state(None);
+    let first = call(&st, None, methods::WORKSPACE_SNAPSHOT, json!({"ws": "w"})).await;
+    let second = call(&st, None, methods::WORKSPACE_SNAPSHOT, json!({"ws": "w"})).await;
+
+    let g1 = serde_json::from_value::<SnapshotResult>(first.result.unwrap())
+        .unwrap()
+        .generation;
+    let g2 = serde_json::from_value::<SnapshotResult>(second.result.unwrap())
+        .unwrap()
+        .generation;
+
+    assert_eq!(g1, g2);
+    assert_eq!(g1.get_version_num(), 7, "generation は UUIDv7");
+}
+
+#[tokio::test]
+async fn pull_with_a_foreign_generation_is_rejected() {
+    let (_t, st) = state(None);
+    let response = call(
+        &st,
+        None,
+        methods::CHANGES_PULL,
+        json!({"ws": "w", "since": 0, "limit": 10, "generation": uuid::Uuid::nil()}),
+    )
+    .await;
+
+    let err = response.error.expect("expected an error");
+    assert_eq!(err.code, sapphire_rpc::error_codes::GENERATION_MISMATCH);
+}
+
+#[tokio::test]
+async fn pull_without_a_generation_is_accepted() {
+    let (_t, st) = state(None);
+    let response = call(&st, None, methods::CHANGES_PULL, json!({"ws": "w", "since": 0, "limit": 10})).await;
+    assert!(response.error.is_none());
 }

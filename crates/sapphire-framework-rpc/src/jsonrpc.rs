@@ -45,6 +45,9 @@ pub mod error_codes {
     /// A `changes.push` was rejected because the server moved ahead; the
     /// conflicting paths are reported in the result's `conflicts`.
     pub const CONFLICT: i64 = -32002;
+    /// クライアントのカーソルがサーバの change log の世代と一致しない。
+    /// `workspace.snapshot` からやり直すこと。
+    pub const GENERATION_MISMATCH: i64 = -32003;
 }
 
 /// A JSON-RPC 2.0 request object.

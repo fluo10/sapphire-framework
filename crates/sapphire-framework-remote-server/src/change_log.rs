@@ -16,6 +16,10 @@ use crate::error::Result;
 /// `seq -> serialized Change`.
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("changes");
 
+/// `key -> value` のメタデータ表（現状 `generation` のみ）。
+const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
+const GENERATION_KEY: &str = "generation";
+
 /// Append-only change log backed by redb.
 pub struct ChangeLog {
     db: Database,
@@ -30,6 +34,13 @@ impl ChangeLog {
         let db = Database::create(path)?;
         let wtx = db.begin_write()?;
         wtx.open_table(TABLE)?;
+        {
+            let mut meta = wtx.open_table(META)?;
+            if meta.get(GENERATION_KEY)?.is_none() {
+                // v7: 先頭が時刻由来なので、この log がいつ初期化されたかが ID から読める。
+                meta.insert(GENERATION_KEY, uuid::Uuid::now_v7().to_string().as_str())?;
+            }
+        }
         wtx.commit()?;
         Ok(Self { db })
     }
@@ -108,6 +119,18 @@ impl ChangeLog {
     /// Whether the log has no entries.
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
+    }
+
+    /// この change log の世代。作成時に一度だけ採番される。
+    pub fn generation(&self) -> Result<uuid::Uuid> {
+        let rtx = self.db.begin_read()?;
+        let meta = rtx.open_table(META)?;
+        let raw = meta
+            .get(GENERATION_KEY)?
+            .map(|v| v.value().to_owned())
+            .unwrap_or_default();
+        uuid::Uuid::parse_str(&raw)
+            .map_err(|e| crate::error::Error::Redb(format!("bad generation {raw:?}: {e}")))
     }
 }
 

@@ -110,9 +110,15 @@ impl WsStore {
 
     // ── sync methods ────────────────────────────────────────────────────────
 
+    /// この workspace の change log の世代。
+    pub fn generation(&self) -> Result<uuid::Uuid> {
+        self.change_log.generation()
+    }
+
     /// Current live document set (tombstones folded out) plus the cursor.
     pub fn snapshot(&self) -> Result<SnapshotResult> {
         let cursor = self.change_log.max_seq()?;
+        let generation = self.change_log.generation()?;
         let mut docs: Vec<Change> = self
             .change_log
             .latest_per_path()?
@@ -120,7 +126,7 @@ impl WsStore {
             .filter(|c| matches!(c.kind, ChangeKind::Upsert { .. }))
             .collect();
         docs.sort_by(|a, b| a.seq.cmp(&b.seq));
-        Ok(SnapshotResult { cursor, docs })
+        Ok(SnapshotResult { cursor, generation, docs })
     }
 
     /// Changes newer than `since`, capped at `limit`.
