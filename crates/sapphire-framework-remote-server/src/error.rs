@@ -36,7 +36,8 @@ pub enum Error {
     #[error("path is not syncable: {0}")]
     NotSyncable(String),
 
-    /// The API key file failed to parse, serialize, or generate a key.
+    /// The key file failed to parse or save, a key could not be generated, or
+    /// a revoke selector did not resolve to exactly one key.
     #[error("key file error: {0}")]
     KeyFile(String),
 }

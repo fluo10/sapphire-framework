@@ -139,8 +139,10 @@ impl KeyStore {
             created_at: Utc::now(),
             expires_at,
         };
-        self.entries.push(entry.clone());
-        self.save()?;
+        let mut candidate = self.entries.clone();
+        candidate.push(entry.clone());
+        self.save_entries(&candidate)?;
+        self.entries = candidate;
         Ok(entry)
     }
 
@@ -168,8 +170,10 @@ impl KeyStore {
         match matches.as_slice() {
             [] => Err(Error::KeyFile(format!("no key matches {selector:?}"))),
             [i] => {
-                let removed = self.entries.remove(*i);
-                self.save()?;
+                let mut candidate = self.entries.clone();
+                let removed = candidate.remove(*i);
+                self.save_entries(&candidate)?;
+                self.entries = candidate;
                 Ok(removed)
             }
             many => Err(Error::KeyFile(format!(
@@ -193,11 +197,17 @@ impl KeyStore {
         self.entries.iter().any(|e| !e.is_expired(now))
     }
 
-    /// ヘッダコメントを再生成して全上書きする。
+    /// 現在の `self.entries` をヘッダ付きで全上書きする。
     fn save(&self) -> Result<()> {
+        self.save_entries(&self.entries)
+    }
+
+    /// `entries` をヘッダ付きで全上書きする。`self.entries` には触れない — 呼び出し側
+    /// は保存が成功してから代入すること。こうしておけば、ディスクフル等で保存が
+    /// 失敗しても、メモリ上の状態とファイルの中身がずれない。
+    fn save_entries(&self, entries: &[KeyEntry]) -> Result<()> {
         let raw = RawFile {
-            key: self
-                .entries
+            key: entries
                 .iter()
                 .map(|e| RawKey {
                     token: e.token.clone(),
@@ -324,6 +334,63 @@ mod tests {
         assert_eq!(store.revoke("solo").unwrap().id, solo.id);
         assert_eq!(store.revoke(&a.id.to_string()).unwrap().id, a.id);
         assert_eq!(store.entries().len(), 1);
+    }
+
+    #[test]
+    fn generate_does_not_mutate_state_when_save_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let first = store.generate("sjt", Some("keeper".into()), None).unwrap();
+
+        // Point the store at a path whose parent cannot be created: `afile`
+        // already exists as a regular file, so `create_dir_all` on it fails.
+        let blocker = tmp.path().join("afile");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        store.path = blocker.join("keys.toml");
+
+        let before = store.entries().to_vec();
+        assert!(store.generate("sjt", Some("doomed".into()), None).is_err());
+        assert_eq!(
+            store.entries(),
+            before.as_slice(),
+            "a failed save must not mutate in-memory state"
+        );
+        assert_eq!(store.entries().len(), 1);
+        assert_eq!(store.entries()[0].id, first.id);
+    }
+
+    #[test]
+    fn revoke_does_not_mutate_state_when_save_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let entry = store.generate("sjt", Some("keeper".into()), None).unwrap();
+
+        let blocker = tmp.path().join("afile");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        store.path = blocker.join("keys.toml");
+
+        let before = store.entries().to_vec();
+        assert!(store.revoke("keeper").is_err());
+        assert_eq!(
+            store.entries(),
+            before.as_slice(),
+            "a failed save must not mutate in-memory state"
+        );
+        assert_eq!(store.entries().len(), 1);
+        assert_eq!(store.entries()[0].id, entry.id);
+    }
+
+    #[test]
+    fn has_usable_key_ignores_expired_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let past = Utc::now() - Duration::hours(1);
+
+        store.generate("sjt", None, Some(past)).unwrap();
+        assert!(!store.has_usable_key(), "only an expired key exists");
+
+        store.generate("sjt", None, None).unwrap();
+        assert!(store.has_usable_key(), "a live key now exists");
     }
 
     #[test]
