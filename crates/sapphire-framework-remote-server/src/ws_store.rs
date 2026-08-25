@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use sapphire_blob::{BlobStore, FsBlobStore};
 use sapphire_retrieve::{Document, FtsQuery, RetrieveStore, open_redb};
 use sapphire_rpc::{
@@ -161,6 +162,65 @@ impl WsStore {
             cursor: self.change_log.max_seq()?,
             conflicts,
         })
+    }
+
+    /// `paths`（ワークスペース相対・POSIX 区切り）を origin から読み直し、実在する
+    /// ものを `Upsert`、消えているものを `Delete` として change log に追記する。
+    ///
+    /// アプリのサービスがファイルを直接書いたあとに呼ぶ。`push` と違い競合判定は
+    /// 行わない — サーバ上のファイルが既に真であり、log をそれに追随させるのが
+    /// この API の役目のため。内容が前回と同一なら追記しない。
+    ///
+    /// **1 回の呼び出しが 1 バッチ。** リネーム（旧パス削除＋新パス作成）は必ず
+    /// 同じ呼び出しに含めること。分けて記録すると、pull した側が一瞬エントリを
+    /// 失ったり二重に見えたりする。
+    pub fn record_local_write(
+        &self,
+        paths: &[String],
+        updated_at: DateTime<Utc>,
+    ) -> Result<Cursor> {
+        let latest = self.change_log.latest_per_path()?;
+        let mut applied = false;
+
+        for path in paths {
+            let abs = self.origin_dir.join(posix_to_native(path));
+            let change = match std::fs::read_to_string(&abs) {
+                Ok(body) => {
+                    // 同一内容なら何もしない。
+                    if let Some(existing) = latest.get(path) {
+                        if let ChangeKind::Upsert { body: old, .. } = &existing.kind {
+                            if old == &body {
+                                continue;
+                            }
+                        }
+                    }
+                    Change::upsert(path.clone(), body, updated_at)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // 既に tombstone / 未知のパスなら何もしない。
+                    match latest.get(path) {
+                        Some(existing) if matches!(existing.kind, ChangeKind::Delete) => continue,
+                        None => continue,
+                        _ => Change {
+                            seq: 0,
+                            path: path.clone(),
+                            kind: ChangeKind::Delete,
+                            updated_at,
+                        },
+                    }
+                }
+                Err(e) => return Err(Error::Io(e)),
+            };
+
+            self.apply_one(&change)?;
+            self.change_log.append(change)?;
+            applied = true;
+        }
+
+        if applied {
+            self.retrieve.rebuild_fts()?;
+        }
+        self.change_log.max_seq()
     }
 
     /// Write one change through to the origin file and the retrieve cache.
@@ -394,5 +454,70 @@ mod tests {
 
         // 注入したストア側から見えること = 二重インデックスになっていない
         assert_eq!(retrieve.document_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn record_local_write_publishes_a_file_written_behind_the_log() {
+        let (_t, store) = store();
+
+        // アプリが ops 経由で直接書いた、という想定
+        std::fs::write(store.origin_dir.join("a.md"), "written by the app").unwrap();
+        let cursor = store
+            .record_local_write(&["a.md".to_owned()], Utc::now())
+            .unwrap();
+
+        assert_eq!(cursor, 1);
+        let (changes, _) = store.change_log.since(0, 10).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "a.md");
+        assert!(matches!(&changes[0].kind, ChangeKind::Upsert { body, .. } if body == "written by the app"));
+    }
+
+    #[test]
+    fn record_local_write_records_a_missing_file_as_a_delete() {
+        let (_t, store) = store();
+        store
+            .push(0, vec![Change::upsert("a.md", "hello", Utc::now())])
+            .unwrap();
+        std::fs::remove_file(store.origin_dir.join("a.md")).unwrap();
+
+        store
+            .record_local_write(&["a.md".to_owned()], Utc::now())
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        assert!(snapshot.docs.is_empty());
+    }
+
+    #[test]
+    fn record_local_write_is_idempotent_for_unchanged_content() {
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("a.md"), "same").unwrap();
+
+        let first = store.record_local_write(&["a.md".to_owned()], Utc::now()).unwrap();
+        let second = store.record_local_write(&["a.md".to_owned()], Utc::now()).unwrap();
+
+        assert_eq!(first, second, "内容が同じなら seq を進めない");
+    }
+
+    #[test]
+    fn record_local_write_batches_a_rename_into_one_call() {
+        let (_t, store) = store();
+        store
+            .push(0, vec![Change::upsert("1_old.md", "body", Utc::now())])
+            .unwrap();
+
+        std::fs::rename(
+            store.origin_dir.join("1_old.md"),
+            store.origin_dir.join("1_new.md"),
+        )
+        .unwrap();
+        store
+            .record_local_write(&["1_old.md".to_owned(), "1_new.md".to_owned()], Utc::now())
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+        let paths: Vec<_> = snapshot.docs.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["1_new.md"]);
     }
 }
