@@ -36,6 +36,17 @@ pub enum Error {
     #[error("path is not syncable: {0}")]
     NotSyncable(String),
 
+    /// クライアントが名乗った change log の世代がサーバの現在値と食い違う。
+    /// サーバ側で log が作り直されて `seq` が巻き戻っている状態なので、
+    /// クライアントは `workspace.snapshot` から取り直す必要がある。
+    #[error("change log generation is {actual}, client claimed {claimed}; re-snapshot")]
+    GenerationMismatch {
+        /// サーバの現在の世代。
+        actual: uuid::Uuid,
+        /// クライアントが名乗った世代。
+        claimed: uuid::Uuid,
+    },
+
     /// The key file failed to parse or save, a key could not be generated, or
     /// a revoke selector did not resolve to exactly one key.
     #[error("key file error: {0}")]
@@ -53,6 +64,7 @@ impl Error {
         let code = match self {
             Error::NotSyncable(_) => error_codes::INVALID_PARAMS,
             Error::Blob(sapphire_blob::Error::InvalidHash { .. }) => error_codes::INVALID_PARAMS,
+            Error::GenerationMismatch { .. } => error_codes::GENERATION_MISMATCH,
             _ => error_codes::INTERNAL_ERROR,
         };
         JsonRpcError::new(code, self.to_string())

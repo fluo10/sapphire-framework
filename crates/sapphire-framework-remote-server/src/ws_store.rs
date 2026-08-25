@@ -40,10 +40,20 @@ pub enum Detection {
 }
 
 /// [`WsStore::reconcile`] の結果。
+///
+/// 件数は **検出した差分の数** であって、change log に追記された件数ではない。
+/// `record_local_write` は冪等なので、クライアントが push したばかりのファイルは
+/// 「track db から見れば新しい mtime」として `upserted` に 1 件数えられる一方、
+/// 内容が同じなら log には何も積まれない。ここを追記件数に合わせなかったのは、
+/// この報告の用途が「安全網が何を拾ったか」の可観測性にあるため — 拾ったが
+/// 結果として書くことが無かった、も知りたい情報になる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileReport {
+    /// origin 側に存在し、track db の記録と mtime が食い違ったファイルの数。
     pub upserted: usize,
+    /// track db にあって origin から消えていたファイルの数。
     pub removed: usize,
+    /// 差分の検出方法。
     pub detection: Detection,
 }
 
@@ -53,6 +63,10 @@ pub struct WsStore {
     retrieve: Arc<dyn RetrieveStore + Send + Sync>,
     change_log: ChangeLog,
     blobs: FsBlobStore,
+    /// The track db is keyed by OS-native absolute paths, so this redb file is
+    /// pinned to `origin_dir`'s current location: move the origin and the
+    /// stored mtimes stop matching, and the next `reconcile` re-detects
+    /// everything as new.
     track: Box<dyn sapphire_track::TrackStore>,
     app_dir: Option<String>,
     /// 書き込みバッチの直列化。`push` と `record_local_write` はどちらも
@@ -166,10 +180,17 @@ impl WsStore {
     /// Apply `changes` on top of `base_cursor`, last-writer-wins by
     /// `updated_at`. Paths for which the server holds a newer concurrent edit
     /// are rejected and reported in [`ChangesPushResult::conflicts`].
+    ///
+    /// 同期対象外のパスが 1 つでも混じっていればバッチ全体を拒否する。判定は
+    /// 書き始める前に済ませるので、`NotSyncable` を返したときに一部だけ適用
+    /// された中途半端な状態は残らない。
     pub fn push(&self, base_cursor: Cursor, changes: Vec<Change>) -> Result<ChangesPushResult> {
         // 書き手が 2 つ以上いるのが常態なので、read-check-append の全体を
         // 直列化する（`write_lock` のコメント参照）。
         let _guard = self.lock_writes();
+        if let Some(bad) = self.first_non_syncable(changes.iter().map(|c| c.path.as_str())) {
+            return Err(Error::NotSyncable(bad.to_owned()));
+        }
         // Snapshot of the server's latest change per path, used for conflict
         // detection. Updated in-place as we accept changes so two incoming
         // edits to the same path within one batch behave sensibly.
@@ -235,14 +256,16 @@ impl WsStore {
         updated_at: DateTime<Utc>,
     ) -> Result<Cursor> {
         let _guard = self.lock_writes();
+        // ガードはループに入る前に、全パスまとめて。1 つでも同期対象外なら
+        // 一件も記録せずに返す — 途中まで追記してから拒否すると、log が
+        // 呼び出し側の意図した終了状態と食い違ったまま残る。
+        if let Some(bad) = self.first_non_syncable(paths.iter().map(String::as_str)) {
+            return Err(Error::NotSyncable(bad.to_owned()));
+        }
         let mut latest = self.change_log.latest_per_path()?;
         let mut applied = false;
 
         for path in paths {
-            // ガードはループの先頭で — origin の外を指すパスは、読みにすら行かせない。
-            if !is_syncable(path, self.app_dir.as_deref()) {
-                return Err(Error::NotSyncable(path.clone()));
-            }
             let abs = self.origin_dir.join(posix_to_native(path));
             let change = match std::fs::read_to_string(&abs) {
                 Ok(body) => {
@@ -291,6 +314,16 @@ impl WsStore {
             self.retrieve.rebuild_fts()?;
         }
         self.change_log.max_seq()
+    }
+
+    /// バッチ内で最初に見つかった同期対象外のパス。全部通るなら `None`。
+    ///
+    /// 書き込みループの中で 1 件ずつ判定すると、拒否された時点より前のパスだけ
+    /// が適用された中途半端なバッチが残る。門番はループの外に置く。
+    fn first_non_syncable<'a>(&self, paths: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+        paths
+            .into_iter()
+            .find(|p| !is_syncable(p, self.app_dir.as_deref()))
     }
 
     /// Write one change through to the origin file, then index it. Does
@@ -463,14 +496,30 @@ fn posix_to_native(path: &str) -> PathBuf {
 /// `app_dir` に名指ししたディレクトリ（例 `.sapphire-journal`）だけを通す。
 /// 除外一覧を育てる方式より、除外し忘れが起きない。
 ///
-/// 併せて `..`・絶対パス・空要素も拒否する。これが origin の外へ書かせない唯一の
-/// 防壁なので、`WsStore` の書き込み経路は必ずこれを通す。
+/// 併せて `..`・絶対パス・空要素も拒否する。`WsStore` の書き込み経路は必ず
+/// これを通す。
+///
+/// **これは純粋にテキスト上の判定である。** origin の中にディレクトリへの
+/// シンボリックリンクがあれば、`a/b.md` のような何の変哲もないパスでも
+/// `fs::write` はリンクを辿って origin の外へ着地しうる — この関数はそれを
+/// 見ない。origin の外を指すパスを**綴らせない**のがこの関数の仕事であって、
+/// 書き込みが origin の中に着地することの保証ではない。（走査側の
+/// `sapphire_track::scan` は `follow_links(false)` なので、`reconcile` は
+/// リンクの先を読みには行かない。）
 pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool {
     if rel.is_empty() || rel.starts_with('/') {
         return false;
     }
-    // ワイヤ上のパスは POSIX 区切りのみ。逆スラッシュとドライブ指定は受け付けない。
-    if rel.contains('\\') || rel.contains(':') {
+    // ワイヤ上のパスは POSIX 区切りのみ。逆スラッシュは受け付けない。
+    if rel.contains('\\') {
+        return false;
+    }
+    // 先頭要素がドライブ指定（`C:` / `C:foo`）なら拒否する。`:` を全面禁止に
+    // すると `2026-08-25T10:00.md` のような真っ当な POSIX ファイル名まで
+    // 落ちるので、判定は Windows がドライブ相対パスとして解釈しうる位置 —
+    // 第 1 要素の先頭 — に限る。
+    let first = rel.split('/').next().unwrap_or_default().as_bytes();
+    if first.len() >= 2 && first[0].is_ascii_alphabetic() && first[1] == b':' {
         return false;
     }
     rel.split('/').all(|seg| {
@@ -796,6 +845,8 @@ mod tests {
         assert!(!is_syncable("a//b.md", None));
         // ワイヤ上のパスは POSIX 区切りのみ。Windows 風のパスは受け付けない。
         assert!(!is_syncable("C:/windows/system32", None));
+        assert!(!is_syncable("C:", None));
+        assert!(!is_syncable("c:relative.md", None));
         assert!(!is_syncable("a\\b.md", None));
     }
 
@@ -1095,6 +1146,54 @@ mod tests {
         assert_eq!(
             switches, 1,
             "push と record_local_write のバッチは互いに割り込まないはず。got {owners:?}"
+        );
+    }
+
+    #[test]
+    fn is_syncable_allows_a_colon_inside_a_file_name() {
+        // ドライブ指定を弾くための `:` 禁止が、真っ当な POSIX ファイル名まで
+        // 巻き添えにしてはならない。タイムスタンプを名前に持つファイルは
+        // journal では普通。
+        assert!(is_syncable("2026-08-25T10:00.md", None));
+        assert!(is_syncable("2026/2026-08-25T10:00:30.md", None));
+        assert!(is_syncable("notes/a:b.md", None));
+    }
+
+    #[test]
+    fn push_validates_every_path_before_writing_any() {
+        let (_t, store) = store();
+
+        // 2 件目が同期対象外。1 件目は真っ当なパス。
+        let result = store.push(
+            0,
+            vec![
+                Change::upsert("ok.md", "written?", Utc::now()),
+                Change::upsert(".git/config", "gotcha", Utc::now()),
+            ],
+        );
+
+        assert!(matches!(result, Err(Error::NotSyncable(_))));
+        assert!(
+            !store.origin_dir.join("ok.md").exists(),
+            "拒否されたバッチは 1 件も適用してはならない"
+        );
+        assert!(store.change_log.since(0, 10).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn record_local_write_validates_every_path_before_recording_any() {
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("ok.md"), "body").unwrap();
+
+        let result = store.record_local_write(
+            &["ok.md".to_owned(), "../escaped.md".to_owned()],
+            Utc::now(),
+        );
+
+        assert!(matches!(result, Err(Error::NotSyncable(_))));
+        assert!(
+            store.change_log.since(0, 10).unwrap().0.is_empty(),
+            "拒否されたバッチは 1 件も log に載せてはならない"
         );
     }
 }

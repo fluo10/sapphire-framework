@@ -149,13 +149,16 @@ pub fn mtime_secs(path: &Path) -> i64 {
 /// Walk `root` recursively and return an [`Observed`] entry for every file for
 /// which `accept(path)` is `true`.
 ///
-/// `accept` also governs directories: a directory for which `accept` returns
-/// `false` is not descended into, so its contents are never observed (and
-/// never even visited — this is a pruning decision, not just a filter on the
-/// final file list). `root` itself is always entered regardless of what
-/// `accept(root)` would return, so callers don't need a special case for a
-/// root that happens to fail their own predicate (e.g. a hidden directory
-/// used as `root` directly). Symlinks are not followed.
+/// `accept` also governs directories, so it must return `true` for every
+/// directory the caller wants descended into — a predicate written to accept
+/// only files (say, `path.extension() == Some("md")`) prunes every
+/// subdirectory and silently observes nothing below `root`. A directory for
+/// which `accept` returns `false` is not descended into, so its contents are
+/// never observed (and never even visited — this is a pruning decision, not
+/// just a filter on the final file list). `root` itself is always entered
+/// regardless of what `accept(root)` would return, so callers don't need a
+/// special case for a root that happens to fail their own predicate (e.g. a
+/// hidden directory used as `root` directly). Symlinks are not followed.
 pub fn scan<F: Fn(&Path) -> bool>(root: &Path, accept: F) -> Result<Vec<Observed>> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root)

@@ -79,6 +79,12 @@ pub mod prelude {
     #[cfg(all(feature = "remote-client", not(feature = "backend")))]
     pub use crate::remote_client::RemoteClient;
 
+    // An application hosting its own routes alongside `/rpc` needs more than
+    // `router`/`serve`: `KeyStore` to build the state, `WsStoreConfig` for the
+    // resolver hook, and `protect`/`Authenticated` to put the same key on its
+    // own routes.
     #[cfg(feature = "remote-server")]
-    pub use crate::remote_server::{ServerState, router, serve};
+    pub use crate::remote_server::{
+        Authenticated, KeyStore, ServerState, WsStore, WsStoreConfig, protect, router, serve,
+    };
 }
