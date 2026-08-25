@@ -46,6 +46,7 @@
 **含む**: 上記 1〜4 の解消と、ラベル付き複数トークンの鍵ファイル管理。
 
 **含まない**（将来）: 書き込みごとの作成者記録（`Change` への writer フィールド追加）、
+ledger・timer への機能展開（ただし timer-server のコンパイル追従は含む）、
 鍵ごとの権限差（読み取り専用鍵など）、TLS / OAuth、CRDT、blob の GC。
 
 ## 設計
@@ -138,6 +139,9 @@ change log 作成時に `generation: Uuid`（**v7**）を採番し、log 自身�
 
 ### 5. 鍵ファイル（ラベル付き複数トークン）
 
+framework issue **#92「Per-key labeled auth」**がこれを追跡している
+（`sapphire-timer-server` の `--token` のコメントから参照されている）。本節はその実装案。
+
 **置き場所**: origin の外。パスは呼び出し側が指定する（既定はサーバの設定ファイルの隣）。
 origin 配下に置くと同期でクライアントに配られてしまうため、ここは譲れない。
 
@@ -210,6 +214,9 @@ pub struct Authenticated {
 ```
 
 - `ServerState::with_token`（単一トークン）は `KeyStore` を持つ形に置き換える。
+  **これは破壊的変更で、既存の `sapphire-timer-server` が壊れる**（framework を
+  `branch = "main"` で参照しているため次のビルドで落ちる）。timer への機能展開はスコープ外だが、
+  **コンパイルを通すための追従は本 PR に含める**。`--token` を鍵ファイル方式へ移行させる。
 - ハンドラ内の `authorized()` は廃し、layer に一本化する。
 - **`Authenticated` に `key_id` を載せるところまでを今回やる。** 将来 `Change` に
   書き込み元を持たせるときは、rpc 型に 1 フィールド足して layer が載せた値を読むだけになる。
