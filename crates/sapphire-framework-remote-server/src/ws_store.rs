@@ -171,15 +171,22 @@ impl WsStore {
     /// 行わない — サーバ上のファイルが既に真であり、log をそれに追随させるのが
     /// この API の役目のため。内容が前回と同一なら追記しない。
     ///
-    /// **1 回の呼び出しが 1 バッチ。** リネーム（旧パス削除＋新パス作成）は必ず
-    /// 同じ呼び出しに含めること。分けて記録すると、pull した側が一瞬エントリを
-    /// 失ったり二重に見えたりする。
+    /// **1 回の呼び出しが 1 バッチ。** 複数パスは渡した順に記録される — リネー
+    /// ムなら旧パス→新パスの順で渡せば delete→upsert の順になり、バッチ全体を
+    /// 適用すれば正しい終了状態に収束する。呼び出し側が旧パスの削除を記録し
+    /// 忘れることはない。
+    ///
+    /// ただし **これはトランザクションではない。** 各パスは別々の redb コミッ
+    /// トとして追記されるため、同時に走る `pull`（特に `limit` で範囲が分割さ
+    /// れた場合）はリネームを途中状態のまま観測しうる — クライアントは次の
+    /// pull で収束する。呼び出し途中でクラッシュすると log が origin より遅れ
+    /// た状態のまま残るが、そこからの回復は `reconcile`（Task 4）の役目。
     pub fn record_local_write(
         &self,
         paths: &[String],
         updated_at: DateTime<Utc>,
     ) -> Result<Cursor> {
-        let latest = self.change_log.latest_per_path()?;
+        let mut latest = self.change_log.latest_per_path()?;
         let mut applied = false;
 
         for path in paths {
@@ -201,19 +208,15 @@ impl WsStore {
                     match latest.get(path) {
                         Some(existing) if matches!(existing.kind, ChangeKind::Delete) => continue,
                         None => continue,
-                        _ => Change {
-                            seq: 0,
-                            path: path.clone(),
-                            kind: ChangeKind::Delete,
-                            updated_at,
-                        },
+                        _ => Change::delete(path.clone(), updated_at),
                     }
                 }
                 Err(e) => return Err(Error::Io(e)),
             };
 
             self.apply_one(&change)?;
-            self.change_log.append(change)?;
+            let stored = self.change_log.append(change)?;
+            latest.insert(stored.path.clone(), stored);
             applied = true;
         }
 
@@ -494,8 +497,12 @@ mod tests {
         let (_t, store) = store();
         std::fs::write(store.origin_dir.join("a.md"), "same").unwrap();
 
-        let first = store.record_local_write(&["a.md".to_owned()], Utc::now()).unwrap();
-        let second = store.record_local_write(&["a.md".to_owned()], Utc::now()).unwrap();
+        let first = store
+            .record_local_write(&["a.md".to_owned()], Utc::now())
+            .unwrap();
+        let second = store
+            .record_local_write(&["a.md".to_owned()], Utc::now())
+            .unwrap();
 
         assert_eq!(first, second, "内容が同じなら seq を進めない");
     }
