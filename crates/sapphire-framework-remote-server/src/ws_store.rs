@@ -181,6 +181,12 @@ impl WsStore {
     /// 行わない — サーバ上のファイルが既に真であり、log をそれに追随させるのが
     /// この API の役目のため。内容が前回と同一なら追記しない。
     ///
+    /// **ファイルには一切書き込まない。** origin は既に真なので、読んだ内容を
+    /// そのまま書き戻すのは無駄な上に mtime を荒らし、`reconcile` に「今まさに
+    /// 自分が書いた変更」を外部編集と誤認させて二重に upsert 報告させる —
+    /// だから `apply_one` は呼ばず、`is_syncable` の門番を自前でかけたあと
+    /// `index_change` だけを呼ぶ。
+    ///
     /// **1 回の呼び出しが 1 バッチ。** 複数パスは渡した順に記録される — リネー
     /// ムなら旧パス→新パスの順で渡せば delete→upsert の順になり、バッチ全体を
     /// 適用すれば正しい終了状態に収束する。呼び出し側が旧パスの削除を記録し
@@ -200,6 +206,10 @@ impl WsStore {
         let mut applied = false;
 
         for path in paths {
+            // ガードはループの先頭で — origin の外を指すパスは、読みにすら行かせない。
+            if !is_syncable(path, self.app_dir.as_deref()) {
+                return Err(Error::NotSyncable(path.clone()));
+            }
             let abs = self.origin_dir.join(posix_to_native(path));
             let change = match std::fs::read_to_string(&abs) {
                 Ok(body) => {
@@ -224,7 +234,7 @@ impl WsStore {
                 Err(e) => return Err(Error::Io(e)),
             };
 
-            self.apply_one(&change)?;
+            self.index_change(&change)?;
             let stored = self.change_log.append(change)?;
             latest.insert(stored.path.clone(), stored);
             applied = true;
@@ -236,8 +246,16 @@ impl WsStore {
         self.change_log.max_seq()
     }
 
-    /// Write one change through to the origin file and the retrieve cache.
-    /// Does **not** rebuild FTS (the caller batches that) nor append to the log.
+    /// Write one change through to the origin file, then index it. Does
+    /// **not** rebuild FTS (the caller batches that) nor append to the log.
+    ///
+    /// [`record_local_write`](Self::record_local_write) does *not* go through
+    /// here — its whole premise is that the file on disk already holds the
+    /// change, so writing it back would be a pointless, mtime-churning
+    /// round-trip (and, worse, it would feed `reconcile` a false positive on
+    /// its next pass, since the write it just made looks exactly like an
+    /// external edit). It calls [`Self::index_change`] directly instead,
+    /// after applying the same `is_syncable` guard itself.
     fn apply_one(&self, change: &Change) -> Result<()> {
         if !is_syncable(&change.path, self.app_dir.as_deref()) {
             return Err(Error::NotSyncable(change.path.clone()));
@@ -249,6 +267,22 @@ impl WsStore {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&abs, body)?;
+            }
+            ChangeKind::Delete => match std::fs::remove_file(&abs) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Io(e)),
+            },
+        }
+        self.index_change(change)
+    }
+
+    /// Update the retrieve cache to match `change`. Touches neither the
+    /// filesystem nor the change log — callers apply their own `is_syncable`
+    /// guard and (if relevant) filesystem write before calling this.
+    fn index_change(&self, change: &Change) -> Result<()> {
+        match &change.kind {
+            ChangeKind::Upsert { body, .. } => {
                 self.retrieve.upsert_document(&Document {
                     id: path_to_doc_id(&change.path),
                     body: body.clone(),
@@ -257,11 +291,6 @@ impl WsStore {
                 })?;
             }
             ChangeKind::Delete => {
-                match std::fs::remove_file(&abs) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(Error::Io(e)),
-                }
                 self.retrieve.remove_document(path_to_doc_id(&change.path))?;
             }
         }
@@ -634,6 +663,56 @@ mod tests {
     }
 
     #[test]
+    fn record_local_write_rejects_a_non_syncable_path() {
+        let (tmp, store) = store();
+
+        // 万一ガードをすり抜けたら読めてしまう位置に、それとわかる内容を置いておく。
+        let escaped = store.origin_dir.parent().unwrap().join("escaped.md");
+        std::fs::write(&escaped, "should never be read").unwrap();
+
+        let result = store.record_local_write(&["../escaped.md".to_owned()], Utc::now());
+
+        assert!(matches!(result, Err(Error::NotSyncable(_))));
+        let (changes, _) = store.change_log.since(0, 10).unwrap();
+        assert!(
+            changes.is_empty(),
+            "拒否されたパスが log に載ってはならない"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&escaped).unwrap(),
+            "should never be read",
+            "origin の外のファイルが書き換えられてはならない"
+        );
+        let _ = &tmp;
+    }
+
+    #[test]
+    fn record_local_write_does_not_touch_the_filesystem() {
+        // mtime は秒分解能なので同一秒内の書き戻しは reconcile からは見えない
+        // (reconcile_does_not_re_upsert_a_file_it_just_recorded 参照)。ここでは
+        // record_local_write が保証すべき本体 — ファイルへの書き込みが一切
+        // 起きないこと — を、OS のフル精度タイムスタンプで直接確認する。
+        let (_t, store) = store();
+        let path = store.origin_dir.join("a.md");
+        std::fs::write(&path, "hello").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        // 書き込みが起きていれば秒分解能を待たずとも確実にタイムスタンプが動く
+        // よう、わずかに間を置く。
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        store
+            .record_local_write(&["a.md".to_owned()], Utc::now())
+            .unwrap();
+
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            before, after,
+            "record_local_write must not rewrite the file it just read"
+        );
+    }
+
+    #[test]
     fn is_syncable_allows_ordinary_paths() {
         assert!(is_syncable("a.md", None));
         assert!(is_syncable("2026/1_note.md", None));
@@ -775,6 +854,25 @@ mod tests {
 
         assert_eq!(report.upserted, 0);
         assert_eq!(report.removed, 0);
+    }
+
+    #[test]
+    fn reconcile_does_not_re_upsert_a_file_it_just_recorded() {
+        // record_local_write は origin にファイルを書き戻してはならない — 戻すと
+        // mtime が動き、reconcile が事前に取っておいた mtime と食い違って、次の
+        // reconcile でまた「変更あり」と報告してしまう。
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("manual.md"), "typed in by hand").unwrap();
+
+        let first = store.reconcile().unwrap();
+        assert_eq!(first.upserted, 1);
+
+        let second = store.reconcile().unwrap();
+        assert_eq!(
+            second.upserted, 0,
+            "直前に取り込んだファイルを再び upserted に数えてはならない"
+        );
+        assert_eq!(second.removed, 0);
     }
 
     #[test]

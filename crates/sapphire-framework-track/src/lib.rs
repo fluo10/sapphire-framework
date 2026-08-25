@@ -161,14 +161,16 @@ pub fn scan<F: Fn(&Path) -> bool>(root: &Path, accept: F) -> Result<Vec<Observed
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        // `accept` is the single decision point: it decides both which
+        // directories to descend into and which files end up in `out` (the
+        // loop body below just picks files back out, it does not re-check
+        // `accept`). Root (depth 0) is exempt so a root that itself fails
+        // `accept` — an allowed hidden directory, say — is still entered.
         .filter_entry(|e| e.depth() == 0 || accept(e.path()))
     {
         let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if accept(path) {
+        if entry.file_type().is_file() {
+            let path = entry.path();
             out.push(Observed {
                 path: path.to_path_buf(),
                 mtime: mtime_secs(path),
