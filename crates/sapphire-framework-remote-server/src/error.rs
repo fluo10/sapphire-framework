@@ -20,6 +20,10 @@ pub enum Error {
     #[error("blob error: {0}")]
     Blob(#[from] sapphire_blob::Error),
 
+    /// The track (mtime change-detection) store failed.
+    #[error("track error: {0}")]
+    Track(#[from] sapphire_track::Error),
+
     /// (De)serialisation failed.
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),

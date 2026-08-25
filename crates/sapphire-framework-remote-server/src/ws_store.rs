@@ -16,17 +16,39 @@ use sapphire_rpc::{
 use crate::change_log::ChangeLog;
 use crate::error::{Error, Result};
 
+/// [`WsStore::with_config`] の入力。アプリが既に持つワークスペースとキャッシュを
+/// そのまま使わせるための注入点。
+pub struct WsStoreConfig {
+    /// 同期対象のファイルが実際に置かれているディレクトリ。
+    pub origin_dir: PathBuf,
+    /// change log / blob / track db を置くサーバ側の作業ディレクトリ。
+    pub state_dir: PathBuf,
+    /// アプリが既に持っている retrieve ストア。`None` なら `state_dir` 配下に自前で開く。
+    pub retrieve: Option<Arc<dyn RetrieveStore + Send + Sync>>,
+    /// 同期対象に含めてよい唯一の隠しディレクトリ（例 `".sapphire-journal"`）。
+    /// `None` なら隠しファイルは一切同期しない。判定は Task 3 の `is_syncable`。
+    pub app_dir: Option<String>,
+}
+
 /// Storage for a single workspace on the server.
 pub struct WsStore {
     origin_dir: PathBuf,
     retrieve: Arc<dyn RetrieveStore + Send + Sync>,
     change_log: ChangeLog,
     blobs: FsBlobStore,
+    // Unused until Task 4 (`reconcile`), which diffs the origin directory
+    // against this store to find writes that bypassed `push`.
+    #[allow(dead_code)]
+    track: Box<dyn sapphire_track::TrackStore>,
+    // Unused until Task 3 (`is_syncable`), which will consult this to decide
+    // whether a hidden path is allowed to sync.
+    #[allow(dead_code)]
+    app_dir: Option<String>,
 }
 
 impl WsStore {
-    /// Open (creating as needed) the four stores for one workspace under
-    /// `base_dir`, namespaced by `ws`.
+    /// Open (creating as needed) the stores for one workspace under `base_dir`,
+    /// namespaced by `ws`. ディスク上のレイアウトは従来通り。
     pub fn open(base_dir: &Path, ws: &str) -> Result<Self> {
         let safe = sanitize(ws);
         let origin_dir = base_dir.join("origin").join(&safe);
@@ -34,11 +56,44 @@ impl WsStore {
         let retrieve = open_redb(&base_dir.join("cache").join(format!("{safe}.redb")))?;
         let change_log = ChangeLog::open(&base_dir.join("changelog").join(format!("{safe}.redb")))?;
         let blobs = FsBlobStore::open(base_dir.join("blobs").join(&safe))?;
+        let track_path = base_dir.join("track").join(format!("{safe}.redb"));
+        std::fs::create_dir_all(track_path.parent().unwrap())?;
+        let track = Box::new(sapphire_track::open_redb(&track_path)?);
+        // 従来レイアウトに隠しディレクトリは無いので、許可するものも無い。
         Ok(Self {
             origin_dir,
             retrieve,
             change_log,
             blobs,
+            track,
+            app_dir: None,
+        })
+    }
+
+    /// Open the stores for a workspace that already exists on disk.
+    pub fn with_config(config: WsStoreConfig) -> Result<Self> {
+        let WsStoreConfig {
+            origin_dir,
+            state_dir,
+            retrieve,
+            app_dir,
+        } = config;
+        std::fs::create_dir_all(&origin_dir)?;
+        std::fs::create_dir_all(&state_dir)?;
+        let retrieve = match retrieve {
+            Some(r) => r,
+            None => open_redb(&state_dir.join("cache.redb"))?,
+        };
+        let change_log = ChangeLog::open(&state_dir.join("changelog.redb"))?;
+        let blobs = FsBlobStore::open(state_dir.join("blobs"))?;
+        let track = Box::new(sapphire_track::open_redb(&state_dir.join("track_v1.redb"))?);
+        Ok(Self {
+            origin_dir,
+            retrieve,
+            change_log,
+            blobs,
+            track,
+            app_dir,
         })
     }
 
@@ -296,5 +351,48 @@ mod tests {
         let (_t, store) = store();
         let r = store.blob_put(b"binary").unwrap();
         assert_eq!(store.blob_get(&r.hash).unwrap().as_deref(), Some(&b"binary"[..]));
+    }
+
+    #[test]
+    fn with_config_uses_the_given_origin_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("my-journal");
+        std::fs::create_dir_all(&origin).unwrap();
+
+        let store = WsStore::with_config(WsStoreConfig {
+            origin_dir: origin.clone(),
+            state_dir: tmp.path().join("server-state"),
+            retrieve: None,
+            app_dir: None,
+        })
+        .unwrap();
+
+        store
+            .push(0, vec![Change::upsert("a.md", "hello", Utc::now())])
+            .unwrap();
+
+        // origin_dir 直下に書かれること（origin/<ws>/ を掘らない）
+        assert_eq!(std::fs::read_to_string(origin.join("a.md")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn with_config_reuses_an_injected_retrieve_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let retrieve = sapphire_retrieve::open_redb(&tmp.path().join("shared.redb")).unwrap();
+
+        let store = WsStore::with_config(WsStoreConfig {
+            origin_dir: tmp.path().join("origin"),
+            state_dir: tmp.path().join("state"),
+            retrieve: Some(std::sync::Arc::clone(&retrieve)),
+            app_dir: None,
+        })
+        .unwrap();
+
+        store
+            .push(0, vec![Change::upsert("a.md", "hello", Utc::now())])
+            .unwrap();
+
+        // 注入したストア側から見えること = 二重インデックスになっていない
+        assert_eq!(retrieve.document_count().unwrap(), 1);
     }
 }
