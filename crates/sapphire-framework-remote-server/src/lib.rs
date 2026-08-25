@@ -46,7 +46,7 @@ mod ws_store;
 
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
-pub use ws_store::{WsStore, WsStoreConfig, is_syncable};
+pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
 /// Shared server state: a base data directory, an optional bearer token, and a
 /// lazily-populated map of open workspaces.

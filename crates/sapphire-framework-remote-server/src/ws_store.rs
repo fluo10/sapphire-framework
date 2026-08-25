@@ -31,15 +31,28 @@ pub struct WsStoreConfig {
     pub app_dir: Option<String>,
 }
 
+/// `reconcile` が変更を検出した方法。将来 mtime から内容ハッシュへ上げられるよう
+/// 報告に残す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detection {
+    /// mtime（秒分解能）の比較。同一秒内の連続書き込みは検出できない。
+    Mtime,
+}
+
+/// [`WsStore::reconcile`] の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub upserted: usize,
+    pub removed: usize,
+    pub detection: Detection,
+}
+
 /// Storage for a single workspace on the server.
 pub struct WsStore {
     origin_dir: PathBuf,
     retrieve: Arc<dyn RetrieveStore + Send + Sync>,
     change_log: ChangeLog,
     blobs: FsBlobStore,
-    // Unused until Task 4 (`reconcile`), which diffs the origin directory
-    // against this store to find writes that bypassed `push`.
-    #[allow(dead_code)]
     track: Box<dyn sapphire_track::TrackStore>,
     app_dir: Option<String>,
 }
@@ -282,6 +295,112 @@ impl WsStore {
             })
             .collect())
     }
+
+    /// origin を走査し、track db との差分を change log に反映する。
+    ///
+    /// [`record_local_write`](Self::record_local_write) の呼び忘れ、サーバ上での
+    /// 手作業、外部ツールの編集を回収するための安全網。起動直後に 1 回と、
+    /// 呼び出し側が回す定期ティックから呼ぶ想定(このメソッド自身はタイマーを
+    /// 持たない)。
+    pub fn reconcile(&self) -> Result<ReconcileReport> {
+        // 走査そのものは全件を舐めるが、拾うのは同期可能なパスだけ。判定は
+        // 書き込み側(apply_one)と同じ関数なので、規則が二か所に散らない。
+        //
+        // `sapphire_track::scan` は隠しディレクトリ(名前が `.` で始まるもの)を
+        // 無条件に剪定する — walkdir の `filter_entry` はルートエントリにも
+        // 述語を適用するため、`app_dir` 自身を scan のルートに渡しても中身は
+        // 一切見えない。そのため許可された唯一の隠しディレクトリだけは
+        // `scan_dir` で自前に潜る。`.git` はここでも `.git` のままなので
+        // scan からは見えず、これがブリーフの言う「.git/ を舐めるコスト」の
+        // 実体。剪定は行っているが、剪定できるのは `scan` が届く範囲だけ、
+        // という設計上の穴を `app_dir` の分だけ埋めている。
+        let accept = |p: &Path| {
+            self.to_ws_path(p)
+                .is_some_and(|rel| is_syncable(&rel, self.app_dir.as_deref()))
+        };
+        let mut observed = sapphire_track::scan(&self.origin_dir, accept)?;
+        if let Some(app) = &self.app_dir {
+            scan_dir(&self.origin_dir.join(app), &accept, &mut observed)?;
+        }
+        let stored = self.track.mtimes()?;
+        let changes = sapphire_track::diff(&stored, &observed);
+
+        let mut paths: Vec<String> = changes
+            .upserted()
+            .filter_map(|p| self.to_ws_path(p))
+            .collect();
+        let upserted = paths.len();
+        let removed_paths: Vec<String> = changes
+            .removed
+            .iter()
+            .filter_map(|p| self.to_ws_path(p))
+            .collect();
+        let removed = removed_paths.len();
+        paths.extend(removed_paths);
+
+        if !paths.is_empty() {
+            self.record_local_write(&paths, Utc::now())?;
+        }
+
+        // track db を今回の観測に合わせる。
+        let entries: Vec<(String, i64)> = observed
+            .iter()
+            .map(|o| (o.path.to_string_lossy().into_owned(), o.mtime))
+            .collect();
+        self.track.upsert_many(&entries)?;
+        for p in &changes.removed {
+            self.track.remove(&p.to_string_lossy())?;
+        }
+
+        Ok(ReconcileReport { upserted, removed, detection: Detection::Mtime })
+    }
+
+    /// 絶対パスを origin 相対の POSIX パスへ。origin の外なら `None`。
+    fn to_ws_path(&self, abs: &Path) -> Option<String> {
+        let rel = abs.strip_prefix(&self.origin_dir).ok()?;
+        let mut out = String::new();
+        for comp in rel.components() {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&comp.as_os_str().to_string_lossy());
+        }
+        Some(out)
+    }
+}
+
+/// `dir` を再帰的に走査し、`accept` を満たすファイルを `out` に追加する。
+///
+/// [`sapphire_track::scan`] と同じ振る舞い(隠しディレクトリは剪定・シンボリック
+/// リンクは辿らない)だが、`dir` 自身が隠しディレクトリ(`app_dir`)であっても
+/// scan する — `sapphire_track::scan` はルートエントリにも述語を適用してしまう
+/// ため、`app_dir` を素直に scan のルートに渡しても中身が一切見えない。
+fn scan_dir(
+    dir: &Path,
+    accept: &impl Fn(&Path) -> bool,
+    out: &mut Vec<sapphire_track::Observed>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            if !entry.file_name().to_string_lossy().starts_with('.') {
+                scan_dir(&path, accept, out)?;
+            }
+        } else if file_type.is_file() && accept(&path) {
+            out.push(sapphire_track::Observed {
+                mtime: sapphire_track::mtime_secs(&path),
+                path,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// FNV-1a hash of the (workspace-relative) path — the stable document id used
@@ -621,6 +740,82 @@ mod tests {
         let result = store.push(0, vec![Change::upsert(".git/config", "gotcha", Utc::now())]);
 
         assert!(matches!(result, Err(Error::NotSyncable(_))));
+    }
+
+    #[test]
+    fn reconcile_picks_up_a_hand_written_file() {
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("manual.md"), "typed in by hand").unwrap();
+
+        let report = store.reconcile().unwrap();
+
+        assert_eq!(report.upserted, 1);
+        assert_eq!(report.removed, 0);
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.docs.len(), 1);
+        assert_eq!(snapshot.docs[0].path, "manual.md");
+    }
+
+    #[test]
+    fn reconcile_picks_up_a_hand_deleted_file() {
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("a.md"), "hello").unwrap();
+        store.reconcile().unwrap();
+
+        std::fs::remove_file(store.origin_dir.join("a.md")).unwrap();
+        let report = store.reconcile().unwrap();
+
+        assert_eq!(report.removed, 1);
+        assert!(store.snapshot().unwrap().docs.is_empty());
+    }
+
+    #[test]
+    fn reconcile_ignores_hidden_files() {
+        let (_t, store) = store();
+        let git = store.origin_dir.join(".git").join("objects");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("deadbeef"), "packfile guts").unwrap();
+        std::fs::write(store.origin_dir.join(".gitignore"), "target/").unwrap();
+
+        let report = store.reconcile().unwrap();
+
+        assert_eq!(report.upserted, 0, "隠しファイルは同期対象に載せない");
+        assert!(store.snapshot().unwrap().docs.is_empty());
+    }
+
+    #[test]
+    fn reconcile_picks_up_the_configured_app_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WsStore::with_config(WsStoreConfig {
+            origin_dir: tmp.path().join("origin"),
+            state_dir: tmp.path().join("state"),
+            retrieve: None,
+            app_dir: Some(".sapphire-journal".to_owned()),
+        })
+        .unwrap();
+        let app = store.origin_dir.join(".sapphire-journal");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("config.toml"), "k = 1").unwrap();
+        std::fs::create_dir_all(store.origin_dir.join(".git")).unwrap();
+        std::fs::write(store.origin_dir.join(".git").join("HEAD"), "ref: x").unwrap();
+
+        let report = store.reconcile().unwrap();
+
+        assert_eq!(report.upserted, 1);
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
+    }
+
+    #[test]
+    fn reconcile_is_quiet_when_nothing_changed() {
+        let (_t, store) = store();
+        std::fs::write(store.origin_dir.join("a.md"), "hello").unwrap();
+        store.reconcile().unwrap();
+
+        let report = store.reconcile().unwrap();
+
+        assert_eq!(report.upserted, 0);
+        assert_eq!(report.removed, 0);
     }
 
     #[test]
