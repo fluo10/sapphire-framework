@@ -42,10 +42,12 @@ use serde_json::Value;
 
 mod change_log;
 mod error;
+mod keys;
 mod ws_store;
 
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
+pub use keys::{KeyEntry, KeyStore};
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
 /// Shared server state: a base data directory, an optional bearer token, and a

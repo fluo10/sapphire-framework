@@ -35,6 +35,10 @@ pub enum Error {
     /// 同期対象として受け付けられないパス（隠しファイル・`..`・絶対パス）。
     #[error("path is not syncable: {0}")]
     NotSyncable(String),
+
+    /// The API key file failed to parse, serialize, or generate a key.
+    #[error("key file error: {0}")]
+    KeyFile(String),
 }
 
 /// Convenience alias for server results.
