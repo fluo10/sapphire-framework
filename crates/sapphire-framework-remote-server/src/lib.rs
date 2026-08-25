@@ -48,11 +48,17 @@ pub use error::{Error, Result};
 pub use keys::{KeyEntry, KeyStore};
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
+/// ワークスペース名から [`WsStoreConfig`] を解決するフック。
+///
+/// アプリが既に持っているワークスペースの上でサーバを動かすための差し込み口。
+type Resolver = Box<dyn Fn(&str) -> Result<WsStoreConfig> + Send + Sync>;
+
 /// Shared server state: a base data directory, an optional key store, and a
 /// lazily-populated map of open workspaces.
 pub struct ServerState {
     data_dir: PathBuf,
     keys: Option<Arc<KeyStore>>,
+    resolver: Option<Resolver>,
     insecure: bool,
     workspaces: Mutex<HashMap<String, Arc<WsStore>>>,
 }
@@ -64,6 +70,7 @@ impl ServerState {
         Self {
             data_dir: data_dir.into(),
             keys: None,
+            resolver: None,
             insecure: false,
             workspaces: Mutex::new(HashMap::new()),
         }
@@ -72,6 +79,40 @@ impl ServerState {
     /// `Authorization: Bearer <token>` を、この鍵ストアに対して検証させる。
     pub fn with_keys(mut self, keys: Arc<KeyStore>) -> Self {
         self.keys = Some(keys);
+        self
+    }
+
+    /// ワークスペース名から [`WsStoreConfig`] を解決する関数を差し替える。
+    ///
+    /// 既定（未設定）では [`WsStore::open`] のレイアウト
+    /// (`data_dir/{origin,cache,changelog,blobs,track}/<ws>`) をそのまま使う。
+    /// 差し替えると、アプリが既に持っているワークスペースのディレクトリ・
+    /// retrieve ストア・`app_dir` 許可リストの上でサーバを動かせる — つまり
+    /// `/rpc` から届く push が、アプリ自身が MCP で書くのと同じファイル群に
+    /// 落ちる。これが無いと `WsStore::with_config` はサーブされる API からは
+    /// 到達不能で、`app_dir` の許可リストも効かせようがない。
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use sapphire_framework_remote_server::{ServerState, WsStoreConfig};
+    /// let root = std::path::PathBuf::from("/srv/journals");
+    /// let state = ServerState::new(&root).with_resolver(move |ws| {
+    ///     Ok(WsStoreConfig {
+    ///         origin_dir: root.join(ws),
+    ///         state_dir: root.join(ws).join(".sapphire-journal/server"),
+    ///         retrieve: None,
+    ///         app_dir: Some(".sapphire-journal".to_owned()),
+    ///     })
+    /// });
+    /// ```
+    ///
+    /// 解決関数はワークスペースごとに一度だけ、初回アクセス時に呼ばれる。
+    /// 未知のワークスペースは `Err` を返して拒否できる。
+    pub fn with_resolver(
+        mut self,
+        f: impl Fn(&str) -> Result<WsStoreConfig> + Send + Sync + 'static,
+    ) -> Self {
+        self.resolver = Some(Box::new(f));
         self
     }
 
@@ -97,12 +138,20 @@ impl ServerState {
     }
 
     /// Get (opening if necessary) the store for workspace `ws`.
-    fn workspace(&self, ws: &str) -> Result<Arc<WsStore>> {
+    ///
+    /// 同じプロセスでアプリ自身のルート（MCP など）を生やす場合、そちらの
+    /// ハンドラもこれで同じ [`WsStore`] を掴み、ファイルを書いたあと
+    /// [`WsStore::record_local_write`] を呼ぶ。`/rpc` と同じインスタンスなので
+    /// change log は 1 本に保たれる。
+    pub fn workspace(&self, ws: &str) -> Result<Arc<WsStore>> {
         let mut map = self.workspaces.lock().unwrap();
         if let Some(store) = map.get(ws) {
             return Ok(Arc::clone(store));
         }
-        let store = Arc::new(WsStore::open(&self.data_dir, ws)?);
+        let store = Arc::new(match &self.resolver {
+            Some(resolve) => WsStore::with_config(resolve(ws)?)?,
+            None => WsStore::open(&self.data_dir, ws)?,
+        });
         map.insert(ws.to_owned(), Arc::clone(&store));
         Ok(store)
     }

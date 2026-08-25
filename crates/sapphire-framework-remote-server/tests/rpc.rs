@@ -1,6 +1,12 @@
 //! End-to-end JSON-RPC tests driving the axum router directly via
 //! `tower::ServiceExt::oneshot` (no network socket needed).
 
+// `ServerState::with_resolver` hands back the crate's `Error`, which is a large
+// enum — every `Result`-returning item in this crate already trips
+// `result_large_err`, so every resolver closure written against the hook does
+// too. Shrinking `Error` is pre-existing housekeeping, not this file's job.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -9,7 +15,7 @@ use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use http_body_util::BodyExt as _;
 use sapphire_framework_remote_server::{
-    Authenticated, KeyStore, ServerState, protect, router, serve,
+    Authenticated, KeyStore, ServerState, WsStoreConfig, protect, router, serve,
 };
 use sapphire_rpc::{
     BlobPutResult, Change, ChangesPullResult, ChangesPushResult, JsonRpcRequest, JsonRpcResponse,
@@ -470,4 +476,110 @@ async fn insecure_for_tests_is_the_only_way_through_without_keys() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_resolver_provided_store_round_trips_an_app_dir_push_over_http() {
+    // `with_config` / `app_dir` の許可リストがサーブされる API から効くことを、
+    // WsStore を直接叩かずに /rpc 越しに確かめる。resolver フックが無ければ
+    // ServerState は WsStore::open しか作れず、app_dir は常に None になる。
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let resolver_root = root.clone();
+
+    let st = Arc::new(
+        ServerState::new(&root)
+            .insecure_for_tests()
+            .with_resolver(move |ws| {
+                let origin = resolver_root.join("journals").join(ws);
+                Ok(WsStoreConfig {
+                    origin_dir: origin.clone(),
+                    state_dir: origin.join(".sapphire-journal").join("server"),
+                    retrieve: None,
+                    app_dir: Some(".sapphire-journal".to_owned()),
+                })
+            }),
+    );
+
+    let ws = "diary";
+    let change = Change::upsert(
+        ".sapphire-journal/config.toml",
+        "grain = \"day\"\n",
+        chrono::Utc::now(),
+    );
+    let push: ChangesPushResult = result(
+        call(
+            &st,
+            None,
+            methods::CHANGES_PUSH,
+            json!({"ws": ws, "base_cursor": 0, "changes": [change]}),
+        )
+        .await,
+    );
+    assert_eq!(push.cursor, 1);
+    assert!(push.conflicts.is_empty());
+
+    // resolver の指したディレクトリに落ちていること（既定レイアウトの
+    // `<data_dir>/origin/<ws>/` ではない）。
+    let written = root
+        .join("journals")
+        .join(ws)
+        .join(".sapphire-journal")
+        .join("config.toml");
+    assert_eq!(
+        std::fs::read_to_string(&written).unwrap(),
+        "grain = \"day\"\n"
+    );
+    assert!(
+        !root.join("origin").join(ws).exists(),
+        "resolver があるなら既定レイアウトは掘らない"
+    );
+
+    // 同じ /rpc から読み戻せること。
+    let snapshot: SnapshotResult =
+        result(call(&st, None, methods::WORKSPACE_SNAPSHOT, json!({"ws": ws})).await);
+    assert_eq!(snapshot.docs.len(), 1);
+    assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
+
+    // 許可したのは 1 つだけ。他の隠しディレクトリは resolver 経由でも通らない。
+    let denied = call(
+        &st,
+        None,
+        methods::CHANGES_PUSH,
+        json!({"ws": ws, "base_cursor": 1, "changes": [
+            Change::upsert(".git/config", "gotcha", chrono::Utc::now())
+        ]}),
+    )
+    .await;
+    assert_eq!(
+        denied.error.expect("expected an error").code,
+        sapphire_rpc::error_codes::INVALID_PARAMS
+    );
+}
+
+#[tokio::test]
+async fn a_resolver_can_refuse_an_unknown_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let st = Arc::new(
+        ServerState::new(tmp.path())
+            .insecure_for_tests()
+            .with_resolver(|ws| {
+                Err(sapphire_framework_remote_server::Error::NotSyncable(
+                    ws.to_owned(),
+                ))
+            }),
+    );
+
+    let response = call(
+        &st,
+        None,
+        methods::WORKSPACE_SNAPSHOT,
+        json!({"ws": "nope"}),
+    )
+    .await;
+
+    assert!(
+        response.error.is_some(),
+        "未知の ws は拒否できなければならない"
+    );
 }
