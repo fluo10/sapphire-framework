@@ -433,10 +433,10 @@ fn push_cannot_write_outside_the_origin() {
     let result = store.push(0, vec![Change::upsert("../escaped.md", "gotcha", Utc::now())]);
 
     assert!(matches!(result, Err(Error::NotSyncable(_))));
-    assert!(
-        !tmp.path().join("escaped.md").exists(),
-        "origin の外にファイルが作られてはならない"
-    );
+    // `store()` の origin は `<tmp>/origin/ws1` なので、`../` の着地点はその親。
+    let escaped = store.origin_dir.parent().unwrap().join("escaped.md");
+    assert!(!escaped.exists(), "origin の外にファイルが作られてはならない");
+    let _ = &tmp;
 }
 
 #[test]
@@ -513,7 +513,7 @@ Expected: FAIL — `cannot find function is_syncable in this scope`
 /// 除外一覧を育てる方式より、除外し忘れが起きない。
 ///
 /// 併せて `..`・絶対パス・空要素も拒否する。これが origin の外へ書かせない唯一の
-/// 防壁なので、[`WsStore::apply_one`] は必ずこれを通す。
+/// 防壁なので、`WsStore` の書き込み経路は必ずこれを通す。
 pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool {
     if rel.is_empty() || rel.starts_with('/') {
         return false;
@@ -769,7 +769,7 @@ pub struct ReconcileReport {
 `lib.rs` の re-export を更新:
 
 ```rust
-pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig};
+pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
