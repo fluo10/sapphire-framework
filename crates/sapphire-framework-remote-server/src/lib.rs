@@ -13,9 +13,10 @@
 //! ```no_run
 //! # async fn run() -> std::io::Result<()> {
 //! use std::sync::Arc;
-//! use sapphire_framework_remote_server::{serve, ServerState};
+//! use sapphire_framework_remote_server::{KeyStore, serve, ServerState};
 //!
-//! let state = Arc::new(ServerState::new("/var/lib/sapphire").with_token("secret"));
+//! let keys = Arc::new(KeyStore::load(std::path::Path::new("/etc/sapphire/keys.toml")).unwrap());
+//! let state = Arc::new(ServerState::new("/var/lib/sapphire").with_keys(keys));
 //! serve("127.0.0.1:8080".parse().unwrap(), state).await
 //! # }
 //! ```
@@ -25,12 +26,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::HeaderMap,
-    routing::post,
-};
+use axum::{Json, Router, extract::State, routing::post};
 use base64::Engine as _;
 use sapphire_rpc::{
     BlobGetParams, BlobGetResult, BlobPutParams, BlobPutResult, ChangesPullParams,
@@ -40,21 +36,23 @@ use sapphire_rpc::{
 use serde::Serialize;
 use serde_json::Value;
 
+mod auth;
 mod change_log;
 mod error;
 mod keys;
 mod ws_store;
 
+pub use auth::{Authenticated, protect};
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
 pub use keys::{KeyEntry, KeyStore};
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
-/// Shared server state: a base data directory, an optional bearer token, and a
+/// Shared server state: a base data directory, an optional key store, and a
 /// lazily-populated map of open workspaces.
 pub struct ServerState {
     data_dir: PathBuf,
-    token: Option<String>,
+    keys: Option<Arc<KeyStore>>,
     workspaces: Mutex<HashMap<String, Arc<WsStore>>>,
 }
 
@@ -64,15 +62,20 @@ impl ServerState {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            token: None,
+            keys: None,
             workspaces: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Require callers to present `Authorization: Bearer <token>`.
-    pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+    /// `Authorization: Bearer <token>` を、この鍵ストアに対して検証させる。
+    pub fn with_keys(mut self, keys: Arc<KeyStore>) -> Self {
+        self.keys = Some(keys);
         self
+    }
+
+    /// 設定されている鍵ストア。
+    pub fn keys(&self) -> Option<&Arc<KeyStore>> {
+        self.keys.as_ref()
     }
 
     /// Get (opening if necessary) the store for workspace `ws`.
@@ -85,31 +88,29 @@ impl ServerState {
         map.insert(ws.to_owned(), Arc::clone(&store));
         Ok(store)
     }
-
-    /// Check the `Authorization` header against the configured token. When no
-    /// token is configured, all requests are allowed.
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(expected) = &self.token else {
-            return true;
-        };
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|got| got == expected)
-            .unwrap_or(false)
-    }
 }
 
-/// Build the axum router for `state` (single `POST /rpc` endpoint).
+/// Build the axum router for `state` (single `POST /rpc` endpoint). 認証は適用済み。
 pub fn router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/rpc", post(rpc_handler))
-        .with_state(state)
+        .with_state(Arc::clone(&state));
+    crate::auth::protect(state, routes)
 }
 
 /// Bind `addr` and serve until the process is stopped.
+///
+/// 有効な鍵が 1 件も無い場合は起動を拒否する。認証なしで待ち受ける状態を作らない。
 pub async fn serve(addr: SocketAddr, state: Arc<ServerState>) -> std::io::Result<()> {
+    match state.keys() {
+        Some(keys) if keys.has_usable_key() => {}
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no usable API key configured; run `gen-key` first",
+            ));
+        }
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "sapphire remote server listening");
     axum::serve(listener, router(state)).await
@@ -117,17 +118,9 @@ pub async fn serve(addr: SocketAddr, state: Arc<ServerState>) -> std::io::Result
 
 async fn rpc_handler(
     State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = req.id.clone();
-
-    if !state.authorized(&headers) {
-        return Json(JsonRpcResponse::err(
-            id,
-            JsonRpcError::new(error_codes::UNAUTHORIZED, "missing or invalid bearer token"),
-        ));
-    }
 
     match dispatch(state, req).await {
         Ok(result) => Json(JsonRpcResponse::ok(id, result)),

@@ -3,11 +3,14 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use http_body_util::BodyExt as _;
-use sapphire_framework_remote_server::{ServerState, router};
+use sapphire_framework_remote_server::{
+    Authenticated, KeyStore, ServerState, protect, router, serve,
+};
 use sapphire_rpc::{
     BlobPutResult, Change, ChangesPullResult, ChangesPushResult, JsonRpcRequest, JsonRpcResponse,
     SearchResult, SnapshotResult, methods,
@@ -19,7 +22,10 @@ fn state(token: Option<&str>) -> (tempfile::TempDir, Arc<ServerState>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut s = ServerState::new(tmp.path());
     if let Some(t) = token {
-        s = s.with_token(t);
+        // テストは固定トークンを使いたいので、生成ではなく直接書いた鍵を読ませる。
+        let key_path = tmp.path().join("keys.toml");
+        std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
+        s = s.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
     }
     (tmp, Arc::new(s))
 }
@@ -152,17 +158,117 @@ async fn blob_put_then_get() {
 
 #[tokio::test]
 async fn missing_token_is_unauthorized() {
-    let (_tmp, state) = state(Some("secret"));
-    // No Authorization header → UNAUTHORIZED error, not a panic.
-    let resp = call(
-        &state,
-        None,
+    let (_tmp, st) = state(Some("secret"));
+    // No Authorization header → HTTP 401, not a panic.
+    let req = JsonRpcRequest::new(
+        Value::from(1),
         methods::WORKSPACE_SNAPSHOT,
         json!({"ws": "x"}),
-    )
-    .await;
-    let err = resp.error.expect("expected auth error");
-    assert_eq!(err.code, sapphire_rpc::error_codes::UNAUTHORIZED);
+    );
+    let http_req = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&req).unwrap()))
+        .unwrap();
+
+    let response = router(Arc::clone(&st)).oneshot(http_req).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_bad_token_is_rejected_with_http_401() {
+    let (_t, st) = state(Some("sjt_secret"));
+    let req = JsonRpcRequest::new(
+        Value::from(1),
+        methods::WORKSPACE_SNAPSHOT,
+        json!({"ws": "w"}),
+    );
+    let http_req = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer wrong")
+        .body(Body::from(serde_json::to_vec(&req).unwrap()))
+        .unwrap();
+
+    let response = router(Arc::clone(&st)).oneshot(http_req).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn protect_guards_a_foreign_route_with_the_same_key() {
+    let (_t, st) = state(Some("sjt_secret"));
+    let app = protect(
+        Arc::clone(&st),
+        Router::new().route("/mcp", axum::routing::get(|| async { "ok" })),
+    );
+
+    let unauthorized = app
+        .clone()
+        .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app
+        .oneshot(
+            Request::builder()
+                .uri("/mcp")
+                .header(header::AUTHORIZATION, "Bearer sjt_secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_authenticated_request_carries_the_key_id() {
+    let (_t, st) = state(Some("sjt_secret"));
+    let key_id = st.keys().unwrap().entries()[0].id;
+
+    let app = protect(
+        Arc::clone(&st),
+        Router::new().route(
+            "/whoami",
+            axum::routing::get(
+                |axum::Extension(who): axum::Extension<Authenticated>| async move {
+                    who.key_id.to_string()
+                },
+            ),
+        ),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/whoami")
+                .header(header::AUTHORIZATION, "Bearer sjt_secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        key_id.to_string()
+    );
+}
+
+#[tokio::test]
+async fn serve_refuses_to_start_without_a_usable_key() {
+    let (_t, st) = state(None);
+
+    // ポートを掴む前に弾かれるので、bind せずに戻ってくる。
+    let err = serve("127.0.0.1:0".parse().unwrap(), st).await.unwrap_err();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[tokio::test]

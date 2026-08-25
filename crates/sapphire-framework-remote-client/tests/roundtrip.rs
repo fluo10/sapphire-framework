@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use sapphire_framework_remote_client::RemoteClient;
-use sapphire_remote_server::{ServerState, router};
+use sapphire_remote_server::{KeyStore, ServerState, router};
 use sapphire_rpc::Change;
 
 /// Start a server on an ephemeral port and return its base URL + tempdir guard.
@@ -11,7 +11,10 @@ async fn start_server(token: Option<&str>) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = ServerState::new(tmp.path());
     if let Some(t) = token {
-        state = state.with_token(t);
+        // テストは固定トークンを使いたいので、生成ではなく直接書いた鍵を読ませる。
+        let key_path = tmp.path().join("keys.toml");
+        std::fs::write(&key_path, format!("[[key]]\ntoken = \"{t}\"\n")).unwrap();
+        state = state.with_keys(Arc::new(KeyStore::load(&key_path).unwrap()));
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

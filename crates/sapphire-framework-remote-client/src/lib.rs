@@ -79,7 +79,16 @@ impl RemoteClient {
         if let Some(token) = &self.token {
             builder = builder.bearer_auth(token);
         }
-        let response: JsonRpcResponse = builder.send().await?.error_for_status()?.json().await?;
+        let response = builder.send().await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::Rpc {
+                code: sapphire_rpc::error_codes::UNAUTHORIZED,
+                message: "missing or invalid bearer token".to_owned(),
+            });
+        }
+
+        let response: JsonRpcResponse = response.error_for_status()?.json().await?;
 
         if let Some(err) = response.error {
             return Err(Error::Rpc {
