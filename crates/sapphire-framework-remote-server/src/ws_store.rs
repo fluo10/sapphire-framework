@@ -237,6 +237,20 @@ impl WsStore {
                         _ => Change::delete(path.clone(), updated_at),
                     }
                 }
+                // UTF-8 でないファイルは「文書ではない」として飛ばす。change は
+                // 本文を String で持つので、そもそも載せようがない。
+                //
+                // ここで `Err` を返すとバッチ全体が落ちる。それは `reconcile`
+                // にとって致命的で、`reconcile` は走査した全パスをここへ渡した
+                // あとで track db を更新するため、1 バイトでも UTF-8 でない
+                // ファイル（journal に紛れ込んだ PNG 1 枚）があるとその更新に
+                // 到達せず、次のティックが同じ差分を再検出して同じように落ちる
+                // ——安全網が恒久的に死ぬ。添付ファイルを書いた MCP ツールに
+                // エラーが返るのも同じ原因。飛ばして続ける。
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    tracing::debug!(path, "not valid UTF-8; not a document, skipping");
+                    continue;
+                }
                 Err(e) => return Err(Error::Io(e)),
             };
 
@@ -906,5 +920,66 @@ mod tests {
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.docs.len(), 1);
         assert_eq!(snapshot.docs[0].path, ".sapphire-journal/config.toml");
+    }
+
+    #[test]
+    fn record_local_write_skips_a_non_utf8_file() {
+        let (_t, store) = store();
+        // 0xFF は UTF-8 のどのシーケンスにも現れない。
+        std::fs::write(store.origin_dir.join("photo.png"), [0xFFu8, 0xD8, 0xFF]).unwrap();
+        std::fs::write(store.origin_dir.join("note.md"), "text").unwrap();
+
+        let cursor = store
+            .record_local_write(&["photo.png".to_owned(), "note.md".to_owned()], Utc::now())
+            .unwrap();
+
+        assert_eq!(cursor, 1, "テキストの 1 件だけが log に載る");
+        let paths: Vec<String> = store
+            .snapshot()
+            .unwrap()
+            .docs
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(paths, vec!["note.md".to_owned()]);
+    }
+
+    #[test]
+    fn reconcile_survives_a_binary_file_in_the_workspace() {
+        // 非 UTF-8 のファイルが 1 つあるだけで安全網が恒久的に死んではならない。
+        // record_local_write が Err を返すと reconcile はその先の track db 更新に
+        // 到達せず、次のティックが同じ差分を再検出して同じように落ちる。
+        let (_t, store) = store();
+        // 走査順（名前順）で binary がテキストの間に来るように名前を付ける。
+        std::fs::write(store.origin_dir.join("a-before.md"), "before").unwrap();
+        std::fs::write(
+            store.origin_dir.join("m-photo.png"),
+            [0x89u8, 0x50, 0x4E, 0xFF],
+        )
+        .unwrap();
+        std::fs::write(store.origin_dir.join("z-after.md"), "after").unwrap();
+
+        let first = store.reconcile().unwrap();
+        assert_eq!(first.removed, 0);
+
+        // バイナリの前後どちらのテキストも取り込まれていること。
+        let mut paths: Vec<String> = store
+            .snapshot()
+            .unwrap()
+            .docs
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["a-before.md".to_owned(), "z-after.md".to_owned()],
+            "バイナリより後ろのファイルも log に載る"
+        );
+
+        // 2 周目は何も新しく見つからない = track db が更新されている。
+        let second = store.reconcile().unwrap();
+        assert_eq!(second.upserted, 0, "同じ差分を再検出してはならない");
+        assert_eq!(second.removed, 0);
     }
 }
