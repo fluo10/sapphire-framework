@@ -13,9 +13,10 @@
 //! ```no_run
 //! # async fn run() -> std::io::Result<()> {
 //! use std::sync::Arc;
-//! use sapphire_framework_remote_server::{serve, ServerState};
+//! use sapphire_framework_remote_server::{KeyStore, serve, ServerState};
 //!
-//! let state = Arc::new(ServerState::new("/var/lib/sapphire").with_token("secret"));
+//! let keys = Arc::new(KeyStore::load(std::path::Path::new("/etc/sapphire/keys.toml")).unwrap());
+//! let state = Arc::new(ServerState::new("/var/lib/sapphire").with_keys(keys));
 //! serve("127.0.0.1:8080".parse().unwrap(), state).await
 //! # }
 //! ```
@@ -25,12 +26,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::HeaderMap,
-    routing::post,
-};
+use axum::{Json, Router, extract::State, routing::post};
 use base64::Engine as _;
 use sapphire_rpc::{
     BlobGetParams, BlobGetResult, BlobPutParams, BlobPutResult, ChangesPullParams,
@@ -40,19 +36,30 @@ use sapphire_rpc::{
 use serde::Serialize;
 use serde_json::Value;
 
+mod auth;
 mod change_log;
 mod error;
+mod keys;
 mod ws_store;
 
+pub use auth::{Authenticated, protect};
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
-pub use ws_store::WsStore;
+pub use keys::{KeyEntry, KeyStore};
+pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
-/// Shared server state: a base data directory, an optional bearer token, and a
+/// ワークスペース名から [`WsStoreConfig`] を解決するフック。
+///
+/// アプリが既に持っているワークスペースの上でサーバを動かすための差し込み口。
+type Resolver = Box<dyn Fn(&str) -> Result<WsStoreConfig> + Send + Sync>;
+
+/// Shared server state: a base data directory, an optional key store, and a
 /// lazily-populated map of open workspaces.
 pub struct ServerState {
     data_dir: PathBuf,
-    token: Option<String>,
+    keys: Option<Arc<KeyStore>>,
+    resolver: Option<Resolver>,
+    insecure: bool,
     workspaces: Mutex<HashMap<String, Arc<WsStore>>>,
 }
 
@@ -62,52 +69,118 @@ impl ServerState {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            token: None,
+            keys: None,
+            resolver: None,
+            insecure: false,
             workspaces: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Require callers to present `Authorization: Bearer <token>`.
-    pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+    /// `Authorization: Bearer <token>` を、この鍵ストアに対して検証させる。
+    pub fn with_keys(mut self, keys: Arc<KeyStore>) -> Self {
+        self.keys = Some(keys);
         self
     }
 
+    /// ワークスペース名から [`WsStoreConfig`] を解決する関数を差し替える。
+    ///
+    /// 既定（未設定）では [`WsStore::open`] のレイアウト
+    /// (`data_dir/{origin,cache,changelog,blobs,track}/<ws>`) をそのまま使う。
+    /// 差し替えると、アプリが既に持っているワークスペースのディレクトリ・
+    /// retrieve ストア・`app_dir` 許可リストの上でサーバを動かせる — つまり
+    /// `/rpc` から届く push が、アプリ自身が MCP で書くのと同じファイル群に
+    /// 落ちる。これが無いと `WsStore::with_config` はサーブされる API からは
+    /// 到達不能で、`app_dir` の許可リストも効かせようがない。
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use sapphire_framework_remote_server::{ServerState, WsStoreConfig};
+    /// let root = std::path::PathBuf::from("/srv/journals");
+    /// let state = ServerState::new(&root).with_resolver(move |ws| {
+    ///     Ok(WsStoreConfig {
+    ///         origin_dir: root.join(ws),
+    ///         state_dir: root.join(ws).join(".sapphire-journal/server"),
+    ///         retrieve: None,
+    ///         app_dir: Some(".sapphire-journal".to_owned()),
+    ///     })
+    /// });
+    /// ```
+    ///
+    /// 解決関数はワークスペースごとに一度だけ、初回アクセス時に呼ばれる。
+    /// 未知のワークスペースは `Err` を返して拒否できる。
+    pub fn with_resolver(
+        mut self,
+        f: impl Fn(&str) -> Result<WsStoreConfig> + Send + Sync + 'static,
+    ) -> Self {
+        self.resolver = Some(Box::new(f));
+        self
+    }
+
+    /// 鍵ストア無しで**素通しの**ルータを作ることを明示的に許可する。テスト専用。
+    ///
+    /// 既定では鍵ストアが無いルータは全リクエストを 503 で拒否する
+    /// ([`protect`] 参照)。この逃げ道に名前を与えてあるのは、「鍵を設定し忘れた」
+    /// と「認証を意図的に外した」がコード上で見分けられるようにするため。
+    /// [`serve`] はこのフラグを見ない — 鍵の無い待ち受けは依然として拒否する。
+    pub fn insecure_for_tests(mut self) -> Self {
+        self.insecure = true;
+        self
+    }
+
+    /// 設定されている鍵ストア。
+    pub fn keys(&self) -> Option<&Arc<KeyStore>> {
+        self.keys.as_ref()
+    }
+
+    /// [`insecure_for_tests`](Self::insecure_for_tests) が呼ばれているか。
+    pub fn is_insecure(&self) -> bool {
+        self.insecure
+    }
+
     /// Get (opening if necessary) the store for workspace `ws`.
-    fn workspace(&self, ws: &str) -> Result<Arc<WsStore>> {
+    ///
+    /// 同じプロセスでアプリ自身のルート（MCP など）を生やす場合、そちらの
+    /// ハンドラもこれで同じ [`WsStore`] を掴み、ファイルを書いたあと
+    /// [`WsStore::record_local_write`] を呼ぶ。`/rpc` と同じインスタンスなので
+    /// change log は 1 本に保たれる。
+    pub fn workspace(&self, ws: &str) -> Result<Arc<WsStore>> {
         let mut map = self.workspaces.lock().unwrap();
         if let Some(store) = map.get(ws) {
             return Ok(Arc::clone(store));
         }
-        let store = Arc::new(WsStore::open(&self.data_dir, ws)?);
+        let store = Arc::new(match &self.resolver {
+            Some(resolve) => WsStore::with_config(resolve(ws)?)?,
+            None => WsStore::open(&self.data_dir, ws)?,
+        });
         map.insert(ws.to_owned(), Arc::clone(&store));
         Ok(store)
     }
-
-    /// Check the `Authorization` header against the configured token. When no
-    /// token is configured, all requests are allowed.
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(expected) = &self.token else {
-            return true;
-        };
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|got| got == expected)
-            .unwrap_or(false)
-    }
 }
 
-/// Build the axum router for `state` (single `POST /rpc` endpoint).
+/// Build the axum router for `state` (single `POST /rpc` endpoint). 認証は適用済み。
 pub fn router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/rpc", post(rpc_handler))
-        .with_state(state)
+        .with_state(Arc::clone(&state));
+    crate::auth::protect(state, routes)
 }
 
 /// Bind `addr` and serve until the process is stopped.
+///
+/// 有効な鍵が 1 件も無い場合は起動を拒否する。認証なしで待ち受ける状態を作らない。
 pub async fn serve(addr: SocketAddr, state: Arc<ServerState>) -> std::io::Result<()> {
+    match state.keys() {
+        Some(keys) if keys.has_usable_key() => {}
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no usable API key configured; write a key file containing \
+                 `[[key]]` / `token = \"...\"` and pass it to \
+                 `ServerState::with_keys` (the remaining fields are filled in \
+                 on load)",
+            ));
+        }
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "sapphire remote server listening");
     axum::serve(listener, router(state)).await
@@ -115,17 +188,9 @@ pub async fn serve(addr: SocketAddr, state: Arc<ServerState>) -> std::io::Result
 
 async fn rpc_handler(
     State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = req.id.clone();
-
-    if !state.authorized(&headers) {
-        return Json(JsonRpcResponse::err(
-            id,
-            JsonRpcError::new(error_codes::UNAUTHORIZED, "missing or invalid bearer token"),
-        ));
-    }
 
     match dispatch(state, req).await {
         Ok(result) => Json(JsonRpcResponse::ok(id, result)),
@@ -145,12 +210,24 @@ async fn dispatch(state: Arc<ServerState>, req: JsonRpcRequest) -> std::result::
         methods::CHANGES_PULL => {
             let p: ChangesPullParams = parse_params(req.params)?;
             let store = open_ws(&state, &p.ws)?;
-            run(move || store.pull(p.since, p.limit)).await.and_then(to_value)
+            let claimed = p.generation;
+            run(move || match generation_error(&store, claimed) {
+                Some(e) => Err(e),
+                None => store.pull(p.since, p.limit),
+            })
+            .await
+            .and_then(to_value)
         }
         methods::CHANGES_PUSH => {
             let p: ChangesPushParams = parse_params(req.params)?;
             let store = open_ws(&state, &p.ws)?;
-            run(move || store.push(p.base_cursor, p.changes)).await.and_then(to_value)
+            let claimed = p.generation;
+            run(move || match generation_error(&store, claimed) {
+                Some(e) => Err(e),
+                None => store.push(p.base_cursor, p.changes),
+            })
+            .await
+            .and_then(to_value)
         }
         methods::BLOB_PUT => {
             let p: BlobPutParams = parse_params(req.params)?;
@@ -200,6 +277,21 @@ fn parse_params<T: for<'de> serde::Deserialize<'de>>(
 /// Open (or reuse) a workspace store, mapping failures to an internal error.
 fn open_ws(state: &Arc<ServerState>, ws: &str) -> std::result::Result<Arc<WsStore>, JsonRpcError> {
     state.workspace(ws).map_err(|e| e.to_jsonrpc())
+}
+
+/// クライアントが世代を名乗ってきたときだけ照合し、食い違い（または読み出しの
+/// 失敗）があればそのエラーを返す。名乗らないクライアントは当面そのまま通す。
+///
+/// `generation()` は redb への同期読みなので、これは `dispatch` の他のストア
+/// 呼び出しと同じ `spawn_blocking` クロージャの中から呼ぶ — `pull` のホット
+/// パス上で async executor を塞がないため。
+fn generation_error(store: &WsStore, claimed: Option<uuid::Uuid>) -> Option<Error> {
+    let claimed = claimed?;
+    match store.generation() {
+        Ok(actual) if actual == claimed => None,
+        Ok(actual) => Some(Error::GenerationMismatch { actual, claimed }),
+        Err(e) => Some(e),
+    }
 }
 
 /// Run a blocking store operation on the blocking pool and map its error.

@@ -35,6 +35,9 @@ pub struct RemoteClient {
     token: Option<String>,
     http: reqwest::Client,
     next_id: std::sync::Arc<AtomicU64>,
+    /// 直近の `snapshot` が返した世代。`pull` / `push` に自動で添える。
+    /// クローン間で共有する（`next_id` と同じ理由で `Arc` 越し）。
+    generation: std::sync::Arc<std::sync::Mutex<Option<uuid::Uuid>>>,
 }
 
 impl RemoteClient {
@@ -47,6 +50,7 @@ impl RemoteClient {
             token: None,
             http: reqwest::Client::new(),
             next_id: std::sync::Arc::new(AtomicU64::new(1)),
+            generation: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -75,7 +79,16 @@ impl RemoteClient {
         if let Some(token) = &self.token {
             builder = builder.bearer_auth(token);
         }
-        let response: JsonRpcResponse = builder.send().await?.error_for_status()?.json().await?;
+        let response = builder.send().await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::Rpc {
+                code: sapphire_rpc::error_codes::UNAUTHORIZED,
+                message: "missing or invalid bearer token".to_owned(),
+            });
+        }
+
+        let response: JsonRpcResponse = response.error_for_status()?.json().await?;
 
         if let Some(err) = response.error {
             return Err(Error::Rpc {
@@ -89,18 +102,23 @@ impl RemoteClient {
 
     /// `workspace.snapshot`.
     pub async fn snapshot(&self, ws: &str) -> Result<SnapshotResult> {
-        self.call(methods::WORKSPACE_SNAPSHOT, SnapshotParams { ws: ws.to_owned() })
-            .await
+        let result: SnapshotResult = self
+            .call(methods::WORKSPACE_SNAPSHOT, SnapshotParams { ws: ws.to_owned() })
+            .await?;
+        *self.generation.lock().unwrap() = Some(result.generation);
+        Ok(result)
     }
 
     /// `changes.pull`.
     pub async fn pull(&self, ws: &str, since: u64, limit: usize) -> Result<ChangesPullResult> {
+        let generation = *self.generation.lock().unwrap();
         self.call(
             methods::CHANGES_PULL,
             ChangesPullParams {
                 ws: ws.to_owned(),
                 since,
                 limit,
+                generation,
             },
         )
         .await
@@ -113,12 +131,14 @@ impl RemoteClient {
         base_cursor: u64,
         changes: Vec<Change>,
     ) -> Result<ChangesPushResult> {
+        let generation = *self.generation.lock().unwrap();
         self.call(
             methods::CHANGES_PUSH,
             ChangesPushParams {
                 ws: ws.to_owned(),
                 base_cursor,
                 changes,
+                generation,
             },
         )
         .await

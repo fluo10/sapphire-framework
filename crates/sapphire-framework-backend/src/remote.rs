@@ -262,9 +262,12 @@ mod tests {
     }
 
     /// Start an in-process server on an ephemeral port; return its base URL.
+    ///
+    /// 認証を外すのは明示的に。鍵ストアの無いルータは既定で全リクエストを 503 で
+    /// 拒否するので、この呼び出しが無いと以下のテストは通らない。
     async fn start_server() -> (tempfile::TempDir, String) {
         let tmp = tempfile::tempdir().unwrap();
-        let state = Arc::new(ServerState::new(tmp.path()));
+        let state = Arc::new(ServerState::new(tmp.path()).insecure_for_tests());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

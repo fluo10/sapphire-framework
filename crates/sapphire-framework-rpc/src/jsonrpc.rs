@@ -41,10 +41,19 @@ pub mod error_codes {
     // ── application-defined (reserved -32000..=-32099 server range) ──
 
     /// The caller is not authorized (missing / wrong bearer token).
+    ///
+    /// **The server never puts this code on the wire.** Authentication is a
+    /// tower layer that rejects the request before it reaches the JSON-RPC
+    /// dispatcher, so an unauthorized call comes back as HTTP 401 with no
+    /// JSON-RPC body at all. `RemoteClient` synthesises this code from that
+    /// status so callers have one error shape to match on.
     pub const UNAUTHORIZED: i64 = -32001;
     /// A `changes.push` was rejected because the server moved ahead; the
     /// conflicting paths are reported in the result's `conflicts`.
     pub const CONFLICT: i64 = -32002;
+    /// クライアントのカーソルがサーバの change log の世代と一致しない。
+    /// `workspace.snapshot` からやり直すこと。
+    pub const GENERATION_MISMATCH: i64 = -32003;
 }
 
 /// A JSON-RPC 2.0 request object.

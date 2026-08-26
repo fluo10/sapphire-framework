@@ -39,6 +39,18 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     out
 }
 
+/// Whether `hash` is a well-formed blob address: exactly 64 lowercase hex
+/// characters, the output shape of [`hash_bytes`].
+///
+/// A [`BlobStore`] address is derived from content, never chosen by a caller,
+/// so anything outside this shape is not a blob address at all. Filesystem
+/// backends in particular must check this before touching a path: `blob.get`
+/// is reachable from the wire, and an unchecked address turns a blob fetch
+/// into an arbitrary file read (`"../../keys.toml"`, `"/etc/passwd"`).
+pub fn is_valid_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Storage for content-addressed binary blobs.
 pub trait BlobStore: Send + Sync {
     /// Store `bytes`, returning the content-addressed reference. Storing the
@@ -46,9 +58,13 @@ pub trait BlobStore: Send + Sync {
     fn put(&self, bytes: &[u8]) -> Result<BlobRef>;
 
     /// Fetch the blob with the given hex hash, or `None` if it is not stored.
+    ///
+    /// A `hash` that is not a blob address (see [`is_valid_hash`]) is rejected
+    /// with [`Error::InvalidHash`] rather than looked up.
     fn get(&self, hash: &str) -> Result<Option<Vec<u8>>>;
 
-    /// Whether a blob with the given hex hash is stored.
+    /// Whether a blob with the given hex hash is stored. Rejects a malformed
+    /// address exactly as [`get`](BlobStore::get) does.
     fn has(&self, hash: &str) -> Result<bool> {
         Ok(self.get(hash)?.is_some())
     }
@@ -81,16 +97,28 @@ impl FsBlobStore {
     }
 
     /// Absolute path of the blob with `hash` (whether or not it exists).
-    fn blob_path(&self, hash: &str) -> PathBuf {
-        let shard = if hash.len() >= 2 { &hash[0..2] } else { "__" };
-        self.root.join(shard).join(hash)
+    ///
+    /// The validity check is the security boundary for this store, and it lives
+    /// here rather than at the callers so that no future path-building route
+    /// can skip it. `hash` arrives from the wire (`blob.get`); without the
+    /// check, `join` happily accepts `"../.."` or an absolute path, and the
+    /// `hash[0..2]` shard slice panics on a multi-byte character.
+    fn blob_path(&self, hash: &str) -> Result<PathBuf> {
+        if !crate::is_valid_hash(hash) {
+            return Err(Error::InvalidHash {
+                hash: hash.to_owned(),
+            });
+        }
+        let shard = &hash[0..2];
+        Ok(self.root.join(shard).join(hash))
     }
 }
 
 impl BlobStore for FsBlobStore {
     fn put(&self, bytes: &[u8]) -> Result<BlobRef> {
         let hash = hash_bytes(bytes);
-        let path = self.blob_path(&hash);
+        // Always valid: we just computed it. `?` only for the shared signature.
+        let path = self.blob_path(&hash)?;
         let blob_ref = BlobRef {
             hash: hash.clone(),
             len: bytes.len() as u64,
@@ -128,7 +156,7 @@ impl BlobStore for FsBlobStore {
     }
 
     fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.blob_path(hash);
+        let path = self.blob_path(hash)?;
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -137,7 +165,7 @@ impl BlobStore for FsBlobStore {
     }
 
     fn has(&self, hash: &str) -> Result<bool> {
-        Ok(self.blob_path(hash).exists())
+        Ok(self.blob_path(hash)?.exists())
     }
 }
 
@@ -182,8 +210,10 @@ mod tests {
     #[test]
     fn missing_blob_returns_none() {
         let (_tmp, store) = store();
-        assert_eq!(store.get("deadbeef").unwrap(), None);
-        assert!(!store.has("deadbeef").unwrap());
+        // Well-formed address, nothing stored under it.
+        let absent = hash_bytes(b"never stored");
+        assert_eq!(store.get(&absent).unwrap(), None);
+        assert!(!store.has(&absent).unwrap());
     }
 
     #[test]
@@ -191,5 +221,60 @@ mod tests {
         let (_tmp, store) = store();
         let r = store.put(b"present").unwrap();
         assert!(store.has(&r.hash).unwrap());
+    }
+
+    #[test]
+    fn a_hash_that_is_not_an_address_never_reaches_the_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::open(tmp.path().join("blobs")).unwrap();
+
+        // Somewhere the store must never reach: a sibling of its own root,
+        // standing in for the server's plaintext key file.
+        let secret = tmp.path().join("secret.toml");
+        std::fs::write(&secret, "token = \"sjt_topsecret\"").unwrap();
+
+        let hostile = [
+            // Traversal, both bare and dressed up as a shard.
+            "../secret.toml",
+            "./../secret.toml",
+            "..%2fsecret.toml",
+            // An absolute path wins `Path::join` outright.
+            secret.to_str().unwrap(),
+            "/etc/passwd",
+            // Multi-byte first characters used to panic slicing `hash[0..2]`.
+            "€uro",
+            "\u{3042}\u{3044}",
+            // Right shape, wrong alphabet / length.
+            "deadbeef",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+            "",
+        ];
+
+        for hash in hostile {
+            assert!(
+                matches!(store.get(hash), Err(Error::InvalidHash { .. })),
+                "get({hash:?}) must be rejected as a malformed address"
+            );
+            assert!(
+                matches!(store.has(hash), Err(Error::InvalidHash { .. })),
+                "has({hash:?}) must be rejected as a malformed address"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "token = \"sjt_topsecret\"",
+            "the file outside the store must be untouched"
+        );
+    }
+
+    #[test]
+    fn is_valid_hash_accepts_exactly_what_hash_bytes_produces() {
+        assert!(is_valid_hash(&hash_bytes(b"anything")));
+        assert!(is_valid_hash(&"0123456789abcdef".repeat(4)));
+        assert!(!is_valid_hash(&"0123456789ABCDEF".repeat(4)));
     }
 }

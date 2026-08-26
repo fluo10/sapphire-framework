@@ -125,6 +125,8 @@ pub struct SnapshotParams {
 pub struct SnapshotResult {
     /// Highest applied change-log position.
     pub cursor: Cursor,
+    /// この change log の世代。作り直されると変わる。
+    pub generation: uuid::Uuid,
     /// Live documents (tombstones folded out), each as an `Upsert` change.
     pub docs: Vec<Change>,
 }
@@ -138,6 +140,9 @@ pub struct ChangesPullParams {
     pub since: Cursor,
     /// Maximum number of changes to return in this batch.
     pub limit: usize,
+    /// クライアントが把握している change log の世代。`None` は照合を省く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<uuid::Uuid>,
 }
 
 /// Result of [`methods::CHANGES_PULL`].
@@ -161,6 +166,9 @@ pub struct ChangesPushParams {
     pub base_cursor: Cursor,
     /// Changes to apply (server assigns each a fresh `seq`).
     pub changes: Vec<Change>,
+    /// クライアントが把握している change log の世代。`None` は照合を省く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<uuid::Uuid>,
 }
 
 /// Result of [`methods::CHANGES_PUSH`].
