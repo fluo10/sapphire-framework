@@ -51,6 +51,14 @@ pub enum Error {
     /// a revoke selector did not resolve to exactly one key.
     #[error("key file error: {0}")]
     KeyFile(String),
+
+    /// 要求されたワークスペースをこのサーバは提供していない。
+    ///
+    /// resolver が名前で拒否するための種別。これが無いと、知らない名前でも
+    /// 何らかの `WsStore` を返さざるを得ず、同じ origin に対して change log が
+    /// 複数本できてしまう。
+    #[error("unknown workspace: {0}")]
+    UnknownWorkspace(String),
 }
 
 /// Convenience alias for server results.
@@ -62,7 +70,7 @@ impl Error {
     /// `INVALID_PARAMS`、それ以外は内部エラー。
     pub fn to_jsonrpc(&self) -> JsonRpcError {
         let code = match self {
-            Error::NotSyncable(_) => error_codes::INVALID_PARAMS,
+            Error::NotSyncable(_) | Error::UnknownWorkspace(_) => error_codes::INVALID_PARAMS,
             Error::Blob(sapphire_blob::Error::InvalidHash { .. }) => error_codes::INVALID_PARAMS,
             Error::GenerationMismatch { .. } => error_codes::GENERATION_MISMATCH,
             _ => error_codes::INTERNAL_ERROR,
@@ -101,5 +109,16 @@ impl From<redb::StorageError> for Error {
 impl From<redb::CommitError> for Error {
     fn from(e: redb::CommitError) -> Self {
         Error::Redb(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_workspace_is_the_callers_mistake() {
+        let err = Error::UnknownWorkspace("nope".to_owned());
+        assert_eq!(err.to_jsonrpc().code, error_codes::INVALID_PARAMS);
     }
 }

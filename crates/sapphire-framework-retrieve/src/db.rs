@@ -232,6 +232,15 @@ impl RetrieveDb {
         self.backend.lock().unwrap().as_store()
     }
 
+    /// バックエンドへの共有ハンドル。
+    ///
+    /// 同じプロセスの別コンポーネント（例: remote-server の `WsStore`）に、
+    /// このデータベースと**同じ**インデックスを使わせるためのもの。別に開くと
+    /// 同じファイル群に対してインデックスが二重にできる。
+    pub fn shared(&self) -> Arc<dyn RetrieveStore + Send + Sync> {
+        self.store()
+    }
+
     // ── document management ───────────────────────────────────────────────────
 
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
@@ -410,4 +419,27 @@ pub fn open_redb_vec(
 #[cfg(feature = "lancedb-store")]
 pub fn open_lancedb(data_dir: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
     Ok(Arc::new(LanceDbBackend::new(data_dir, dim)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_store_sees_documents_written_through_the_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RetrieveDb::open(&tmp.path().join("retrieve.db")).unwrap();
+
+        let shared = db.shared();
+        db.upsert_document(&Document {
+            id: 1,
+            body: "hello".to_owned(),
+            path: "a.md".to_owned(),
+            chunks: None,
+        })
+        .unwrap();
+
+        // 同じバックエンドを指しているので、共有ハンドル側からも見える。
+        assert_eq!(shared.document_count().unwrap(), 1);
+    }
 }
