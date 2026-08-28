@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use crate::{Result, TrackStore};
 
@@ -25,7 +25,7 @@ impl RedbTrackStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(path)?;
+        let db = create_or_reset(path)?;
         // Materialise the table once up front; `open_table` in a write txn
         // creates it if missing.
         let wtx = db.begin_write()?;
@@ -83,6 +83,24 @@ impl TrackStore for RedbTrackStore {
         }
         wtx.commit()?;
         Ok(())
+    }
+}
+
+/// Open the database at `path`, discarding it first if it was written in a
+/// redb file format this build can no longer read.
+///
+/// redb 3 dropped support for the v2 on-disk format, so a file written by
+/// redb 2 answers [`redb::DatabaseError::UpgradeRequired`] instead of opening.
+/// This store only holds a snapshot of file mtimes, which the next scan
+/// rebuilds from the filesystem, so throwing it away costs one full re-scan
+/// and nothing else — the same as a cache miss.
+fn create_or_reset(path: &Path) -> Result<Database> {
+    match Database::create(path) {
+        Err(redb::DatabaseError::UpgradeRequired(_)) => {
+            std::fs::remove_file(path)?;
+            Ok(Database::create(path)?)
+        }
+        other => Ok(other?),
     }
 }
 

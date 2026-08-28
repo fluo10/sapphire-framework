@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use sapphire_rpc::{Change, Cursor};
 
 use crate::error::Result;
@@ -19,6 +19,32 @@ const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("changes");
 /// `key -> value` のメタデータ表（現状 `generation` のみ）。
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 const GENERATION_KEY: &str = "generation";
+
+/// Open the log at `path`, discarding it first if it was written in a redb
+/// file format this build can no longer read.
+///
+/// redb 3 dropped support for the v2 on-disk format, so a file written by
+/// redb 2 answers [`redb::DatabaseError::UpgradeRequired`] instead of opening.
+/// Unlike the caches, throwing this log away is visible to clients: the
+/// replacement gets a fresh `generation`, which is exactly the signal the
+/// protocol already defines for "this log was recreated, re-snapshot". The
+/// live document set itself survives — it is the origin directory on disk,
+/// not the log — so what is lost is the history, not the content.
+fn create_or_reset(path: &Path) -> Result<Database> {
+    match Database::create(path) {
+        Err(redb::DatabaseError::UpgradeRequired(version)) => {
+            tracing::warn!(
+                path = %path.display(),
+                file_format_version = version,
+                "change log is in an unreadable redb file format; recreating it. \
+                 Clients will see a new generation and re-snapshot.",
+            );
+            std::fs::remove_file(path)?;
+            Ok(Database::create(path)?)
+        }
+        other => Ok(other?),
+    }
+}
 
 /// Append-only change log backed by redb.
 pub struct ChangeLog {
@@ -31,7 +57,7 @@ impl ChangeLog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(path)?;
+        let db = create_or_reset(path)?;
         let wtx = db.begin_write()?;
         wtx.open_table(TABLE)?;
         {

@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
     collector::TopDocs,
@@ -85,6 +85,29 @@ fn vkey_parse(b: &[u8]) -> (i64, usize) {
 
 fn redb_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Redb(e.to_string())
+}
+
+/// Open `dir/docs.redb`, clearing the whole store directory first if the
+/// database was written in a redb file format this build can no longer read.
+///
+/// redb 3 dropped support for the v2 on-disk format, so a file written by
+/// redb 2 answers [`redb::DatabaseError::UpgradeRequired`] instead of opening.
+/// The redb records and the tantivy index beside them have to describe the
+/// same documents, so the recovery clears the directory rather than just the
+/// unreadable file — leaving a populated tantivy index next to empty redb
+/// tables would surface hits for documents the store can no longer produce.
+/// The caller then re-indexes exactly as it would for a cache that had never
+/// existed.
+fn create_or_reset(dir: &Path) -> Result<Database> {
+    let path = dir.join("docs.redb");
+    match Database::create(&path) {
+        Err(redb::DatabaseError::UpgradeRequired(_)) => {
+            std::fs::remove_dir_all(dir)?;
+            std::fs::create_dir_all(dir)?;
+            Database::create(&path).map_err(redb_err)
+        }
+        other => other.map_err(redb_err),
+    }
 }
 fn tantivy_err<E: std::fmt::Display>(e: E) -> Error {
     Error::Tantivy(e.to_string())
@@ -149,7 +172,7 @@ impl RedbStore {
         std::fs::create_dir_all(dir)?;
 
         // redb
-        let db = Database::create(dir.join("docs.redb")).map_err(redb_err)?;
+        let db = create_or_reset(dir)?;
         {
             let wtx = db.begin_write().map_err(redb_err)?;
             wtx.open_table(DOCUMENTS).map_err(redb_err)?;
