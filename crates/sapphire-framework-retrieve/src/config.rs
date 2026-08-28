@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 use crate::embed::EmbedderConfig;
+use serde::{Deserialize, Serialize};
 
 /// Top-level retrieve configuration (`[retrieve]` section).
 ///
@@ -57,7 +56,6 @@ impl Default for HybridConfig {
 /// |--------------|----------------------------------------------------------|
 /// | `none`       | Vector search disabled (default, no extra dependencies)  |
 /// | `redb`       | Brute-force vectors in the pure-Rust redb cache (default backend) |
-/// | `lancedb`    | LanceDB — suitable for larger-scale / multimodal use     |
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorDb {
@@ -66,9 +64,6 @@ pub enum VectorDb {
     None,
     /// Brute-force vector search stored in the pure-Rust redb cache.
     Redb,
-    /// LanceDB stored in a separate data directory alongside the cache.
-    #[serde(rename = "lancedb")]
-    LanceDb,
 }
 
 impl VectorDb {
@@ -77,7 +72,6 @@ impl VectorDb {
         match self {
             VectorDb::None => "none",
             VectorDb::Redb => "redb",
-            VectorDb::LanceDb => "lancedb",
         }
     }
 }
@@ -107,7 +101,7 @@ pub struct EmbeddingConfig {
     pub base_url: Option<String>,
 
     /// Output vector dimension of the model.
-    /// Required when `db` selects a vector backend (`redb` / `lancedb`).
+    /// Required when `db` selects a vector backend (`redb`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dimension: Option<u32>,
 }

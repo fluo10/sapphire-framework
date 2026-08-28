@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "lancedb-store")]
-use sapphire_retrieve::open_lancedb;
 use sapphire_retrieve::{
     Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
     RetrieveStore, TomlChunker, VectorQuery,
@@ -146,11 +144,6 @@ impl WorkspaceState {
 
     /// Delete and recreate the retrieve DB from scratch.
     pub fn rebuild(workspace: Workspace) -> Result<Self> {
-        #[cfg(feature = "lancedb-store")]
-        {
-            use sapphire_retrieve::lancedb_store;
-            let _ = std::fs::remove_dir_all(lancedb_store::data_dir(&workspace.cache_dir()));
-        }
         // Drop the mtime snapshot too, so the rebuilt retrieve index and the
         // track store start from a consistent (empty) state.
         let _ = std::fs::remove_file(workspace.track_db_path());
@@ -794,14 +787,6 @@ impl WorkspaceState {
             )?)),
             #[cfg(not(feature = "redb-store"))]
             VectorDb::Redb => Err(crate::error::Error::RedbStoreNotEnabled),
-            #[cfg(feature = "lancedb-store")]
-            VectorDb::LanceDb => {
-                use sapphire_retrieve::lancedb_store;
-                let lancedb_dir = lancedb_store::data_dir(&self.workspace.cache_dir());
-                Ok(Some(open_lancedb(&lancedb_dir, dim)?))
-            }
-            #[cfg(not(feature = "lancedb-store"))]
-            VectorDb::LanceDb => Err(crate::error::Error::LanceDbNotEnabled),
         }
     }
 }

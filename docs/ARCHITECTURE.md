@@ -52,6 +52,13 @@ Cargo は **feature が無効な optional 依存もバージョン解決の対�
 `RetrieveDb::init_sqlite_vec` も廃止。`RETRIEVE_SCHEMA_VERSION` は常に 0（redb が自前で on-disk 形式を管理するため）。
 **レガシー DB からの移行パスは無く、`db = "sqlite_vec"` の設定は `db = "redb"` に変更が必要。**
 
+**LanceDB も削除済み**（2026-08-28）。redb をキャッシュの既定にした時点で、lancedb はベクトル索引
+しか担わない二重化した経路になっていた。加えて lancedb は最新の 0.37.1 でも `arrow ^58` を要求するため、
+arrow の更新がこちらの都合では進められない状態だった。`lancedb_store.rs` / `lancedb-store` feature /
+`VectorDb::LanceDb` / `Error::LanceDbNotEnabled` を削除し、arrow・lance がグラフから消えたことで
+`--all-features` のビルドも大幅に短くなった。**`db = "lancedb"` の設定は `db = "redb"` に変更が必要**
+（enum から消えたので、そのままでは設定の読み込みが失敗する）。
+
 **構成**（`sapphire-framework-retrieve`）:
 
 - **`RetrieveStore` trait**（同期）が統一インターフェース（`upsert_document`/`remove_document`/`rebuild_fts`/
@@ -59,15 +66,15 @@ Cargo は **feature が無効な optional 依存もバージョン解決の対�
   mtime 追跡は責務外（`sapphire-framework-track` の `TrackStore` が持つ）。
 - **唯一の永続実装 = `RedbStore`（redb + tantivy + brute-force vectors）**。C依存ゼロ・純Rust。
   `redb-store` を切ると揮発する in-memory ストアにフォールバックするだけなので、
-  **各アプリは `redb-store` を既定に入れること**（`lancedb-store` はベクトル索引しか担わない）。
+  **各アプリは `redb-store` を既定に入れること**。
   - **redb** = 正本レコード保管。`documents: doc_id -> {path, chunks}`、`vectors: (doc_id,line_start) -> f32[]`、`meta`。
   - **tantivy** = redb から作る転置インデックス。**trigram トークナイザ**（`NgramTokenizer(3,3)`）で
     旧 FTS5 `trigram` 相当（substring・CJK 対応）。BM25 ランキング。索引は redb から再構築可能。
   - **ベクトル検索は brute-force**（redb 上の全ベクトルを L2 距離でスキャン）。数万件までミリ秒未満で厳密。
-    規模が要求したら HNSW（`instant-distance` 等の純Rust）に差し替え可能。lancedb は重い場所のみ任意。
+    規模が要求したら HNSW（`instant-distance` 等の純Rust）に差し替え可能。
   - **VectorStore を別 trait に切らず redb に統合**（vectors は同期対象外。非同期性は sync 層＝Change がドキュメントのみ運ぶことで担保）。
-- **feature**: `redb-store`（既定）/ `lancedb-store` / `fastembed-embed`。`sqlite-store` は削除済み（上記参照）。
-  `VectorDb` config enum は `None` / `Redb`（既定のブルートフォース）/ `LanceDb`。
+- **feature**: `redb-store`（既定）/ `fastembed-embed`。`sqlite-store` / `lancedb-store` は削除済み（上記参照）。
+  `VectorDb` config enum は `None` / `Redb`（既定のブルートフォース）。
 
 ストア分離の共有ヘルパー（`ChunkRow` / `group_by_file` / `vec_serialize` / `vec_deserialize` / `l2_distance`）は
 `vector_store.rs` に集約し、sqlite / redb 両バックエンドで共用。
@@ -80,7 +87,7 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 |---|---|---|
 | `sapphire-framework` | **単一依存ファサード**（bevy 方式・feature で各モジュール re-export）。骨格導入済（#95） | ✅ 骨格 |
 | `sapphire-framework-track` | mtime 変更検知 `TrackStore`（redb） | ✅ 移設済 |
-| `sapphire-framework-retrieve` | 検索。`RetrieveStore` + `RedbStore`(redb+tantivy) 既定。sqlite/lancedb は optional | ✅ 移設+redb実装済 |
+| `sapphire-framework-retrieve` | 検索。`RetrieveStore` + `RedbStore`(redb+tantivy) のみ | ✅ 移設+redb実装済 |
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済（#90 で git/自動同期/device を撤去） |
 | `sapphire-framework-rpc` | client/server 共有 JSON-RPC 型/メソッド定義（serde-only・wasm-safe） | ✅ |
 | `sapphire-framework-remote-client` | JSON-RPC 差分同期クライアント（reqwest, `RemoteClient`） | ✅ |
@@ -164,7 +171,7 @@ search.semantic     {ws, q, limit}                           -> 当面 fts フ�
 
 1. 同期→非同期の波及は Backend trait のみ async 化で封じる（`ops::update_entry(&Connection,...)` の `&Connection` を trait から外す破壊的変更）。
 2. egui native の async: `?Send` により `dyn` は跨スレッド不可 → 具象型保持 + `runtime.spawn`。
-3. WASM 非互換（lancedb/arrow・rusqlite・git2・fastembed・sqlx-postgres・tantivy/redb）は `cfg(not(wasm32))` / 独立バイナリで隔離。
+3. WASM 非互換（rusqlite・git2・fastembed・sqlx-postgres・tantivy/redb）は `cfg(not(wasm32))` / 独立バイナリで隔離。
    共有型は serde-only の `sapphire-framework-rpc` に。
 4. `GrainId`/uuid v7 の wasm 時刻: `SystemTime::now()` trap → `getrandom/js` + `js_sys::Date::now()`。要検証。
 5. tantivy trigram FTS の挙動同等性（BM25・prefix フィルタ・短いクエリ<3文字は無マッチ＝FTS5同等）。

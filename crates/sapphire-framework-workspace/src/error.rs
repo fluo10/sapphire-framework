@@ -32,10 +32,6 @@ pub enum Error {
     #[error("failed to serialize workspace config: {0}")]
     ConfigSerialize(#[from] toml::ser::Error),
 
-    /// LanceDB feature not compiled in.
-    #[error("lancedb support is not compiled in (enable the `lancedb-store` feature)")]
-    LanceDbNotEnabled,
-
     /// redb store feature not compiled in.
     #[error("redb-store support is not compiled in (enable the `redb-store` feature)")]
     RedbStoreNotEnabled,

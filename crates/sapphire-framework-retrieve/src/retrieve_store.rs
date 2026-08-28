@@ -210,9 +210,9 @@ pub struct FileSearchResult {
 /// Unified synchronous interface for retrieve storage backends.
 ///
 /// Built-in implementations:
-/// - [`SqliteStore`](crate::sqlite_store::SqliteStore) — SQLite-vec backend.
-/// - [`LanceDbBackend`](crate::lancedb_store::LanceDbBackend) — LanceDB backend
-///   (requires the `lancedb-store` feature).
+/// - [`RedbStore`](crate::redb_store::RedbStore) — redb records + tantivy
+///   full-text index + brute-force vectors (requires the `redb-store` feature).
+/// - `InMemoryStore` — ephemeral, used when no persistent backend is enabled.
 pub trait RetrieveStore: Send + Sync {
     // ── document management ────────────────────────────────────────────────────
 

@@ -4,22 +4,23 @@ Full-text and semantic search library extracted from [sapphire-journal](https://
 
 ## What this crate provides
 
-- **FTS5** — trigram full-text search over a SQLite database (`RetrieveDb::search_fts`)
-- **Vector search** — approximate nearest-neighbour search via sqlite-vec or LanceDB (`RetrieveDb::search_similar`)
+- **Full-text search** — trigram search over a tantivy index (`RetrieveDb::search_fts`)
+- **Vector search** — brute-force nearest-neighbour search over stored embeddings (`RetrieveDb::search_similar`)
 - **Chunker** — splits documents into overlapping text chunks for embedding (`chunker::chunk_document`)
 - **Embedder trait** — pluggable embedding backends (`build_embedder`)
   - `openai` — OpenAI-compatible REST API
   - `ollama` — local Ollama server
   - `fastembed` *(feature: `fastembed-embed`)* — local ONNX inference, no server required
 - **Config types** — `RetrieveConfig`, `VectorDb`, `EmbeddingConfig` in `sapphire_retrieve::config`
-- **LanceDB store** *(feature: `lancedb-store`)* — high-performance columnar vector store
+
+The store is pure Rust — redb for the records, tantivy for the full-text
+index — so nothing here pulls a C library into a downstream binary.
 
 ## Features
 
 | Feature | Default | Description |
 |---|---|---|
-| `sqlite-store` | no | SQLite FTS5 + sqlite-vec backend |
-| `lancedb-store` | yes | LanceDB vector backend |
+| `redb-store` | yes | redb records + tantivy full-text index + brute-force vectors |
 | `fastembed-embed` | yes | Local ONNX embedding via fastembed |
 
 ## License

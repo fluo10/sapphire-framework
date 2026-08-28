@@ -33,7 +33,7 @@ pub struct VecInfo {
     pub pending_count: u64,
 }
 
-// ── internal helpers shared by db.rs and lancedb_store.rs ─────────────────────
+// ── internal helpers shared by db.rs and redb_store.rs ───────────────────────
 
 /// Serialize a float slice to the little-endian bytes expected by sqlite-vec.
 #[allow(dead_code)]

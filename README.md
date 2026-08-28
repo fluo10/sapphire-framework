@@ -13,7 +13,7 @@ documents. Concurrent editing is handled by the central remote server
 
 | Feature flag | What it enables | Default |
 |---|---|---|
-| `lancedb-store` | LanceDB vector backend for semantic search | yes |
+| `redb-store` | redb records + tantivy full-text index + brute-force vectors | yes |
 | `fastembed-embed` | On-device embedding via FastEmbed | yes |
 
 ## Quick start
@@ -119,7 +119,7 @@ Place `config.toml` inside the marker directory
 
 ```toml
 [retrieve]
-db = "redb"   # "none" | "redb" | "lancedb"
+db = "redb"   # "none" | "redb"
 
 [retrieve.embedding]
 enabled     = true
@@ -133,7 +133,7 @@ Environment variable overrides:
 
 | Variable | Values |
 |---|---|
-| `SAPPHIRE_WORKSPACE_RETRIEVE_DB` | `none` / `sqlite_vec` / `lancedb` |
+| `SAPPHIRE_WORKSPACE_RETRIEVE_DB` | `none` / `redb` |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_ENABLED` | `1` / `true` / `yes` |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_PROVIDER` | string |
 | `SAPPHIRE_WORKSPACE_EMBEDDING_MODEL` | string |
