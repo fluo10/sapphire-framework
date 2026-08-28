@@ -162,7 +162,7 @@ impl WsStore {
             .into_values()
             .filter(|c| matches!(c.kind, ChangeKind::Upsert { .. }))
             .collect();
-        docs.sort_by(|a, b| a.seq.cmp(&b.seq));
+        docs.sort_by_key(|c| c.seq);
         Ok(SnapshotResult {
             cursor,
             generation,
@@ -274,12 +274,11 @@ impl WsStore {
             let change = match std::fs::read_to_string(&abs) {
                 Ok(body) => {
                     // 同一内容なら何もしない。
-                    if let Some(existing) = latest.get(path) {
-                        if let ChangeKind::Upsert { body: old, .. } = &existing.kind {
-                            if old == &body {
-                                continue;
-                            }
-                        }
+                    if let Some(existing) = latest.get(path)
+                        && let ChangeKind::Upsert { body: old, .. } = &existing.kind
+                        && old == &body
+                    {
+                        continue;
                     }
                     Change::upsert(path.clone(), body, updated_at)
                 }

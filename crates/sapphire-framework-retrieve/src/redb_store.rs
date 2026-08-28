@@ -360,7 +360,7 @@ impl RetrieveStore for RedbStore {
     fn document_count(&self) -> Result<u64> {
         let rtx = self.db.begin_read().map_err(redb_err)?;
         let t = rtx.open_table(DOCUMENTS).map_err(redb_err)?;
-        Ok(t.len().map_err(redb_err)?)
+        t.len().map_err(redb_err)
     }
 
     fn embed_pending(

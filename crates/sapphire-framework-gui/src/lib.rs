@@ -102,10 +102,11 @@ impl WorkspaceManager {
                         token: String::new(),
                     });
                 }
-                if ui.button("Open Existing…").clicked() && self.dialog.is_none() {
-                    if let Some(created) = self.open_existing(registry, host) {
-                        action = Some(created);
-                    }
+                if ui.button("Open Existing…").clicked()
+                    && self.dialog.is_none()
+                    && let Some(created) = self.open_existing(registry, host)
+                {
+                    action = Some(created);
                 }
                 if ui.button("New").clicked() && self.dialog.is_none() {
                     self.dialog = Some(Dialog::NewLocal {

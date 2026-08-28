@@ -188,10 +188,10 @@ impl RetrieveDb {
         #[cfg(feature = "redb-store")]
         {
             let store = RedbStore::open(&redb_dir_for(db_path), None)?;
-            return Ok(Self {
+            Ok(Self {
                 db_path: db_path.to_owned(),
                 backend: Mutex::new(BackendState::Redb(Arc::new(store))),
-            });
+            })
         }
 
         #[cfg(not(feature = "redb-store"))]
