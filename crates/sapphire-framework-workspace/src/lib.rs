@@ -29,4 +29,3 @@ pub use sapphire_retrieve::{
     FtsQuery, HybridQuery, RetrieveDb, RetrieveStore, VecInfo, VectorQuery, build_embedder,
     default_hybrid, merge_rrf_files,
 };
-

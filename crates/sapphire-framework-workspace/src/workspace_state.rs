@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "lancedb-store")]
 use sapphire_retrieve::open_lancedb;
-#[cfg(feature = "redb-store")]
-use sapphire_retrieve::{open_redb, open_redb_vec};
 use sapphire_retrieve::{
     Chunker, Document, Embedder, FileSearchResult, FtsQuery, HybridQuery, JsonlChunker,
     RetrieveStore, TomlChunker, VectorQuery,
 };
+#[cfg(feature = "redb-store")]
+use sapphire_retrieve::{open_redb, open_redb_vec};
 use sapphire_track::TrackStore;
 use tokio::sync::OnceCell;
 
@@ -733,9 +733,7 @@ impl WorkspaceState {
     ///
     /// Priority: pure-Rust redb+tantivy (`redb-store`, default) → ephemeral
     /// in-memory.
-    fn open_initial_backend(
-        workspace: &Workspace,
-    ) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
+    fn open_initial_backend(workspace: &Workspace) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
         #[cfg(feature = "redb-store")]
         {
             return Ok(open_redb(&workspace.retrieve_db_path())?);
@@ -755,9 +753,7 @@ impl WorkspaceState {
     /// (`redb-store`), otherwise an ephemeral in-memory store so the two
     /// never drift (a persistent mtime snapshot paired with an empty in-memory
     /// index would make changed files look unchanged).
-    fn open_initial_track(
-        workspace: &Workspace,
-    ) -> Result<Arc<dyn TrackStore + Send + Sync>> {
+    fn open_initial_track(workspace: &Workspace) -> Result<Arc<dyn TrackStore + Send + Sync>> {
         #[cfg(feature = "redb-store")]
         {
             Ok(Arc::new(sapphire_track::open_redb(

@@ -33,8 +33,8 @@ pub use error::{Error, Result};
 pub use local::LocalBackend;
 pub use remote::RemoteBackend;
 pub use source::{
-    DEFAULT_ID, DEFAULT_WS, WorkspaceEntry, WorkspaceLocator, WorkspaceRegistry, WorkspaceSelection,
-    WorkspaceSource,
+    DEFAULT_ID, DEFAULT_WS, WorkspaceEntry, WorkspaceLocator, WorkspaceRegistry,
+    WorkspaceSelection, WorkspaceSource,
 };
 
 // Re-export the search mode + result types (and the underlying state, which the

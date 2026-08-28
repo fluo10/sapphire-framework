@@ -25,7 +25,9 @@ use sapphire_workspace::WorkspaceState;
 use tokio::sync::broadcast;
 
 use crate::local::search_state;
-use crate::{BackendEvent, Error, FileSearchResult, Result, SearchMode, SyncSummary, WorkspaceBackend};
+use crate::{
+    BackendEvent, Error, FileSearchResult, Result, SearchMode, SyncSummary, WorkspaceBackend,
+};
 
 const EVENT_CAPACITY: usize = 128;
 
@@ -146,7 +148,10 @@ impl WorkspaceBackend for RemoteBackend {
         // Search the local cache (offline-capable, local FTS index).
         let cache = Arc::clone(&self.cache);
         let query = query.to_owned();
-        Ok(tokio::task::spawn_blocking(move || search_state(&cache, &query, limit, mode)).await??)
+        Ok(
+            tokio::task::spawn_blocking(move || search_state(&cache, &query, limit, mode))
+                .await??,
+        )
     }
 
     async fn read_file(&self, path: &Path) -> Result<String> {
@@ -184,7 +189,8 @@ impl WorkspaceBackend for RemoteBackend {
         })
         .await??;
 
-        self.push(Change::upsert(wire, full, chrono::Utc::now())).await?;
+        self.push(Change::upsert(wire, full, chrono::Utc::now()))
+            .await?;
         self.emit(BackendEvent::FileChanged { path: owned });
         Ok(())
     }
@@ -298,10 +304,16 @@ mod tests {
             .unwrap();
 
         // Readable from the local cache.
-        assert_eq!(backend.read_file(Path::new("a.md")).await.unwrap(), "hello world");
+        assert_eq!(
+            backend.read_file(Path::new("a.md")).await.unwrap(),
+            "hello world"
+        );
         // Searchable via the local FTS index.
         let hits = backend.search("hello", 10, SearchMode::Fts).await.unwrap();
-        assert!(hits.iter().any(|h| h.path.ends_with("a.md")), "got {hits:?}");
+        assert!(
+            hits.iter().any(|h| h.path.ends_with("a.md")),
+            "got {hits:?}"
+        );
 
         // The server received the push (a second client can pull it).
         let other = RemoteClient::new(url);
@@ -318,7 +330,15 @@ mod tests {
         // A different client writes a document directly to the server.
         let remote = RemoteClient::new(url);
         remote
-            .push("wsSync", 0, vec![Change::upsert("remote.md", "from elsewhere", chrono::Utc::now())])
+            .push(
+                "wsSync",
+                0,
+                vec![Change::upsert(
+                    "remote.md",
+                    "from elsewhere",
+                    chrono::Utc::now(),
+                )],
+            )
             .await
             .unwrap();
 
@@ -341,13 +361,20 @@ mod tests {
         let (_cache_dir, cache) = open_cache();
         let backend = RemoteBackend::new(RemoteClient::new(url), "wsDel", cache);
 
-        backend.write_file(Path::new("doomed.md"), "bye").await.unwrap();
+        backend
+            .write_file(Path::new("doomed.md"), "bye")
+            .await
+            .unwrap();
         assert!(backend.read_file(Path::new("doomed.md")).await.is_ok());
         backend.delete_file(Path::new("doomed.md")).await.unwrap();
         assert!(backend.read_file(Path::new("doomed.md")).await.is_err());
 
         // Absolute paths are rejected (documents are keyed on relative paths).
-        let abs = if cfg!(windows) { Path::new("C:/abs.md") } else { Path::new("/abs.md") };
+        let abs = if cfg!(windows) {
+            Path::new("C:/abs.md")
+        } else {
+            Path::new("/abs.md")
+        };
         assert!(matches!(
             backend.write_file(abs, "x").await,
             Err(Error::Unsupported(_))

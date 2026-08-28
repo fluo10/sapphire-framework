@@ -260,7 +260,9 @@ mod tests {
     fn in_memory_store_round_trips() {
         let store = open_in_memory();
         store.upsert("x", 10).unwrap();
-        store.upsert_many(&[("y".into(), 20), ("z".into(), 30)]).unwrap();
+        store
+            .upsert_many(&[("y".into(), 20), ("z".into(), 30)])
+            .unwrap();
         assert_eq!(store.count().unwrap(), 3);
 
         let m = store.mtimes().unwrap();

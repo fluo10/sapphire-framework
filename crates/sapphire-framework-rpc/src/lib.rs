@@ -74,7 +74,11 @@ pub struct Change {
 
 impl Change {
     /// Convenience constructor for an upsert with no blob attachments.
-    pub fn upsert(path: impl Into<String>, body: impl Into<String>, updated_at: DateTime<Utc>) -> Self {
+    pub fn upsert(
+        path: impl Into<String>,
+        body: impl Into<String>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             seq: 0,
             path: path.into(),

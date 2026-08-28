@@ -72,8 +72,8 @@ impl WorkspaceBackend for LocalBackend {
     ) -> Result<Vec<FileSearchResult>> {
         let state = Arc::clone(&self.state);
         let query = query.to_owned();
-        let hits =
-            tokio::task::spawn_blocking(move || search_state(&state, &query, limit, mode)).await??;
+        let hits = tokio::task::spawn_blocking(move || search_state(&state, &query, limit, mode))
+            .await??;
         Ok(hits)
     }
 
@@ -120,8 +120,7 @@ impl WorkspaceBackend for LocalBackend {
 
     async fn sync(&self) -> Result<SyncSummary> {
         let state = Arc::clone(&self.state);
-        let (upserted, removed) =
-            tokio::task::spawn_blocking(move || state.sync()).await??;
+        let (upserted, removed) = tokio::task::spawn_blocking(move || state.sync()).await??;
         self.emit(BackendEvent::Synced { upserted, removed });
         Ok(SyncSummary { upserted, removed })
     }
@@ -164,10 +163,7 @@ mod tests {
         let ev = rx.try_recv().unwrap();
         assert!(matches!(ev, BackendEvent::FileChanged { .. }));
 
-        let hits = backend
-            .search("quick", 10, SearchMode::Fts)
-            .await
-            .unwrap();
+        let hits = backend.search("quick", 10, SearchMode::Fts).await.unwrap();
         assert!(
             hits.iter().any(|h| h.path.ends_with("note.md")),
             "expected note.md in {hits:?}"
