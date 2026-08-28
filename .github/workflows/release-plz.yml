@@ -23,7 +23,9 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain comes from rust-toolchain.toml; rustup installs it on first use.
+      - name: Install the pinned toolchain
+        run: cargo --version
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
@@ -47,7 +49,9 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain comes from rust-toolchain.toml; rustup installs it on first use.
+      - name: Install the pinned toolchain
+        run: cargo --version
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
