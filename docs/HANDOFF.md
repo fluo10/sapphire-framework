@@ -108,7 +108,7 @@ sapphire-workspace = { package = "sapphire-framework-workspace",
 - **Cargo は feature が無効な optional 依存もバージョン解決し、`links` 衝突を検査する。**
   これが `sqlite-store` を optional で残せなかった理由（詳細は ARCHITECTURE.md）。同種の C ライブラリを足すときは同じ罠に注意。
 - **`redb-store` を切ると永続ストアが消えて in-memory にフォールバックする**（エラーにならない）。
-  `lancedb-store` はベクトル索引しか担わないので、**単独で有効にしても FTS/レコードは揮発する**。agent が実際にこの状態だったので既定に `redb-store` を追加した。
+  agent が実際にこの状態だったので既定に `redb-store` を追加した。
 - **agent は `#![recursion_limit = "256"]` が必要**（`src/main.rs`）。framework 経由で redb/tantivy が型グラフに入ると、
   matrix-sdk の E2EE future の `Send` 証明が既定の再帰上限を超える。
 - **tantivy 0.24** / **redb 2.6**。trigram は `NgramTokenizer(3,3,false)`＋`LowerCaser`。3文字未満クエリは無マッチ（FTS5 trigram と同じ）。

@@ -12,7 +12,6 @@ categories = ["filesystem", "database"]
 default = ["redb-store", "fastembed-embed"]
 # Pure-Rust cache backend (redb + tantivy). Default; no SQLite/libsqlite3-sys.
 redb-store      = ["sapphire-retrieve/redb-store"]
-lancedb-store   = ["sapphire-retrieve/lancedb-store"]
 fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 
 [dependencies]

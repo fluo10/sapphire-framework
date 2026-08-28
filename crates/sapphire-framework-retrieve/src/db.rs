@@ -22,9 +22,6 @@ use crate::{
 #[cfg(feature = "redb-store")]
 use crate::redb_store::RedbStore;
 
-#[cfg(feature = "lancedb-store")]
-use crate::lancedb_store::LanceDbBackend;
-
 /// Derive the redb store directory for a given retrieve DB file path.
 ///
 /// Callers pass a versioned file path (e.g. `retrieve_v5.db`); the pure-Rust
@@ -150,8 +147,6 @@ enum BackendState {
     InMemory(Arc<InMemoryStore>),
     #[cfg(feature = "redb-store")]
     Redb(Arc<RedbStore>),
-    #[cfg(feature = "lancedb-store")]
-    LanceDb(Arc<LanceDbBackend>),
 }
 
 impl BackendState {
@@ -160,8 +155,6 @@ impl BackendState {
             BackendState::InMemory(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
             #[cfg(feature = "redb-store")]
             BackendState::Redb(s) => Arc::clone(s) as Arc<dyn RetrieveStore>,
-            #[cfg(feature = "lancedb-store")]
-            BackendState::LanceDb(l) => Arc::clone(l) as Arc<dyn RetrieveStore>,
         }
     }
 
@@ -170,8 +163,6 @@ impl BackendState {
             BackendState::InMemory(_) => true,
             #[cfg(feature = "redb-store")]
             BackendState::Redb(s) => s.dim().is_none(),
-            #[cfg(feature = "lancedb-store")]
-            BackendState::LanceDb(_) => false,
         }
     }
 }
@@ -214,16 +205,6 @@ impl RetrieveDb {
         if guard.needs_init() {
             let store = RedbStore::open(&redb_dir_for(&self.db_path), Some(embedding_dim))?;
             *guard = BackendState::Redb(Arc::new(store));
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "lancedb-store")]
-    pub fn init_lancedb(&self, lancedb_dir: &Path, embedding_dim: u32) -> Result<()> {
-        let mut guard = self.backend.lock().unwrap();
-        if guard.needs_init() {
-            let backend = LanceDbBackend::new(lancedb_dir, embedding_dim)?;
-            *guard = BackendState::LanceDb(Arc::new(backend));
         }
         Ok(())
     }
@@ -414,11 +395,6 @@ pub fn open_redb_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore +
         &redb_dir_for(db_path),
         Some(dim),
     )?))
-}
-
-#[cfg(feature = "lancedb-store")]
-pub fn open_lancedb(data_dir: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
-    Ok(Arc::new(LanceDbBackend::new(data_dir, dim)?))
 }
 
 #[cfg(test)]

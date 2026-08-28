@@ -34,7 +34,6 @@ redb-store = [
     "sapphire-framework-workspace?/redb-store",
     "sapphire-framework-backend?/redb-store",
 ]
-lancedb-store = ["sapphire-framework-workspace?/lancedb-store"]
 fastembed-embed = ["sapphire-framework-workspace?/fastembed-embed"]
 
 [dependencies]

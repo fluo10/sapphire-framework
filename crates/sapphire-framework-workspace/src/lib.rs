@@ -22,8 +22,6 @@ pub use workspace_state::{DbInfo, RetrieveParams, SearchMode, WorkspaceState};
 /// retired SQLite backend; the pure-Rust redb backend manages its own on-disk
 /// format, so this is always `0`.
 pub const RETRIEVE_SCHEMA_VERSION: i32 = 0;
-#[cfg(feature = "lancedb-store")]
-pub use sapphire_retrieve::lancedb_store;
 pub use sapphire_retrieve::{
     Chunk, ChunkHit, Document, Embedder, EmbedderConfig, Error as RetrieveError, FileSearchResult,
     FtsQuery, HybridQuery, RetrieveDb, RetrieveStore, VecInfo, VectorQuery, build_embedder,
