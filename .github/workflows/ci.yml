@@ -16,7 +16,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake libwayland-dev libxkbcommon-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
