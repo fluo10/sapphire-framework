@@ -23,6 +23,7 @@ chrono = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+grain-id.workspace = true
 toml.workspace = true
 getrandom.workspace = true
 
@@ -31,3 +32,4 @@ tower = { workspace = true, features = ["util"] }
 tempfile = "3"
 http-body-util = "0.1"
 uuid.workspace = true
+grain-id.workspace = true

@@ -85,6 +85,7 @@ pub mod prelude {
     // own routes.
     #[cfg(feature = "remote-server")]
     pub use crate::remote_server::{
-        Authenticated, KeyStore, ServerState, WsStore, WsStoreConfig, protect, router, serve,
+        Authenticated, GrainId, KeyStore, ServerState, WsStore, WsStoreConfig, protect, router,
+        serve,
     };
 }

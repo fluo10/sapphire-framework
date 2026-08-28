@@ -43,8 +43,11 @@ mod keys;
 mod ws_store;
 
 pub use auth::{Authenticated, protect};
+// `Authenticated::key_id` と `KeyEntry::id` の型。アプリが grain-id を自前で
+// 依存に足さなくても名指しできるように出しておく。
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
+pub use grain_id::GrainId;
 pub use keys::{KeyEntry, KeyStore};
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
@@ -200,7 +203,10 @@ async fn rpc_handler(
 
 /// Route one request to its handler, returning the JSON result value or a
 /// JSON-RPC error.
-async fn dispatch(state: Arc<ServerState>, req: JsonRpcRequest) -> std::result::Result<Value, JsonRpcError> {
+async fn dispatch(
+    state: Arc<ServerState>,
+    req: JsonRpcRequest,
+) -> std::result::Result<Value, JsonRpcError> {
     match req.method.as_str() {
         methods::WORKSPACE_SNAPSHOT => {
             let p: SnapshotParams = parse_params(req.params)?;
@@ -234,7 +240,9 @@ async fn dispatch(state: Arc<ServerState>, req: JsonRpcRequest) -> std::result::
             let store = open_ws(&state, &p.ws)?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(p.bytes_base64.as_bytes())
-                .map_err(|e| JsonRpcError::new(error_codes::INVALID_PARAMS, format!("bad base64: {e}")))?;
+                .map_err(|e| {
+                    JsonRpcError::new(error_codes::INVALID_PARAMS, format!("bad base64: {e}"))
+                })?;
             let r = run(move || store.blob_put(&bytes)).await?;
             to_value(BlobPutResult {
                 hash: r.hash,
@@ -247,8 +255,7 @@ async fn dispatch(state: Arc<ServerState>, req: JsonRpcRequest) -> std::result::
             let hash = p.hash.clone();
             let bytes = run(move || store.blob_get(&hash)).await?;
             to_value(BlobGetResult {
-                bytes_base64: bytes
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+                bytes_base64: bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })
         }
         methods::SEARCH_FTS | methods::SEARCH_SEMANTIC => {
@@ -312,5 +319,6 @@ where
 
 /// Serialize a handler result to a JSON value.
 fn to_value<T: Serialize>(value: T) -> std::result::Result<Value, JsonRpcError> {
-    serde_json::to_value(value).map_err(|e| JsonRpcError::new(error_codes::INTERNAL_ERROR, e.to_string()))
+    serde_json::to_value(value)
+        .map_err(|e| JsonRpcError::new(error_codes::INTERNAL_ERROR, e.to_string()))
 }
