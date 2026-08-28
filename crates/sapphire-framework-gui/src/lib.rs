@@ -51,9 +51,19 @@ pub enum WorkspaceAction {
 }
 
 enum Dialog {
-    NewLocal { name: String },
-    AddRemote { name: String, url: String, token: String },
-    ConfirmDelete { id: String, name: String, typed: String },
+    NewLocal {
+        name: String,
+    },
+    AddRemote {
+        name: String,
+        url: String,
+        token: String,
+    },
+    ConfirmDelete {
+        id: String,
+        name: String,
+        typed: String,
+    },
 }
 
 /// The workspace list + management screen. Hold one per app; call [`ui`](Self::ui)
@@ -92,10 +102,11 @@ impl WorkspaceManager {
                         token: String::new(),
                     });
                 }
-                if ui.button("Open Existing…").clicked() && self.dialog.is_none() {
-                    if let Some(created) = self.open_existing(registry, host) {
-                        action = Some(created);
-                    }
+                if ui.button("Open Existing…").clicked()
+                    && self.dialog.is_none()
+                    && let Some(created) = self.open_existing(registry, host)
+                {
+                    action = Some(created);
                 }
                 if ui.button("New").clicked() && self.dialog.is_none() {
                     self.dialog = Some(Dialog::NewLocal {
@@ -327,7 +338,10 @@ impl WorkspaceManager {
                         let matches = typed.trim() == expected;
                         ui.add_space(8.0);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add_enabled(matches, egui::Button::new("Remove")).clicked() {
+                            if ui
+                                .add_enabled(matches, egui::Button::new("Remove"))
+                                .clicked()
+                            {
                                 registry.remove(&id);
                                 action = Some(WorkspaceAction::Deleted(id.clone()));
                                 close = true;

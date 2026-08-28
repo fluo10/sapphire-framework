@@ -184,7 +184,10 @@ mod tests {
         let (_tmp, store) = store();
         let r = store.put(b"hello world").unwrap();
         assert_eq!(r.len, 11);
-        assert_eq!(store.get(&r.hash).unwrap().as_deref(), Some(&b"hello world"[..]));
+        assert_eq!(
+            store.get(&r.hash).unwrap().as_deref(),
+            Some(&b"hello world"[..])
+        );
     }
 
     #[test]

@@ -162,8 +162,12 @@ impl WsStore {
             .into_values()
             .filter(|c| matches!(c.kind, ChangeKind::Upsert { .. }))
             .collect();
-        docs.sort_by(|a, b| a.seq.cmp(&b.seq));
-        Ok(SnapshotResult { cursor, generation, docs })
+        docs.sort_by_key(|c| c.seq);
+        Ok(SnapshotResult {
+            cursor,
+            generation,
+            docs,
+        })
     }
 
     /// Changes newer than `since`, capped at `limit`.
@@ -270,12 +274,11 @@ impl WsStore {
             let change = match std::fs::read_to_string(&abs) {
                 Ok(body) => {
                     // 同一内容なら何もしない。
-                    if let Some(existing) = latest.get(path) {
-                        if let ChangeKind::Upsert { body: old, .. } = &existing.kind {
-                            if old == &body {
-                                continue;
-                            }
-                        }
+                    if let Some(existing) = latest.get(path)
+                        && let ChangeKind::Upsert { body: old, .. } = &existing.kind
+                        && old == &body
+                    {
+                        continue;
                     }
                     Change::upsert(path.clone(), body, updated_at)
                 }
@@ -371,7 +374,8 @@ impl WsStore {
                 })?;
             }
             ChangeKind::Delete => {
-                self.retrieve.remove_document(path_to_doc_id(&change.path))?;
+                self.retrieve
+                    .remove_document(path_to_doc_id(&change.path))?;
             }
         }
         Ok(())
@@ -538,7 +542,13 @@ pub fn is_syncable(rel: &str, app_dir: Option<&str>) -> bool {
 fn sanitize(ws: &str) -> String {
     let cleaned: String = ws
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         "default".to_owned()
@@ -589,7 +599,14 @@ mod tests {
         let t0 = Utc::now();
         // Server accepts a newer edit at seq 1.
         store
-            .push(0, vec![Change::upsert("a.md", "server", t0 + chrono::Duration::seconds(10))])
+            .push(
+                0,
+                vec![Change::upsert(
+                    "a.md",
+                    "server",
+                    t0 + chrono::Duration::seconds(10),
+                )],
+            )
             .unwrap();
         // Client pushes an OLDER edit with base_cursor 0 (unaware of seq 1).
         let out = store
@@ -608,9 +625,18 @@ mod tests {
     fn newer_concurrent_edit_wins() {
         let (_t, store) = store();
         let t0 = Utc::now();
-        store.push(0, vec![Change::upsert("a.md", "server", t0)]).unwrap();
+        store
+            .push(0, vec![Change::upsert("a.md", "server", t0)])
+            .unwrap();
         let out = store
-            .push(0, vec![Change::upsert("a.md", "client-newer", t0 + chrono::Duration::seconds(5))])
+            .push(
+                0,
+                vec![Change::upsert(
+                    "a.md",
+                    "client-newer",
+                    t0 + chrono::Duration::seconds(5),
+                )],
+            )
             .unwrap();
         assert!(out.conflicts.is_empty());
         let snap = store.snapshot().unwrap();
@@ -624,7 +650,10 @@ mod tests {
     fn search_finds_pushed_document() {
         let (_t, store) = store();
         store
-            .push(0, vec![Change::upsert("note.md", "the quick brown fox", Utc::now())])
+            .push(
+                0,
+                vec![Change::upsert("note.md", "the quick brown fox", Utc::now())],
+            )
             .unwrap();
         let hits = store.search_fts("quick", 10).unwrap();
         assert!(hits.iter().any(|h| h.path == "note.md"), "got {hits:?}");
@@ -633,17 +662,27 @@ mod tests {
     #[test]
     fn snapshot_folds_out_tombstones() {
         let (_t, store) = store();
-        store.push(0, vec![Change::upsert("a.md", "x", Utc::now())]).unwrap();
-        store.push(1, vec![Change::delete("a.md", Utc::now())]).unwrap();
+        store
+            .push(0, vec![Change::upsert("a.md", "x", Utc::now())])
+            .unwrap();
+        store
+            .push(1, vec![Change::delete("a.md", Utc::now())])
+            .unwrap();
         let snap = store.snapshot().unwrap();
-        assert!(snap.docs.is_empty(), "deleted doc must not appear in snapshot");
+        assert!(
+            snap.docs.is_empty(),
+            "deleted doc must not appear in snapshot"
+        );
     }
 
     #[test]
     fn blob_roundtrip() {
         let (_t, store) = store();
         let r = store.blob_put(b"binary").unwrap();
-        assert_eq!(store.blob_get(&r.hash).unwrap().as_deref(), Some(&b"binary"[..]));
+        assert_eq!(
+            store.blob_get(&r.hash).unwrap().as_deref(),
+            Some(&b"binary"[..])
+        );
     }
 
     #[test]
@@ -665,7 +704,10 @@ mod tests {
             .unwrap();
 
         // origin_dir 直下に書かれること（origin/<ws>/ を掘らない）
-        assert_eq!(std::fs::read_to_string(origin.join("a.md")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(origin.join("a.md")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -703,7 +745,9 @@ mod tests {
         let (changes, _) = store.change_log.since(0, 10).unwrap();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "a.md");
-        assert!(matches!(&changes[0].kind, ChangeKind::Upsert { body, .. } if body == "written by the app"));
+        assert!(
+            matches!(&changes[0].kind, ChangeKind::Upsert { body, .. } if body == "written by the app")
+        );
     }
 
     #[test]

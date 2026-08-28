@@ -344,7 +344,13 @@ async fn pull_with_a_foreign_generation_is_rejected() {
 #[tokio::test]
 async fn pull_without_a_generation_is_accepted() {
     let (_t, st) = state(None);
-    let response = call(&st, None, methods::CHANGES_PULL, json!({"ws": "w", "since": 0, "limit": 10})).await;
+    let response = call(
+        &st,
+        None,
+        methods::CHANGES_PULL,
+        json!({"ws": "w", "since": 0, "limit": 10}),
+    )
+    .await;
     assert!(response.error.is_none());
 }
 

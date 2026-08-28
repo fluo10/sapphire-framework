@@ -31,7 +31,9 @@ use tantivy::{
     collector::TopDocs,
     doc,
     query::QueryParser,
-    schema::{Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions, Value},
+    schema::{
+        Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions, Value,
+    },
     tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer},
 };
 
@@ -358,7 +360,7 @@ impl RetrieveStore for RedbStore {
     fn document_count(&self) -> Result<u64> {
         let rtx = self.db.begin_read().map_err(redb_err)?;
         let t = rtx.open_table(DOCUMENTS).map_err(redb_err)?;
-        Ok(t.len().map_err(redb_err)?)
+        t.len().map_err(redb_err)
     }
 
     fn embed_pending(
@@ -411,8 +413,11 @@ impl RetrieveStore for RedbStore {
             {
                 let mut vecs = wtx.open_table(VECTORS).map_err(redb_err)?;
                 for ((doc_id, line_start, _), emb) in batch.iter().zip(embeddings.iter()) {
-                    vecs.insert(vkey(*doc_id, *line_start).as_slice(), vec_serialize(emb).as_slice())
-                        .map_err(redb_err)?;
+                    vecs.insert(
+                        vkey(*doc_id, *line_start).as_slice(),
+                        vec_serialize(emb).as_slice(),
+                    )
+                    .map_err(redb_err)?;
                 }
             }
             wtx.commit().map_err(redb_err)?;
@@ -615,14 +620,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = RedbStore::open(tmp.path(), Some(3)).unwrap();
 
-        store.upsert_document(&doc(1, "/a.md", "the banana is yellow")).unwrap();
-        store.upsert_document(&doc(2, "/b.md", "a cherry is red")).unwrap();
+        store
+            .upsert_document(&doc(1, "/a.md", "the banana is yellow"))
+            .unwrap();
+        store
+            .upsert_document(&doc(2, "/b.md", "a cherry is red"))
+            .unwrap();
         store.rebuild_fts().unwrap();
 
         assert_eq!(store.document_count().unwrap(), 2);
 
         // Full-text search (trigram) finds the right document.
-        let hits = store.search_fts(&FtsQuery::new("banana").limit(10)).unwrap();
+        let hits = store
+            .search_fts(&FtsQuery::new("banana").limit(10))
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, 1);
         assert_eq!(hits[0].path, "/a.md");
@@ -644,7 +655,9 @@ mod tests {
         store.remove_document(1).unwrap();
         store.rebuild_fts().unwrap();
         assert_eq!(store.document_count().unwrap(), 1);
-        let hits = store.search_fts(&FtsQuery::new("banana").limit(10)).unwrap();
+        let hits = store
+            .search_fts(&FtsQuery::new("banana").limit(10))
+            .unwrap();
         assert!(hits.is_empty());
     }
 
@@ -653,7 +666,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         {
             let store = RedbStore::open(tmp.path(), Some(3)).unwrap();
-            store.upsert_document(&doc(1, "/a.md", "hello world text")).unwrap();
+            store
+                .upsert_document(&doc(1, "/a.md", "hello world text"))
+                .unwrap();
             store.rebuild_fts().unwrap();
         }
         // Reopen without passing dim: it is recovered from meta.

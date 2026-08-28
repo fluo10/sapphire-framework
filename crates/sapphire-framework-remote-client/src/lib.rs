@@ -69,11 +69,7 @@ impl RemoteClient {
     /// Perform one JSON-RPC call and deserialize the result.
     async fn call<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::new(
-            Value::from(id),
-            method,
-            serde_json::to_value(params)?,
-        );
+        let request = JsonRpcRequest::new(Value::from(id), method, serde_json::to_value(params)?);
 
         let mut builder = self.http.post(&self.endpoint).json(&request);
         if let Some(token) = &self.token {
@@ -103,7 +99,10 @@ impl RemoteClient {
     /// `workspace.snapshot`.
     pub async fn snapshot(&self, ws: &str) -> Result<SnapshotResult> {
         let result: SnapshotResult = self
-            .call(methods::WORKSPACE_SNAPSHOT, SnapshotParams { ws: ws.to_owned() })
+            .call(
+                methods::WORKSPACE_SNAPSHOT,
+                SnapshotParams { ws: ws.to_owned() },
+            )
             .await?;
         *self.generation.lock().unwrap() = Some(result.generation);
         Ok(result)

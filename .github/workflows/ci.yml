@@ -7,16 +7,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # The toolchain (and its clippy/rustfmt components) comes from
+      # rust-toolchain.toml. rustup installs it on first use; do that in its
+      # own step so the download does not land in the middle of another one.
+      - name: Install the pinned toolchain
+        run: cargo --version
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake libwayland-dev libxkbcommon-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check

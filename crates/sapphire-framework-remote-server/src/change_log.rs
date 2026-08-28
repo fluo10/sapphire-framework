@@ -176,8 +176,10 @@ mod tests {
     #[test]
     fn latest_per_path_keeps_last_write() {
         let (_t, log) = log();
-        log.append(Change::upsert("a.md", "old", Utc::now())).unwrap();
-        log.append(Change::upsert("a.md", "new", Utc::now())).unwrap();
+        log.append(Change::upsert("a.md", "old", Utc::now()))
+            .unwrap();
+        log.append(Change::upsert("a.md", "new", Utc::now()))
+            .unwrap();
         let map = log.latest_per_path().unwrap();
         match &map["a.md"].kind {
             sapphire_rpc::ChangeKind::Upsert { body, .. } => assert_eq!(body, "new"),

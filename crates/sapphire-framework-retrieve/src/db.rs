@@ -188,10 +188,10 @@ impl RetrieveDb {
         #[cfg(feature = "redb-store")]
         {
             let store = RedbStore::open(&redb_dir_for(db_path), None)?;
-            return Ok(Self {
+            Ok(Self {
                 db_path: db_path.to_owned(),
                 backend: Mutex::new(BackendState::Redb(Arc::new(store))),
-            });
+            })
         }
 
         #[cfg(not(feature = "redb-store"))]
@@ -409,11 +409,11 @@ pub fn open_redb(db_path: &Path) -> Result<Arc<dyn RetrieveStore + Send + Sync>>
 
 /// Open a pure-Rust redb + tantivy backend with vector search enabled.
 #[cfg(feature = "redb-store")]
-pub fn open_redb_vec(
-    db_path: &Path,
-    dim: u32,
-) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
-    Ok(Arc::new(RedbStore::open(&redb_dir_for(db_path), Some(dim))?))
+pub fn open_redb_vec(db_path: &Path, dim: u32) -> Result<Arc<dyn RetrieveStore + Send + Sync>> {
+    Ok(Arc::new(RedbStore::open(
+        &redb_dir_for(db_path),
+        Some(dim),
+    )?))
 }
 
 #[cfg(feature = "lancedb-store")]
