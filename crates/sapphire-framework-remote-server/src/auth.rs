@@ -13,7 +13,7 @@ use axum::{
     middleware::{Next, from_fn_with_state},
     response::Response,
 };
-use uuid::Uuid;
+use grain_id::GrainId;
 
 use crate::ServerState;
 
@@ -23,7 +23,7 @@ use crate::ServerState;
 /// ここの `key_id` を読むだけでよい。
 #[derive(Clone, Debug)]
 pub struct Authenticated {
-    pub key_id: Uuid,
+    pub key_id: GrainId,
     pub label: Option<String>,
 }
 
