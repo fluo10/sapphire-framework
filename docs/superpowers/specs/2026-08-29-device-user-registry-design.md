@@ -164,10 +164,20 @@ impl Devices {
 // Users も同型
 ```
 
-`resolve` のセレクタ解決は `KeyStore::resolve` と同じ規則にする — grain-id として読めるなら id、
-読めないなら name。名前が grain-id として読めてしまう場合の逃げ道は無い（`KeyStore` が既に同じ
-制約を文書化している）。ただし `name` はファイル内で一意なので、`KeyStore` の label と違って
-「複数一致」は起こらない。
+`resolve` のセレクタ解決は **name を先に試し、一致しなければ grain-id として読めるか試す**。
+`KeyStore::resolve` の規則（grain-id として読めるなら id、読めないなら name）とは意図的に逆にした。
+
+device の名前は 7 文字前後で、Crockford base32 のアルファベットに収まりやすい —
+`pendant` / `speaker` / `desktop` / `kitchen` / `monitor` はどれも grain-id として読めてしまう。
+id を先に試す規則のままだと、これらは軒並み id 側の枝に入って何にも一致しない。テストの中だけの
+話ではなく、実際の `device rotate pendant` を壊す。`KeyStore::resolve` からの類推は成立しない —
+label が 32 文字の UUID と衝突するのは病的なケースだが、デバイス名が grain-id と衝突するのは
+ありふれたケースだからだ。
+
+この順序が飲む trade-off は、あるデバイスの名前が別のデバイスの id 文字列そのものだった場合、
+name 側の一致が勝つこと（id で名指しできない）。`devices.rs` と `users.rs` の双方にテストで
+固定している。`name` はファイル内で一意なので、`KeyStore` の label と違って「複数一致」は
+起こらない。
 
 `load` は重複した id と重複した name をどちらもエラーにする。エントリごとコピーして複製する
 事故は実際に起きる。
