@@ -490,7 +490,7 @@ impl RetrieveStore for RedbStore {
         };
         let over_fetch = q.limit.saturating_mul(5).max(q.limit);
         let hits = searcher
-            .search(&query, &TopDocs::with_limit(over_fetch))
+            .search(&query, &TopDocs::with_limit(over_fetch).order_by_score())
             .map_err(tantivy_err)?;
 
         let prefix = q.path_prefix.map(|p| p.to_string_lossy().to_string());
