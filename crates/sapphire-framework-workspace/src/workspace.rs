@@ -91,6 +91,20 @@ impl Workspace {
         self.marker_dir().join("config.toml")
     }
 
+    /// Path to `{root}/.{app_name}/devices.toml`.
+    ///
+    /// 台帳そのものの読み書きは `sapphire-framework-registry` が持つ。ここが
+    /// 決めるのはファイル名の規約だけで、逆方向の依存は張らない — registry は
+    /// `&Path` を受け取るだけなので、このクレートを引かずに使える。
+    pub fn devices_path(&self) -> PathBuf {
+        self.marker_dir().join("devices.toml")
+    }
+
+    /// Path to `{root}/.{app_name}/users.toml`.
+    pub fn users_path(&self) -> PathBuf {
+        self.marker_dir().join("users.toml")
+    }
+
     /// Path to the marker directory (`{root}/.{app_name}`).
     pub fn marker_dir(&self) -> PathBuf {
         self.root.join(format!(".{}", self.ctx.app_name))
@@ -242,4 +256,24 @@ pub fn path_uuid(root: &Path) -> uuid::Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x80; // version = 8
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant = RFC 4122 (10xx)
     uuid::Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod registry_path_tests {
+    use super::*;
+
+    #[test]
+    fn devices_and_users_sit_next_to_the_workspace_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".sapphire-agent")).unwrap();
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-agent")));
+        let ws = Workspace::from_root(ctx, tmp.path()).unwrap();
+
+        // 台帳はワークスペース設定と同じマーカーディレクトリに置く。
+        // ファイル名の規約を 1 箇所に閉じ込めるのがこのメソッドの存在理由。
+        assert_eq!(ws.devices_path().parent(), ws.config_path().parent());
+        assert_eq!(ws.users_path().parent(), ws.config_path().parent());
+        assert_eq!(ws.devices_path().file_name().unwrap(), "devices.toml");
+        assert_eq!(ws.users_path().file_name().unwrap(), "users.toml");
+    }
 }
