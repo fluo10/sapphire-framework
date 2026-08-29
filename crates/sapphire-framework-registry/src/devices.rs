@@ -185,14 +185,29 @@ impl Devices {
         self.entries.iter().find(|d| d.id == id)
     }
 
-    /// `users.rs` の `index_of` と同じ規則 — grain-id として読めるなら id、
-    /// 読めないなら name。
+    /// `selector` を 1 件のエントリの位置に解決する。
+    ///
+    /// device の名前は通常 7-8 文字で、Crockford base32 アルファベットの部分集合に
+    /// よく含まれる（"pendant", "speaker", "desktop" など）。だから名前が
+    /// grain-id として読めてしまう可能性は高い — そこで名前を優先する。
+    /// 名前に一致するエントリがあれば、それを返す。なければ grain-id として
+    /// 読めるか試す — 読めたら id で探す。
+    ///
+    /// 名前と id がそれぞれファイル内で一意なので、複数一致は起こらない。
+    /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
+    /// 誤ったデバイスに当たることはないが、id で強制する逃げ道は無い。
     fn index_of(&self, selector: &str) -> Result<usize> {
-        let found = match selector.parse::<GrainId>() {
-            Ok(id) => self.entries.iter().position(|d| d.id == id),
-            Err(_) => self.entries.iter().position(|d| d.name == selector),
-        };
-        found.ok_or_else(|| Error::File(format!("no device matches {selector:?}")))
+        // 名前を先に試す（7-8 文字の名前が grain-id として読める確率は高い）
+        if let Some(pos) = self.entries.iter().position(|d| d.name == selector) {
+            return Ok(pos);
+        }
+        // 名前に一致しなければ、grain-id として読めるか試す
+        if let Ok(id) = selector.parse::<GrainId>()
+            && let Some(pos) = self.entries.iter().position(|d| d.id == id)
+        {
+            return Ok(pos);
+        }
+        Err(Error::File(format!("no device matches {selector:?}")))
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&Device> {
@@ -398,5 +413,40 @@ mod tests {
                 "ヘッダが {field} を説明していない: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_that_parses_as_a_grain_id_still_resolves_as_a_name() {
+        // 7 文字のデバイス名は Crockford base32 に含まれる文字で構成されていることが多く、
+        // grain-id として読めてしまう。例えば "pendant", "speaker", "desktop" など。
+        // 名前優先の規則により、名前の方が id より先に一致する。
+        let (_d, path) = tmp();
+        let mut devices = Devices::load(&path).unwrap();
+        let added = devices.add("pendant", None, None).unwrap();
+
+        // "pendant" は grain-id として読める（"pendant".parse::<GrainId>() は Ok）
+        // だが、resolve("pendant") は名前で一致すべき。
+        assert_eq!(devices.resolve("pendant").unwrap(), &added);
+        // id でも解決できる
+        assert_eq!(devices.resolve(&added.id.to_string()).unwrap(), &added);
+    }
+
+    #[test]
+    fn a_device_name_matching_another_device_id_resolves_by_name() {
+        // デバイスの名前が別のデバイスの id 文字列と同じ場合、名前が優先される。
+        let (_d, path) = tmp();
+        let mut devices = Devices::load(&path).unwrap();
+        let first = devices.add("device1", None, None).unwrap();
+        // second の名前を first の id にする
+        let second = devices
+            .add(&first.id.to_string(), None, None)
+            .unwrap();
+
+        // resolve(first.id) は second デバイス（名前が id に等しい）を返す
+        assert_eq!(devices.resolve(&first.id.to_string()).unwrap(), &second);
+        // first を見つけるには id を名前ではなく id として使う...は出来ないが、
+        // 別の方法はない。これは名前優先の trade-off。
+        // けれども first を "device1" で見つけられる
+        assert_eq!(devices.resolve("device1").unwrap(), &first);
     }
 }

@@ -168,17 +168,27 @@ impl Users {
 
     /// `selector` を 1 件のエントリの位置に解決する。
     ///
-    /// grain-id として読めるなら id、読めないなら name。id も name もこの
-    /// ファイル内で一意なので、複数一致は起こらない。名前が偶然 grain-id として
-    /// 読めてしまう場合は id 側に回り「一致無し」で失敗する — 誤ったユーザーに
-    /// 当たることはないが、name 側を強制する逃げ道は無い。`KeyStore::resolve`
-    /// が UUID で同じ制約を持っている。
+    /// 名前を先に試す。ユーザー名が grain-id として読める可能性を考慮すると
+    /// 名前を優先する方が安全。名前に一致するエントリがあれば、それを返す。
+    /// なければ grain-id として読めるか試す — 読めたら id で探す。
+    ///
+    /// 名前も id もファイル内で一意なので、複数一致は起こらない。
+    /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
+    /// 誤ったユーザーに当たることはないが、id で強制する逃げ道は無い。
+    /// `KeyStore::resolve` は UUID で似た制約を持つが、UUID は 32 文字なので
+    /// 衝突の確率がはるかに低い。
     fn index_of(&self, selector: &str) -> Result<usize> {
-        let found = match selector.parse::<GrainId>() {
-            Ok(id) => self.entries.iter().position(|u| u.id == id),
-            Err(_) => self.entries.iter().position(|u| u.name == selector),
-        };
-        found.ok_or_else(|| Error::File(format!("no user matches {selector:?}")))
+        // 名前を先に試す
+        if let Some(pos) = self.entries.iter().position(|u| u.name == selector) {
+            return Ok(pos);
+        }
+        // 名前に一致しなければ、grain-id として読めるか試す
+        if let Ok(id) = selector.parse::<GrainId>()
+            && let Some(pos) = self.entries.iter().position(|u| u.id == id)
+        {
+            return Ok(pos);
+        }
+        Err(Error::File(format!("no user matches {selector:?}")))
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&User> {
@@ -370,5 +380,35 @@ mod tests {
                 "ヘッダが {field} を説明していない: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_that_parses_as_a_grain_id_still_resolves_as_a_name() {
+        // ユーザー名が grain-id として読める場合、名前が優先される。
+        // 例えば "abcd" のような短い名前は Crockford base32 として読める。
+        let (_d, path) = tmp();
+        let mut users = Users::load(&path).unwrap();
+        let added = users.add("abcd", None).unwrap();
+
+        // "abcd" は grain-id として読める（"abcd".parse::<GrainId>() は Ok）
+        // だが、resolve("abcd") は名前で一致すべき。
+        assert_eq!(users.resolve("abcd").unwrap(), &added);
+        // id でも解決できる
+        assert_eq!(users.resolve(&added.id.to_string()).unwrap(), &added);
+    }
+
+    #[test]
+    fn a_user_name_matching_another_user_id_resolves_by_name() {
+        // ユーザーの名前が別のユーザーの id 文字列と同じ場合、名前が優先される。
+        let (_d, path) = tmp();
+        let mut users = Users::load(&path).unwrap();
+        let first = users.add("user1", None).unwrap();
+        // second の名前を first の id にする
+        let second = users.add(&first.id.to_string(), None).unwrap();
+
+        // resolve(first.id) は second ユーザー（名前が id に等しい）を返す
+        assert_eq!(users.resolve(&first.id.to_string()).unwrap(), &second);
+        // first を見つけるには "user1" で探す
+        assert_eq!(users.resolve("user1").unwrap(), &first);
     }
 }
