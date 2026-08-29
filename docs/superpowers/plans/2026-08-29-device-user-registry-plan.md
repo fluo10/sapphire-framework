@@ -6,7 +6,7 @@
 
 **Architecture:** 新規クレートは `&Path` を受け取るだけの純粋なファイル形式ライブラリで、`sapphire-framework-workspace` には依存しない（retrieve / track / tokio full を引かないため）。ファイル形式の作法は既存の `KeyStore`（`crates/sapphire-framework-remote-server/src/keys.rs`）を踏襲する — 先頭に書式説明ヘッダを毎回再生成、保存は全上書き、書き込みは一時ファイル → rename、欠けた `id` / `created_at` は load 時に補完して書き戻す。パス規約は `Workspace` 側のメソッドで 1 箇所に決める。
 
-**Tech Stack:** Rust 2024 edition, `grain-id` 0.15（serde feature）, `serde`, `toml` 1.1, `chrono`, `thiserror` 2
+**Tech Stack:** Rust 2024 edition, `grain-id` 0.16（serde feature）, `serde`, `toml` 1.1, `chrono`, `thiserror` 2
 
 **Spec:** `docs/superpowers/specs/2026-08-29-device-user-registry-design.md`
 
@@ -14,7 +14,7 @@
 
 - ID は **grain-id**（`grain_id::GrainId`）。`KeyEntry::id` だけは **UUID のまま**据え置く。
 - registry クレートの依存は `grain-id` / `serde` / `toml` / `chrono` / `thiserror` に限る。`sapphire-framework-workspace` にも `sapphire-framework-retrieve` にも依存させない。
-- `grain-id` のバージョンは **0.15**、features は `["serde"]`。ワークスペースの `[workspace.dependencies]` に追加し、各クレートは `grain-id.workspace = true` で参照する。
+- `grain-id` のバージョンは **0.16**、features は `["serde"]`。ワークスペースの `[workspace.dependencies]` に追加し、各クレートは `grain-id.workspace = true` で参照する。
 - registry のファイルは**秘密を含まない**ので、`keys.rs` の `create_private`（0600）は使わない。通常の `File::create` でよい。
 - ドキュメントコメントは既存クレートに合わせて**日本語**で書く（`keys.rs` がそうなっている）。
 - 既存の鍵ファイル（`device_id` の無い `[[key]]`）は**そのまま読めなければならない**。
@@ -61,7 +61,7 @@
 `[workspace.dependencies]` に足す（この表はアルファベット順ではないので末尾でよい）:
 
 ```toml
-grain-id = { version = "0.15", features = ["serde"] }
+grain-id = { version = "0.16", features = ["serde"] }
 ```
 
 - [ ] **Step 2: クレートの `Cargo.toml` を作る**
