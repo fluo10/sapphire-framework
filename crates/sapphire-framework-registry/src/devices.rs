@@ -31,9 +31,11 @@ const HEADER: &str = "\
 #             `updated_by`, say), so it must stay stable. Ids must be
 #             unique within this file.
 # name        required. Unique within this file. Accepted in place of the
-#             id anywhere a command asks for a device. A name that happens
-#             to parse as a grain-id is never matched as a name, only as
-#             an id.
+#             id anywhere a command asks for a device. A selector is matched
+#             against this name first; if no name matches, the selector is
+#             parsed as a grain-id and matched against ids. Consequently, if
+#             a device's name is literally another device's id string, the
+#             name takes precedence.
 # description optional. A note for you.
 # user_id     optional. A grain-id from users.toml — whose device this is.
 # created_at  optional. RFC 3339. Filled in on load when blank.
@@ -196,6 +198,8 @@ impl Devices {
     /// 名前と id がそれぞれファイル内で一意なので、複数一致は起こらない。
     /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
     /// 誤ったデバイスに当たることはないが、id で強制する逃げ道は無い。
+    /// `KeyStore::resolve` は UUID で似た制約を持つが、UUID は 32 文字なので
+    /// 衝突の確率がはるかに低い。
     fn index_of(&self, selector: &str) -> Result<usize> {
         // 名前を先に試す（7-8 文字の名前が grain-id として読める確率は高い）
         if let Some(pos) = self.entries.iter().position(|d| d.name == selector) {

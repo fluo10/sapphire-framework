@@ -25,8 +25,11 @@ const HEADER: &str = "\
 # id          optional. A grain-id. Filled in on load when blank. Referred
 #             to by `user_id` in devices.toml. Ids must be unique here.
 # name        required. Unique within this file. Accepted in place of the
-#             id anywhere a command asks for a user. A name that happens to
-#             parse as a grain-id is never matched as a name, only as an id.
+#             id anywhere a command asks for a user. A selector is matched
+#             against this name first; if no name matches, the selector is
+#             parsed as a grain-id and matched against ids. Consequently, if
+#             a user's name is literally another user's id string, the name
+#             takes precedence.
 # description optional. A note for you.
 # created_at  optional. RFC 3339. Filled in on load when blank.
 # retired_at  optional. RFC 3339. Set when the user is retired. The entry
