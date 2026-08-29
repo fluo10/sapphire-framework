@@ -442,9 +442,7 @@ mod tests {
         let mut devices = Devices::load(&path).unwrap();
         let first = devices.add("device1", None, None).unwrap();
         // second の名前を first の id にする
-        let second = devices
-            .add(&first.id.to_string(), None, None)
-            .unwrap();
+        let second = devices.add(&first.id.to_string(), None, None).unwrap();
 
         // resolve(first.id) は second デバイス（名前が id に等しい）を返す
         assert_eq!(devices.resolve(&first.id.to_string()).unwrap(), &second);

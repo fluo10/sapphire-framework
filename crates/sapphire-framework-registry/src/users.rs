@@ -286,7 +286,10 @@ mod tests {
 
         assert_eq!(users.entries().len(), 1);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("id = "), "補完した id が書き戻されていない: {text}");
+        assert!(
+            text.contains("id = "),
+            "補完した id が書き戻されていない: {text}"
+        );
         assert!(text.contains("created_at = "), "{text}");
     }
 
@@ -308,7 +311,11 @@ mod tests {
     #[test]
     fn load_rejects_two_users_sharing_a_name() {
         let (_d, path) = tmp();
-        std::fs::write(&path, "[[user]]\nname = \"dup\"\n\n[[user]]\nname = \"dup\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[[user]]\nname = \"dup\"\n\n[[user]]\nname = \"dup\"\n",
+        )
+        .unwrap();
 
         let err = Users::load(&path).unwrap_err();
 
