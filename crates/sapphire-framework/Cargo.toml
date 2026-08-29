@@ -20,6 +20,7 @@ workspace = ["dep:sapphire-framework-workspace"]
 retrieve = ["dep:sapphire-framework-retrieve"]
 track = ["dep:sapphire-framework-track"]
 rpc = ["dep:sapphire-framework-rpc"]
+registry = ["dep:sapphire-framework-registry"]
 blob = ["dep:sapphire-framework-blob"]
 backend = ["dep:sapphire-framework-backend", "workspace"]
 gui = ["dep:sapphire-framework-gui", "backend"]
@@ -27,7 +28,7 @@ remote-client = ["dep:sapphire-framework-remote-client", "rpc"]
 remote-server = ["dep:sapphire-framework-remote-server", "rpc", "blob"]
 
 # Everything usable on a native host.
-native = ["workspace", "backend", "remote-client", "remote-server"]
+native = ["workspace", "backend", "remote-client", "remote-server", "registry"]
 
 # ── store / embedding passthrough (apply to whichever crates are enabled) ─────
 redb-store = [
@@ -41,6 +42,7 @@ sapphire-framework-workspace = { version = "0.1.0", path = "../sapphire-framewor
 sapphire-framework-retrieve = { version = "0.1.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
 sapphire-framework-track = { version = "0.1.0", path = "../sapphire-framework-track", optional = true }
 sapphire-framework-rpc = { version = "0.1.0", path = "../sapphire-framework-rpc", optional = true }
+sapphire-framework-registry = { version = "0.1.0", path = "../sapphire-framework-registry", optional = true }
 sapphire-framework-blob = { version = "0.1.0", path = "../sapphire-framework-blob", optional = true }
 sapphire-framework-backend = { version = "0.1.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
 sapphire-framework-gui = { version = "0.1.0", path = "../sapphire-framework-gui", optional = true }
