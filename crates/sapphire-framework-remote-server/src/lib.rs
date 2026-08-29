@@ -43,12 +43,12 @@ mod keys;
 mod ws_store;
 
 pub use auth::{Authenticated, protect};
-// `Authenticated::key_id` と `KeyEntry::id` の型。アプリが grain-id を自前で
-// 依存に足さなくても名指しできるように出しておく。
 pub use change_log::ChangeLog;
 pub use error::{Error, Result};
-pub use grain_id::GrainId;
 pub use keys::{KeyEntry, KeyStore};
+// `Authenticated::key_id` と `KeyEntry::id` の型。アプリが uuid を自前で
+// 依存に足さなくても名指しできるように出しておく。
+pub use uuid::Uuid;
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
 /// ワークスペース名から [`WsStoreConfig`] を解決するフック。
