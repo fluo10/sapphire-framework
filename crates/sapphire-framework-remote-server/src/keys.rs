@@ -398,7 +398,7 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 /// `<prefix>_<43 文字の乱数>` を作る。
 fn mint_token(prefix: &str) -> Result<String> {
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .map_err(|e| Error::KeyFile(format!("no randomness available: {e}")))?;
     let random = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     Ok(format!("{prefix}_{random}"))
