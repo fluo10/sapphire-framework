@@ -26,6 +26,7 @@
 //! | `retrieve` | [`retrieve`] | `sapphire-framework-retrieve` |
 //! | `track` | [`track`] | `sapphire-framework-track` |
 //! | `rpc` | [`rpc`] | `sapphire-framework-rpc` |
+//! | `registry` | [`registry`] | `sapphire-framework-registry` |
 //! | `blob` | [`blob`] | `sapphire-framework-blob` |
 //! | `backend` | [`backend`] | `sapphire-framework-backend` |
 //! | `remote-client` | [`remote_client`] | `sapphire-framework-remote-client` |
@@ -42,6 +43,9 @@ pub use sapphire_framework_track as track;
 
 #[cfg(feature = "rpc")]
 pub use sapphire_framework_rpc as rpc;
+
+#[cfg(feature = "registry")]
+pub use sapphire_framework_registry as registry;
 
 #[cfg(feature = "blob")]
 pub use sapphire_framework_blob as blob;
@@ -87,4 +91,13 @@ pub mod prelude {
     pub use crate::remote_server::{
         Authenticated, KeyStore, ServerState, Uuid, WsStore, WsStoreConfig, protect, router, serve,
     };
+
+    #[cfg(feature = "registry")]
+    pub use crate::registry::{Device, Devices, GrainId, User, Users};
+
+    // `registry` と `remote-server` はどちらも同じ `GrainId` を公開する。両方
+    // re-export すると名前が衝突するので、`registry` があればそちらから出し、
+    // 無いときだけ `remote-server` から出す（`RemoteClient` と同じやり方）。
+    #[cfg(all(feature = "remote-server", not(feature = "registry")))]
+    pub use crate::remote_server::GrainId;
 }
