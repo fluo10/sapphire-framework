@@ -139,12 +139,30 @@ impl KeyStore {
     }
 
     /// 新しい鍵を生成して追記・保存する。
+    ///
+    /// `id` を渡すとその値を使う。アプリが device 行を先に書いてから鍵を作れる
+    /// ようにするため。既に使われている id を渡した場合は**空きを探さずに**
+    /// 失敗する — 呼び出し側は特定の id を要求しているので、別の id を黙って
+    /// 返すのは要求に応えていない。
     pub fn generate(
         &mut self,
         prefix: &str,
+        id: Option<Uuid>,
         label: Option<String>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<KeyEntry> {
+        let id = match id {
+            Some(id) => {
+                if self.entries.iter().any(|e| e.id == id) {
+                    return Err(Error::KeyFile(format!(
+                        "a key with the id {id} already exists"
+                    )));
+                }
+                id
+            }
+            None => Uuid::new_v4(),
+        };
+
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes)
             .map_err(|e| Error::KeyFile(format!("no randomness available: {e}")))?;
@@ -152,7 +170,7 @@ impl KeyStore {
 
         let entry = KeyEntry {
             token: format!("{prefix}_{random}"),
-            id: Uuid::new_v4(),
+            id,
             label,
             created_at: Utc::now(),
             expires_at,
@@ -386,7 +404,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
 
-        let entry = store.generate("sjt", Some("laptop".into()), None).unwrap();
+        let entry = store
+            .generate("sjt", None, Some("laptop".into()), None)
+            .unwrap();
 
         assert!(entry.token.starts_with("sjt_"));
         assert_eq!(entry.token.len(), "sjt_".len() + 43);
@@ -400,7 +420,7 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let past = Utc::now() - Duration::hours(1);
 
-        let entry = store.generate("sjt", None, Some(past)).unwrap();
+        let entry = store.generate("sjt", None, None, Some(past)).unwrap();
 
         assert!(store.authenticate(&entry.token).is_none());
         assert_eq!(store.entries().len(), 1, "期限切れでも自動削除はしない");
@@ -410,9 +430,15 @@ mod tests {
     fn revoke_accepts_an_id_or_a_label_and_rejects_an_ambiguous_one() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
-        let a = store.generate("sjt", Some("dup".into()), None).unwrap();
-        store.generate("sjt", Some("dup".into()), None).unwrap();
-        let solo = store.generate("sjt", Some("solo".into()), None).unwrap();
+        let a = store
+            .generate("sjt", None, Some("dup".into()), None)
+            .unwrap();
+        store
+            .generate("sjt", None, Some("dup".into()), None)
+            .unwrap();
+        let solo = store
+            .generate("sjt", None, Some("solo".into()), None)
+            .unwrap();
 
         assert!(store.revoke("dup").is_err(), "ラベル重複は id を要求する");
         assert_eq!(store.revoke("solo").unwrap().id, solo.id);
@@ -427,10 +453,12 @@ mod tests {
         // 名前空間が重ならないので、parse できるかどうかだけで行き先が決まる。
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
-        let target = store.generate("sjt", Some("by id".into()), None).unwrap();
+        let target = store
+            .generate("sjt", None, Some("by id".into()), None)
+            .unwrap();
         // 別の鍵の id をそのまま label に持つ鍵。
         let decoy = store
-            .generate("sjt", Some(target.id.to_string()), None)
+            .generate("sjt", None, Some(target.id.to_string()), None)
             .unwrap();
 
         let removed = store.revoke(&target.id.to_string()).unwrap();
@@ -444,7 +472,9 @@ mod tests {
     fn generate_does_not_mutate_state_when_save_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
-        let first = store.generate("sjt", Some("keeper".into()), None).unwrap();
+        let first = store
+            .generate("sjt", None, Some("keeper".into()), None)
+            .unwrap();
 
         // Point the store at a path whose parent cannot be created: `afile`
         // already exists as a regular file, so `create_dir_all` on it fails.
@@ -453,7 +483,11 @@ mod tests {
         store.path = blocker.join("keys.toml");
 
         let before = store.entries().to_vec();
-        assert!(store.generate("sjt", Some("doomed".into()), None).is_err());
+        assert!(
+            store
+                .generate("sjt", None, Some("doomed".into()), None)
+                .is_err()
+        );
         assert_eq!(
             store.entries(),
             before.as_slice(),
@@ -467,7 +501,9 @@ mod tests {
     fn revoke_does_not_mutate_state_when_save_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
-        let entry = store.generate("sjt", Some("keeper".into()), None).unwrap();
+        let entry = store
+            .generate("sjt", None, Some("keeper".into()), None)
+            .unwrap();
 
         let blocker = tmp.path().join("afile");
         std::fs::write(&blocker, "not a directory").unwrap();
@@ -490,10 +526,10 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let past = Utc::now() - Duration::hours(1);
 
-        store.generate("sjt", None, Some(past)).unwrap();
+        store.generate("sjt", None, None, Some(past)).unwrap();
         assert!(!store.has_usable_key(), "only an expired key exists");
 
-        store.generate("sjt", None, None).unwrap();
+        store.generate("sjt", None, None, None).unwrap();
         assert!(store.has_usable_key(), "a live key now exists");
     }
 
@@ -502,7 +538,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None).unwrap();
+        store.generate("sjt", None, None, None).unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# "), "先頭に書式説明のヘッダが要る");
@@ -518,7 +554,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None).unwrap();
+        store.generate("sjt", None, None, None).unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(
@@ -540,7 +576,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        let keeper = store.generate("sjt", Some("keeper".into()), None).unwrap();
+        let keeper = store
+            .generate("sjt", None, Some("keeper".into()), None)
+            .unwrap();
         let before = std::fs::read_to_string(&p).unwrap();
 
         // 一時ファイルの置き場所をディレクトリで塞ぐ → 一時ファイルを作れない。
@@ -548,7 +586,9 @@ mod tests {
         std::fs::create_dir(tmp.path().join("keys.toml.tmp")).unwrap();
 
         assert!(
-            store.generate("sjt", Some("doomed".into()), None).is_err(),
+            store
+                .generate("sjt", None, Some("doomed".into()), None)
+                .is_err(),
             "一時ファイルを作れないなら保存は失敗しなければならない"
         );
         assert_eq!(
@@ -566,12 +606,65 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None).unwrap();
+        store.generate("sjt", None, None, None).unwrap();
 
         assert!(
             !tmp.path().join("keys.toml.tmp").exists(),
             "平文の鍵を含む一時ファイルを残してはならない"
         );
+    }
+
+    #[test]
+    fn generate_uses_a_supplied_id() {
+        // アプリは device 行を先に書いてから鍵を作る。id を渡せなければ
+        // 「鍵を作る → 返った id を device 行に書く」順しか取れず、途中で失敗
+        // したときに動くオーファン鍵が残る。
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let want: Uuid = "6f1c4a9e-5d2b-4c8f-9a30-1e7b5c8d2f41".parse().unwrap();
+
+        let entry = store
+            .generate("sjt", Some(want), Some("iPhone".into()), None)
+            .unwrap();
+
+        assert_eq!(entry.id, want);
+        let reloaded = KeyStore::load(&path(&tmp)).unwrap();
+        assert_eq!(reloaded.entries()[0].id, want, "ファイルにも入っている");
+    }
+
+    #[test]
+    fn generate_rejects_an_id_that_is_already_taken() {
+        // 呼び出し側は特定の id を要求している。空きを探して別の id を黙って
+        // 返すのは要求に応えていない。
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let first = store
+            .generate("sjt", None, Some("keeper".into()), None)
+            .unwrap();
+
+        let err = match store.generate("sjt", Some(first.id), None, None) {
+            Ok(e) => panic!("使われている id を受け入れてはならない: {}", e.id),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(err.contains(&first.id.to_string()), "どの id か示す: {err}");
+        assert_eq!(
+            store.entries().len(),
+            1,
+            "失敗した生成が鍵を増やしてはならない"
+        );
+    }
+
+    #[test]
+    fn generate_without_an_id_mints_a_fresh_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+
+        let a = store.generate("sjt", None, None, None).unwrap();
+        let b = store.generate("sjt", None, None, None).unwrap();
+
+        assert_ne!(a.id, b.id);
+        assert_ne!(a.id, Uuid::nil());
     }
 
     #[cfg(unix)]
@@ -581,7 +674,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None).unwrap();
+        store.generate("sjt", None, None, None).unwrap();
 
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "0644 で作ってから chmod する窓を残さない");
