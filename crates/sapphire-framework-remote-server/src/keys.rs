@@ -660,9 +660,13 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# "), "先頭に書式説明のヘッダが要る");
         assert!(text.contains("label"));
-        assert!(
-            !text.contains("id          optional. A grain-id"),
-            "id はもう grain-id ではない（device_id は grain-id でよい）: {text}"
+        // 列幅のパディングに依存する文字列一致は、ヘッダをリフローしただけで
+        // サイレントに検査しなくなる。「grain-id を名乗るフィールドは
+        // device_id だけ」という中身の性質を、書式に依存せず確かめる。
+        assert_eq!(
+            text.matches("grain-id").count(),
+            1,
+            "grain-id を名乗ってよいのは device_id だけのはず: {text}"
         );
         assert!(text.contains("rotated_at"), "新しいフィールドを説明する");
         assert!(

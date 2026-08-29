@@ -93,5 +93,11 @@ pub mod prelude {
     };
 
     #[cfg(feature = "registry")]
-    pub use crate::registry::{Device, Devices, User, Users};
+    pub use crate::registry::{Device, Devices, GrainId, User, Users};
+
+    // `registry` と `remote-server` はどちらも同じ `GrainId` を公開する。両方
+    // re-export すると名前が衝突するので、`registry` があればそちらから出し、
+    // 無いときだけ `remote-server` から出す（`RemoteClient` と同じやり方）。
+    #[cfg(all(feature = "remote-server", not(feature = "registry")))]
+    pub use crate::remote_server::GrainId;
 }

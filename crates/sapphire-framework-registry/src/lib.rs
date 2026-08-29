@@ -16,3 +16,6 @@ mod users;
 pub use devices::{Device, Devices};
 pub use error::{Error, Result};
 pub use users::{User, Users};
+// `Device::id` / `Device::user_id` / `Devices::add` などの型。アプリが
+// grain-id を自前で依存に足さなくても名指しできるように出しておく。
+pub use grain_id::GrainId;

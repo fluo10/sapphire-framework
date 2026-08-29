@@ -23,7 +23,12 @@ const HEADER: &str = "\
 # and written back the next time this file is loaded.
 #
 # id          optional. A grain-id. Filled in on load when blank. Referred
-#             to by `user_id` in devices.toml. Ids must be unique here.
+#             to by `user_id` in devices.toml. Normalized to canonical form
+#             on load — grain-id's decode table aliases i/l to 1, o to 0, u
+#             to v, and accepts uppercase, so a hand-written id of USERONE
+#             loads fine but is written back in its canonical spelling. The
+#             id it decodes to stays stable; the exact string you typed
+#             might not. Ids must be unique here.
 # name        required. Unique within this file. Accepted in place of the
 #             id anywhere a command asks for a user. A selector is matched
 #             against this name first; if no name matches, the selector is
@@ -37,6 +42,9 @@ const HEADER: &str = "\
 #             purge removes it.
 #
 # This file is rewritten in full on every change; comments you add are lost.
+# File permissions are reset on every save too (the file is recreated and
+# renamed into place), so a hand-set chmod does not survive a save. Harmless
+# here — this file holds no secrets — but worth knowing.
 ";
 
 /// 一人のユーザー。
@@ -77,6 +85,13 @@ struct RawFile {
 }
 
 /// ユーザー台帳ファイルとその中身。
+///
+/// `load` した時点のスナップショットを保持する。以後の `add` / `retire` /
+/// `purge` はすべてこのスナップショットに変更を足して全体を書き直すので、
+/// `load` の後にこのファイルへ届いた変更（HEADER が案内する手編集や、
+/// 他ホストからの同期）はこのインスタンスからは見えず、次の変更で静かに
+/// 上書きされる。ファイルが変わったかもしれない場面（起動直後でない、
+/// 長生きしているプロセスなど）では、変更の前に改めて `load` し直すこと。
 #[derive(Debug)]
 pub struct Users {
     path: PathBuf,
@@ -151,8 +166,18 @@ impl Users {
         if self.entries.iter().any(|u| u.name == name) {
             return Err(Error::File(format!("a user named {name:?} already exists")));
         }
+        let id = GrainId::random();
+        if self.entries.iter().any(|u| u.id == id) {
+            // 天文学的に起こりにくいが、起きたときに黙って書き込むと `load`
+            // が重複 id を検出してファイル全体を読めなくする — 台帳を
+            // ブリックする。空きを探さずエラーにして、呼び出し側にもう一度
+            // `add` させる。
+            return Err(Error::File(format!(
+                "generated id {id} collides with an existing user; try again"
+            )));
+        }
         let entry = User {
-            id: GrainId::random(),
+            id,
             name: name.to_owned(),
             description,
             created_at: Utc::now(),
@@ -171,9 +196,11 @@ impl Users {
 
     /// `selector` を 1 件のエントリの位置に解決する。
     ///
-    /// 名前を先に試す。ユーザー名が grain-id として読める可能性を考慮すると
-    /// 名前を優先する方が安全。名前に一致するエントリがあれば、それを返す。
-    /// なければ grain-id として読めるか試す — 読めたら id で探す。
+    /// user の名前は英数字の短い文字列であることが多く（"fluo10" のような
+    /// 名前など）、Crockford base32 アルファベットの部分集合によく含まれる。
+    /// だから名前が grain-id として読めてしまう可能性は高い — そこで名前を
+    /// 優先する。名前に一致するエントリがあれば、それを返す。なければ
+    /// grain-id として読めるか試す — 読めたら id で探す。
     ///
     /// 名前も id もファイル内で一意なので、複数一致は起こらない。
     /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
@@ -198,14 +225,18 @@ impl Users {
         Ok(&self.entries[self.index_of(selector)?])
     }
 
-    /// 引退させる。エントリは残るので、過去の参照は解決し続ける。
-    /// 既に引退済みなら `retired_at` は上書きしない。
+    /// 引退させる。エントリは残るので、過去の参照は解決し続ける。既に引退済み
+    /// なら `retired_at` は上書きせず、保存もしない — このインスタンスは
+    /// `load` 時点のスナップショットなので、ここで無条件に保存すると、`load`
+    /// の後に他ホストから同期された変更やこのファイルへの手編集を、変わって
+    /// いないエントリのために踏み潰してしまう。
     pub fn retire(&mut self, selector: &str) -> Result<User> {
         let i = self.index_of(selector)?;
-        let mut candidate = self.entries.clone();
-        if candidate[i].retired_at.is_none() {
-            candidate[i].retired_at = Some(Utc::now());
+        if self.entries[i].retired_at.is_some() {
+            return Ok(self.entries[i].clone());
         }
+        let mut candidate = self.entries.clone();
+        candidate[i].retired_at = Some(Utc::now());
         let retired = candidate[i].clone();
         self.save_entries(&candidate)?;
         self.entries = candidate;
@@ -366,6 +397,30 @@ mod tests {
     }
 
     #[test]
+    fn retire_does_not_resave_when_already_retired() {
+        let (_d, path) = tmp();
+        let mut users = Users::load(&path).unwrap();
+        users.add("gone", None).unwrap();
+        let first = users.retire("gone").unwrap();
+
+        // load 後にこのファイルへ届いた変更を模す（同期や手編集。この
+        // `users` インスタンスはこれを知らない）。
+        let mut synced = std::fs::read_to_string(&path).unwrap();
+        synced.push_str("\n# synced by another host\n");
+        std::fs::write(&path, &synced).unwrap();
+
+        let second = users.retire("gone").unwrap();
+
+        assert_eq!(second.retired_at, first.retired_at, "上書きしない");
+        // 早期リターンで再保存しなければ、同期で届いた行はそのまま残る。
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("synced by another host"),
+            "既に引退済みの retire がファイルを書き直してしまった: {text}"
+        );
+    }
+
+    #[test]
     fn purge_removes_the_entry() {
         let (_d, path) = tmp();
         let mut users = Users::load(&path).unwrap();
@@ -394,15 +449,24 @@ mod tests {
 
     #[test]
     fn a_name_that_parses_as_a_grain_id_still_resolves_as_a_name() {
-        // ユーザー名が grain-id として読める場合、名前が優先される。
-        // 例えば "abcd" のような短い名前は Crockford base32 として読める。
+        // grain-id は必ず 7 文字（`GrainId::from_str` はそれ以外の長さを
+        // `Err(InvalidLength)` で拒む）。7 文字のユーザー名は Crockford base32
+        // アルファベットの部分集合によく含まれるので、grain-id としても読めて
+        // しまう。名前優先の規則により、名前の方が id より先に一致する。
         let (_d, path) = tmp();
         let mut users = Users::load(&path).unwrap();
-        let added = users.add("abcd", None).unwrap();
+        let name = "pendant";
+        // このテストの前提: name が実際に grain-id として読めなければ、
+        // どちらの規則（id 優先／名前優先）でも同じ枝を通ってしまい、この
+        // テストは何も保証しなくなる。
+        assert!(
+            name.parse::<GrainId>().is_ok(),
+            "{name:?} は grain-id として読めるはずのテスト前提が崩れている"
+        );
+        let added = users.add(name, None).unwrap();
 
-        // "abcd" は grain-id として読める（"abcd".parse::<GrainId>() は Ok）
-        // だが、resolve("abcd") は名前で一致すべき。
-        assert_eq!(users.resolve("abcd").unwrap(), &added);
+        // 名前優先の規則により resolve(name) は名前で一致すべき。
+        assert_eq!(users.resolve(name).unwrap(), &added);
         // id でも解決できる
         assert_eq!(users.resolve(&added.id.to_string()).unwrap(), &added);
     }

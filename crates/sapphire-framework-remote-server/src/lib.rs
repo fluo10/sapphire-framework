@@ -49,6 +49,9 @@ pub use keys::{KeyEntry, KeyStore};
 // `Authenticated::key_id` と `KeyEntry::id` の型。アプリが uuid を自前で
 // 依存に足さなくても名指しできるように出しておく。
 pub use uuid::Uuid;
+// `Authenticated::device_id` と `KeyEntry::device_id` の型。アプリが grain-id
+// を自前で依存に足さなくても名指しできるように出しておく。
+pub use grain_id::GrainId;
 pub use ws_store::{Detection, ReconcileReport, WsStore, WsStoreConfig, is_syncable};
 
 /// ワークスペース名から [`WsStoreConfig`] を解決するフック。

@@ -20,10 +20,15 @@ use crate::ServerState;
 /// 認証に成功したリクエストの拡張として入る値。
 ///
 /// 将来 `Change` に書き込み元を持たせるときは、rpc 型に 1 フィールド足して
-/// ここの `key_id` を読むだけでよい。
+/// ここの `device_id` を読むだけでよい — コンテンツに焼き込む書き手の同一性は
+/// 鍵の UUID（`key_id`）ではなく、鍵が指すデバイスの grain-id の方。`key_id` は
+/// 鍵ファイル内部の同一性でしかなく、人間やドキュメントが参照する主体ではない。
 #[derive(Clone, Debug)]
 pub struct Authenticated {
     pub key_id: Uuid,
+    /// アプリの `devices.toml` のエントリを指す。鍵に `device_id` が設定されて
+    /// いない場合は `None`。
+    pub device_id: Option<grain_id::GrainId>,
     pub label: Option<String>,
 }
 
@@ -91,6 +96,7 @@ async fn authenticate(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let who = Authenticated {
         key_id: entry.id,
+        device_id: entry.device_id,
         label: entry.label.clone(),
     };
 

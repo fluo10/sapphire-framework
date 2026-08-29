@@ -4,6 +4,7 @@
 //! 「ヘッダ + 本文を、途中で壊れない形で置く」ことだけ。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -16,8 +17,17 @@ use crate::error::{Error, Result};
 /// `keys.rs` と違って 0600 では作らない。この台帳に秘密は無く（トークンは
 /// 鍵ファイル側にある）、ワークスペースごと同期される前提のファイルなので、
 /// 所有者限定のパーミッションは意味を持たない。
+///
+/// 一時ファイル名にはプロセス ID とプロセス内カウンタを足す。同じ台帳へ同時に
+/// 書く 2 プロセス（あるいは同一プロセスの 2 スレッド）が固定名の `*.tmp` を
+/// それぞれ `File::create`（truncate）してしまうと、互いの書き込みが同じ
+/// inode に交錯し、先に rename した方の中身が中途半端なまま公開されうる。
+/// これはその衝突の窓を狭めるだけで、なくしはしない — ロックは無いので、
+/// 最後に rename した方が勝つ。
 pub(crate) fn write_atomic(path: &Path, header: &str, body: &str) -> Result<()> {
     use std::io::Write as _;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -25,8 +35,9 @@ pub(crate) fn write_atomic(path: &Path, header: &str, body: &str) -> Result<()> 
     let file_name = path
         .file_name()
         .ok_or_else(|| Error::File(format!("{} is not a file path", path.display())))?;
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".tmp.{}.{unique}", std::process::id()));
     let tmp = parent.join(tmp_name);
 
     {
