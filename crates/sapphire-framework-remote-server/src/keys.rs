@@ -34,13 +34,18 @@ const HEADER: &str = "\
 #             unique within this file.
 # label       optional. A note for you, like an authorized_keys comment.
 #             Also accepted in place of the id anywhere a command asks for
-#             a key.
+#             a key. A label shared by two or more keys cannot be used as a
+#             selector; pass the id instead. A label that happens to parse
+#             as a UUID is never matched as a label, only as an id.
 # created_at  optional. RFC 3339. Filled in on load when blank.
 # rotated_at  optional. RFC 3339. When the token was last replaced. Absent
 #             until the first rotation; never filled in on load.
 # expires_at  optional. RFC 3339. Absent means the key never expires.
 #
 # This file is rewritten in full on every change; comments you add are lost.
+# A rotate or revoke here only takes effect for a server that is already
+# running once it next loads this file (e.g. on restart); it does not
+# reach a running server immediately.
 ";
 
 /// 一件の API キー。
@@ -95,8 +100,18 @@ impl KeyStore {
     /// ファイルが無い場合は空のストアを返す（作成はしない）。
     pub fn load(path: &Path) -> Result<Self> {
         let raw: RawFile = match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text)
-                .map_err(|e| Error::KeyFile(format!("{}: {e}", path.display())))?,
+            // このファイルが取りうる「読めない旧形式」は事実上 1 パターン
+            // （grain-id の id）しかなく、演算子が見るのもこのエラーメッセージ
+            // だけなので、条件判定はせず常にヒントを付け足す。無条件でも外れ
+            // にはならない。
+            Ok(text) => toml::from_str(&text).map_err(|e| {
+                Error::KeyFile(format!(
+                    "{}: {e} (if this file predates the switch to UUID key ids, its `id` \
+                     values are 7-character grain-ids and no longer parse; delete the `id` \
+                     lines and they will be filled in again)",
+                    path.display()
+                ))
+            })?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => RawFile::default(),
             Err(e) => return Err(Error::Io(e)),
         };
@@ -191,6 +206,12 @@ impl KeyStore {
     /// UUID として読めるなら id、読めないなら label を見る。両者の名前空間は
     /// 重ならないので、grain-id のころに要った「id 一致が label 一致より優先」と
     /// いう規則は要らない。
+    ///
+    /// ただし `Uuid::parse_str` はハイフン付きの正準形以外（32 桁 hex・
+    /// 波括弧・`urn:uuid:`）も受け付けるため、たまたま 32 桁の hex に見える
+    /// label（デバイスのシリアル番号や MD5 など）は id 側に回り、「一致無し」
+    /// で失敗する。誤った鍵に当たるわけではないが、label 側を強制する逃げ道は
+    /// 無い。
     fn resolve(&self, selector: &str) -> Result<usize> {
         let matches: Vec<usize> = match selector.parse::<Uuid>() {
             Ok(id) => self
@@ -223,6 +244,11 @@ impl KeyStore {
 
     /// `selector`（`id` またはラベル）に一致する鍵を削除する。ラベルが複数一致
     /// する場合はエラーにして `id` を要求する。
+    ///
+    /// この変更が動いているサーバに効くのは、そのサーバが次にこのファイルを
+    /// 読み直したとき（例えば再起動時）。`ServerState` は起動時に取った
+    /// `Arc<KeyStore>` のスナップショットを保持するだけで、再読み込みの経路が
+    /// 無い。
     pub fn revoke(&mut self, selector: &str) -> Result<KeyEntry> {
         let i = self.resolve(selector)?;
         let mut candidate = self.entries.clone();
@@ -240,11 +266,18 @@ impl KeyStore {
     /// 限らないので `split_once('_')` は当てにならない。
     ///
     /// `expires_at` は保持ではなく置き換え。期限切れの鍵を期限そのままで再発行
-    /// しても使えないので、呼び出し側に指定させる。`None` は「無期限」。
+    /// しても使えないので、呼び出し側に指定させる。`None` は「無期限」— 既存の
+    /// `expires_at` を保つのではなく、期限を落として無期限にする。「トークンを
+    /// 差し替えるだけ」のつもりで呼ぶと、期限が黙って消える。
     ///
     /// 旧トークンは即座に無効になる。猶予期間は持たない — 私設網・単一運用者
     /// という脅威モデルで 2 本目の生きた秘密を抱える理由が薄い。必要になったら
     /// 同じエントリに `previous_token` を足す形で後付けできる。
+    ///
+    /// ただし「即座」はこのプロセス内の話に限る。この変更が動いているサーバに
+    /// 効くのは、そのサーバが次にこのファイルを読み直したとき（例えば再起動
+    /// 時）。`ServerState` は起動時に取った `Arc<KeyStore>` のスナップショットを
+    /// 保持するだけで、再読み込みの経路が無い。
     pub fn rotate(
         &mut self,
         prefix: &str,
@@ -444,6 +477,27 @@ mod tests {
         assert!(
             err.contains("6f1c4a9e-5d2b-4c8f-9a30-1e7b5c8d2f41"),
             "どの id が重複したか示す: {err}"
+        );
+    }
+
+    #[test]
+    fn an_old_grain_id_file_fails_to_load_with_a_hint() {
+        // 移行手順（`id` 行を削って読み直す）が書いてあるのはコミットメッセージ
+        // だけでは、それを見ない運用者に届かない。エラーメッセージ自体に
+        // 書いておく。
+        let tmp = tempfile::tempdir().unwrap();
+        let p = path(&tmp);
+        std::fs::write(&p, "[[key]]\ntoken = \"sjt_old\"\nid = \"123abcd\"\n").unwrap();
+
+        let err = match KeyStore::load(&p) {
+            Ok(_) => panic!("旧 grain-id の id は UUID として読めてはならない"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(err.contains("123abcd"), "どの値が読めなかったか示す: {err}");
+        assert!(
+            err.contains("delete the `id`"),
+            "復旧手順（id 行を削る）を示す: {err}"
         );
     }
 
@@ -853,7 +907,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store
+        let before = store
             .generate("sjt", None, Some("iPhone".into()), None)
             .unwrap();
         let rotated = store.rotate("sjt", "iPhone", None).unwrap();
@@ -861,6 +915,41 @@ mod tests {
         let reloaded = KeyStore::load(&p).unwrap();
 
         assert_eq!(reloaded.entries()[0].rotated_at, rotated.rotated_at);
+        // rotate の要点はディスク上の資格情報を差し替えること。rotated_at だけ
+        // 見ていては、新トークンが実際に保存されたかを確かめられない。
+        assert!(
+            reloaded.authenticate(&rotated.token).is_some(),
+            "新トークンは再読み込み後も通る"
+        );
+        assert!(
+            reloaded.authenticate(&before.token).is_none(),
+            "旧トークンは再読み込み後も通らない"
+        );
+    }
+
+    #[test]
+    fn rotate_leaves_sibling_keys_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = KeyStore::load(&path(&tmp)).unwrap();
+        let sibling = store
+            .generate("sjt", None, Some("iPad".into()), None)
+            .unwrap();
+        store
+            .generate("sjt", None, Some("iPhone".into()), None)
+            .unwrap();
+
+        store.rotate("sjt", "iPhone", None).unwrap();
+
+        let untouched = store.entries().iter().find(|e| e.id == sibling.id).unwrap();
+        assert_eq!(
+            untouched.token, sibling.token,
+            "他の鍵の token は変わらない"
+        );
+        assert_eq!(untouched.id, sibling.id);
+        assert_eq!(
+            untouched.rotated_at, sibling.rotated_at,
+            "rotate していない鍵に rotated_at は付かない"
+        );
     }
 
     #[test]
