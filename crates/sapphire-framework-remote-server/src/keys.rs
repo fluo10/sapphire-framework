@@ -32,6 +32,11 @@ const HEADER: &str = "\
 # id          optional. A UUID. Filled in on load when blank. Ties a key to a
 #             user or device, so it survives a label change. Ids must be
 #             unique within this file.
+# device_id   optional. A grain-id naming an entry in the application's
+#             devices.toml. This is how a key says whose device it is. The
+#             device table is per-workspace while this file is per-host, so
+#             one physical device talking to two servers has two keys in two
+#             files: the link runs key -> device and never the other way.
 # label       optional. A note for you, like an authorized_keys comment.
 #             Also accepted in place of the id anywhere a command asks for
 #             a key. A label shared by two or more keys cannot be used as a
@@ -53,6 +58,10 @@ const HEADER: &str = "\
 pub struct KeyEntry {
     pub token: String,
     pub id: Uuid,
+    /// アプリの `devices.toml` のエントリを指す。鍵がデバイスを指す向きで、
+    /// 逆ではない — 鍵ファイルはホストごと、デバイス台帳はワークスペースごとに
+    /// あるので、1 台のデバイスが複数ホストに別々の鍵を持ちうる。
+    pub device_id: Option<grain_id::GrainId>,
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     /// token を最後に差し替えた時刻。一度も再発行していなければ `None`。
@@ -73,6 +82,8 @@ struct RawKey {
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_id: Option<grain_id::GrainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +151,7 @@ impl KeyStore {
             entries.push(KeyEntry {
                 token: k.token,
                 id: k.id.unwrap_or_else(Uuid::new_v4),
+                device_id: k.device_id,
                 label: k.label,
                 created_at: k.created_at.unwrap_or(now),
                 rotated_at: k.rotated_at,
@@ -171,6 +183,7 @@ impl KeyStore {
         &mut self,
         prefix: &str,
         id: Option<Uuid>,
+        device_id: Option<grain_id::GrainId>,
         label: Option<String>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<KeyEntry> {
@@ -189,6 +202,7 @@ impl KeyStore {
         let entry = KeyEntry {
             token: mint_token(prefix)?,
             id,
+            device_id,
             label,
             created_at: Utc::now(),
             rotated_at: None,
@@ -334,6 +348,7 @@ impl KeyStore {
                 .map(|e| RawKey {
                     token: e.token.clone(),
                     id: Some(e.id),
+                    device_id: e.device_id,
                     label: e.label.clone(),
                     created_at: Some(e.created_at),
                     rotated_at: e.rotated_at,
@@ -507,7 +522,7 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
 
         let entry = store
-            .generate("sjt", None, Some("laptop".into()), None)
+            .generate("sjt", None, None, Some("laptop".into()), None)
             .unwrap();
 
         assert!(entry.token.starts_with("sjt_"));
@@ -522,7 +537,7 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let past = Utc::now() - Duration::hours(1);
 
-        let entry = store.generate("sjt", None, None, Some(past)).unwrap();
+        let entry = store.generate("sjt", None, None, None, Some(past)).unwrap();
 
         assert!(store.authenticate(&entry.token).is_none());
         assert_eq!(store.entries().len(), 1, "期限切れでも自動削除はしない");
@@ -533,13 +548,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let a = store
-            .generate("sjt", None, Some("dup".into()), None)
+            .generate("sjt", None, None, Some("dup".into()), None)
             .unwrap();
         store
-            .generate("sjt", None, Some("dup".into()), None)
+            .generate("sjt", None, None, Some("dup".into()), None)
             .unwrap();
         let solo = store
-            .generate("sjt", None, Some("solo".into()), None)
+            .generate("sjt", None, None, Some("solo".into()), None)
             .unwrap();
 
         assert!(store.revoke("dup").is_err(), "ラベル重複は id を要求する");
@@ -556,11 +571,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let target = store
-            .generate("sjt", None, Some("by id".into()), None)
+            .generate("sjt", None, None, Some("by id".into()), None)
             .unwrap();
         // 別の鍵の id をそのまま label に持つ鍵。
         let decoy = store
-            .generate("sjt", None, Some(target.id.to_string()), None)
+            .generate("sjt", None, None, Some(target.id.to_string()), None)
             .unwrap();
 
         let removed = store.revoke(&target.id.to_string()).unwrap();
@@ -575,7 +590,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let first = store
-            .generate("sjt", None, Some("keeper".into()), None)
+            .generate("sjt", None, None, Some("keeper".into()), None)
             .unwrap();
 
         // Point the store at a path whose parent cannot be created: `afile`
@@ -587,7 +602,7 @@ mod tests {
         let before = store.entries().to_vec();
         assert!(
             store
-                .generate("sjt", None, Some("doomed".into()), None)
+                .generate("sjt", None, None, Some("doomed".into()), None)
                 .is_err()
         );
         assert_eq!(
@@ -604,7 +619,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let entry = store
-            .generate("sjt", None, Some("keeper".into()), None)
+            .generate("sjt", None, None, Some("keeper".into()), None)
             .unwrap();
 
         let blocker = tmp.path().join("afile");
@@ -628,10 +643,10 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let past = Utc::now() - Duration::hours(1);
 
-        store.generate("sjt", None, None, Some(past)).unwrap();
+        store.generate("sjt", None, None, None, Some(past)).unwrap();
         assert!(!store.has_usable_key(), "only an expired key exists");
 
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
         assert!(store.has_usable_key(), "a live key now exists");
     }
 
@@ -640,14 +655,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# "), "先頭に書式説明のヘッダが要る");
         assert!(text.contains("label"));
         assert!(
-            !text.contains("grain-id"),
-            "id はもう grain-id ではない: {text}"
+            !text.contains("id          optional. A grain-id"),
+            "id はもう grain-id ではない（device_id は grain-id でよい）: {text}"
         );
         assert!(text.contains("rotated_at"), "新しいフィールドを説明する");
         assert!(
@@ -661,7 +676,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(
@@ -684,7 +699,7 @@ mod tests {
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
         let keeper = store
-            .generate("sjt", None, Some("keeper".into()), None)
+            .generate("sjt", None, None, Some("keeper".into()), None)
             .unwrap();
         let before = std::fs::read_to_string(&p).unwrap();
 
@@ -694,7 +709,7 @@ mod tests {
 
         assert!(
             store
-                .generate("sjt", None, Some("doomed".into()), None)
+                .generate("sjt", None, None, Some("doomed".into()), None)
                 .is_err(),
             "一時ファイルを作れないなら保存は失敗しなければならない"
         );
@@ -713,7 +728,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
 
         assert!(
             !tmp.path().join("keys.toml.tmp").exists(),
@@ -731,7 +746,7 @@ mod tests {
         let want: Uuid = "6f1c4a9e-5d2b-4c8f-9a30-1e7b5c8d2f41".parse().unwrap();
 
         let entry = store
-            .generate("sjt", Some(want), Some("iPhone".into()), None)
+            .generate("sjt", Some(want), None, Some("iPhone".into()), None)
             .unwrap();
 
         assert_eq!(entry.id, want);
@@ -746,10 +761,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let first = store
-            .generate("sjt", None, Some("keeper".into()), None)
+            .generate("sjt", None, None, Some("keeper".into()), None)
             .unwrap();
 
-        let err = match store.generate("sjt", Some(first.id), None, None) {
+        let err = match store.generate("sjt", Some(first.id), None, None, None) {
             Ok(e) => panic!("使われている id を受け入れてはならない: {}", e.id),
             Err(e) => e.to_string(),
         };
@@ -767,8 +782,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
 
-        let a = store.generate("sjt", None, None, None).unwrap();
-        let b = store.generate("sjt", None, None, None).unwrap();
+        let a = store.generate("sjt", None, None, None, None).unwrap();
+        let b = store.generate("sjt", None, None, None, None).unwrap();
 
         assert_ne!(a.id, b.id);
         assert_ne!(a.id, Uuid::nil());
@@ -781,7 +796,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let before = store
-            .generate("sjt", None, Some("iPhone".into()), None)
+            .generate("sjt", None, None, Some("iPhone".into()), None)
             .unwrap();
 
         let after = store.rotate("sjt", &before.id.to_string(), None).unwrap();
@@ -805,7 +820,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let before = store
-            .generate("sjt", None, Some("iPhone".into()), None)
+            .generate("sjt", None, None, Some("iPhone".into()), None)
             .unwrap();
 
         let after = store.rotate("sjt", "iPhone", None).unwrap();
@@ -825,7 +840,7 @@ mod tests {
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let past = Utc::now() - Duration::hours(1);
         let dead = store
-            .generate("sjt", None, Some("iPhone".into()), Some(past))
+            .generate("sjt", None, None, Some("iPhone".into()), Some(past))
             .unwrap();
         assert!(store.authenticate(&dead.token).is_none());
 
@@ -856,7 +871,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         store
-            .generate("sjt", None, Some("iPhone".into()), None)
+            .generate("sjt", None, None, Some("iPhone".into()), None)
             .unwrap();
 
         let err = match store.rotate("sjt", "iPad", None) {
@@ -872,10 +887,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         store
-            .generate("sjt", None, Some("dup".into()), None)
+            .generate("sjt", None, None, Some("dup".into()), None)
             .unwrap();
         store
-            .generate("sjt", None, Some("dup".into()), None)
+            .generate("sjt", None, None, Some("dup".into()), None)
             .unwrap();
 
         assert!(store.rotate("sjt", "dup", None).is_err(), "id を要求する");
@@ -886,7 +901,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         store
-            .generate("sjt", None, Some("keeper".into()), None)
+            .generate("sjt", None, None, Some("keeper".into()), None)
             .unwrap();
 
         let blocker = tmp.path().join("afile");
@@ -908,7 +923,7 @@ mod tests {
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
         let before = store
-            .generate("sjt", None, Some("iPhone".into()), None)
+            .generate("sjt", None, None, Some("iPhone".into()), None)
             .unwrap();
         let rotated = store.rotate("sjt", "iPhone", None).unwrap();
 
@@ -932,10 +947,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = KeyStore::load(&path(&tmp)).unwrap();
         let sibling = store
-            .generate("sjt", None, Some("iPad".into()), None)
+            .generate("sjt", None, None, Some("iPad".into()), None)
             .unwrap();
         store
-            .generate("sjt", None, Some("iPhone".into()), None)
+            .generate("sjt", None, None, Some("iPhone".into()), None)
             .unwrap();
 
         store.rotate("sjt", "iPhone", None).unwrap();
@@ -958,7 +973,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
 
         assert!(store.entries()[0].rotated_at.is_none());
         let text = std::fs::read_to_string(&p).unwrap();
@@ -976,9 +991,70 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = path(&tmp);
         let mut store = KeyStore::load(&p).unwrap();
-        store.generate("sjt", None, None, None).unwrap();
+        store.generate("sjt", None, None, None, None).unwrap();
 
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "0644 で作ってから chmod する窓を残さない");
+    }
+
+    #[test]
+    fn generate_records_the_device_id_and_it_survives_a_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keys.toml");
+        let mut store = KeyStore::load(&path).unwrap();
+        let device = grain_id::GrainId::random();
+
+        let entry = store
+            .generate("sat", None, Some(device), Some("pendant".into()), None)
+            .unwrap();
+
+        assert_eq!(entry.device_id, Some(device));
+        let reloaded = KeyStore::load(&path).unwrap();
+        assert_eq!(reloaded.entries()[0].device_id, Some(device));
+    }
+
+    #[test]
+    fn rotate_keeps_the_device_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keys.toml");
+        let mut store = KeyStore::load(&path).unwrap();
+        let device = grain_id::GrainId::random();
+        store
+            .generate("sat", None, Some(device), Some("pendant".into()), None)
+            .unwrap();
+
+        let rotated = store.rotate("sat", "pendant", None).unwrap();
+
+        // rotate の約束は「id・label・created_at を保ってトークンだけ差し替える」。
+        // device_id は「誰の鍵か」を担う側なので、当然保たれなければならない。
+        assert_eq!(rotated.device_id, Some(device));
+        let reloaded = KeyStore::load(&path).unwrap();
+        assert_eq!(reloaded.entries()[0].device_id, Some(device));
+    }
+
+    #[test]
+    fn a_key_file_without_device_id_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keys.toml");
+        // device_id を知らない時代に書かれた鍵ファイル。
+        std::fs::write(&path, "[[key]]\ntoken = \"sjt_old\"\nlabel = \"laptop\"\n").unwrap();
+
+        let store = KeyStore::load(&path).unwrap();
+
+        assert_eq!(store.entries().len(), 1);
+        assert_eq!(store.entries()[0].device_id, None);
+        assert!(store.authenticate("sjt_old").is_some());
+    }
+
+    #[test]
+    fn the_header_documents_device_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keys.toml");
+        let mut store = KeyStore::load(&path).unwrap();
+        store.generate("sat", None, None, None, None).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        assert!(text.contains("# device_id"), "{text}");
     }
 }

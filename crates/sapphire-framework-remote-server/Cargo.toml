@@ -25,6 +25,7 @@ tracing.workspace = true
 uuid.workspace = true
 toml.workspace = true
 getrandom.workspace = true
+grain-id.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
