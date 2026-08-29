@@ -93,5 +93,5 @@ pub mod prelude {
     };
 
     #[cfg(feature = "registry")]
-    pub use crate::registry::{User, Users};
+    pub use crate::registry::{Device, Devices, User, Users};
 }

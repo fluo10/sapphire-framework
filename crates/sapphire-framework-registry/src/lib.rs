@@ -8,9 +8,11 @@
 //! `users_path` が持つ。このクレートは `&Path` を受け取るだけで、ワークスペースの
 //! 解決には関わらない。
 
+mod devices;
 mod error;
 mod store;
 mod users;
 
+pub use devices::{Device, Devices};
 pub use error::{Error, Result};
 pub use users::{User, Users};
