@@ -362,8 +362,11 @@ const HEADER: &str = "\
 # id          optional. A grain-id. Filled in on load when blank. Referred
 #             to by `user_id` in devices.toml. Ids must be unique here.
 # name        required. Unique within this file. Accepted in place of the
-#             id anywhere a command asks for a user. A name that happens to
-#             parse as a grain-id is never matched as a name, only as an id.
+#             id anywhere a command asks for a user. A selector is matched
+#             against this name first; if no name matches, the selector is
+#             parsed as a grain-id and matched against ids. Consequently, if
+#             a user's name is literally another user's id string, the name
+#             takes precedence.
 # description optional. A note for you.
 # created_at  optional. RFC 3339. Filled in on load when blank.
 # retired_at  optional. RFC 3339. Set when the user is retired. The entry
@@ -504,17 +507,27 @@ impl Users {
 
     /// `selector` を 1 件のエントリの位置に解決する。
     ///
-    /// grain-id として読めるなら id、読めないなら name。id も name もこの
-    /// ファイル内で一意なので、複数一致は起こらない。名前が偶然 grain-id として
-    /// 読めてしまう場合は id 側に回り「一致無し」で失敗する — 誤ったユーザーに
-    /// 当たることはないが、name 側を強制する逃げ道は無い。`KeyStore::resolve`
-    /// が UUID で同じ制約を持っている。
+    /// user の名前は英数字の短い文字列であることが多く、Crockford base32
+    /// アルファベットの部分集合によく含まれる。だから名前が grain-id として
+    /// 読めてしまう可能性は高い — そこで名前を優先する。名前に一致する
+    /// エントリがあれば、それを返す。なければ grain-id として読めるか試す —
+    /// 読めたら id で探す。
+    ///
+    /// 名前も id もファイル内で一意なので、複数一致は起こらない。
+    /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
+    /// 誤ったユーザーに当たることはないが、id で強制する逃げ道は無い。
+    /// `KeyStore::resolve` は UUID で似た制約を持つが、UUID は 32 文字なので
+    /// 衝突の確率がはるかに低い。
     fn index_of(&self, selector: &str) -> Result<usize> {
-        let found = match selector.parse::<GrainId>() {
-            Ok(id) => self.entries.iter().position(|u| u.id == id),
-            Err(_) => self.entries.iter().position(|u| u.name == selector),
-        };
-        found.ok_or_else(|| Error::File(format!("no user matches {selector:?}")))
+        if let Some(pos) = self.entries.iter().position(|u| u.name == selector) {
+            return Ok(pos);
+        }
+        if let Ok(id) = selector.parse::<GrainId>()
+            && let Some(pos) = self.entries.iter().position(|u| u.id == id)
+        {
+            return Ok(pos);
+        }
+        Err(Error::File(format!("no user matches {selector:?}")))
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&User> {
@@ -868,9 +881,11 @@ const HEADER: &str = "\
 #             `updated_by`, say), so it must stay stable. Ids must be
 #             unique within this file.
 # name        required. Unique within this file. Accepted in place of the
-#             id anywhere a command asks for a device. A name that happens
-#             to parse as a grain-id is never matched as a name, only as
-#             an id.
+#             id anywhere a command asks for a device. A selector is matched
+#             against this name first; if no name matches, the selector is
+#             parsed as a grain-id and matched against ids. Consequently, if
+#             a device's name is literally another device's id string, the
+#             name takes precedence.
 # description optional. A note for you.
 # user_id     optional. A grain-id from users.toml — whose device this is.
 # created_at  optional. RFC 3339. Filled in on load when blank.
@@ -1021,14 +1036,29 @@ impl Devices {
         self.entries.iter().find(|d| d.id == id)
     }
 
-    /// `users.rs` の `index_of` と同じ規則 — grain-id として読めるなら id、
-    /// 読めないなら name。
+    /// device の名前は通常 7-8 文字で、Crockford base32 アルファベットの部分集合に
+    /// よく含まれる（"pendant", "speaker", "desktop" など）。だから名前が
+    /// grain-id として読めてしまう可能性は高い — そこで名前を優先する。
+    /// 名前に一致するエントリがあれば、それを返す。なければ grain-id として
+    /// 読めるか試す — 読めたら id で探す。
+    ///
+    /// 名前と id がそれぞれファイル内で一意なので、複数一致は起こらない。
+    /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
+    /// 誤ったデバイスに当たることはないが、id で強制する逃げ道は無い。
+    /// `KeyStore::resolve` は UUID で似た制約を持つが、UUID は 32 文字なので
+    /// 衝突の確率がはるかに低い。
     fn index_of(&self, selector: &str) -> Result<usize> {
-        let found = match selector.parse::<GrainId>() {
-            Ok(id) => self.entries.iter().position(|d| d.id == id),
-            Err(_) => self.entries.iter().position(|d| d.name == selector),
-        };
-        found.ok_or_else(|| Error::File(format!("no device matches {selector:?}")))
+        // 名前を先に試す（7-8 文字の名前が grain-id として読める確率は高い）
+        if let Some(pos) = self.entries.iter().position(|d| d.name == selector) {
+            return Ok(pos);
+        }
+        // 名前に一致しなければ、grain-id として読めるか試す
+        if let Ok(id) = selector.parse::<GrainId>()
+            && let Some(pos) = self.entries.iter().position(|d| d.id == id)
+        {
+            return Ok(pos);
+        }
+        Err(Error::File(format!("no device matches {selector:?}")))
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&Device> {
