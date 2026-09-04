@@ -41,7 +41,7 @@ getrandom = "0.4"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.23"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.11"
 redb = "4"
 walkdir = "2"
