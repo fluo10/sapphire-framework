@@ -14,8 +14,36 @@ jobs:
       - name: Fetch dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@v3
+
+      # `update-type` alone is not trustworthy for Cargo. On a manifest
+      # "Update X requirement from A to B" PR, fetch-metadata reads the
+      # versions out of the changelog Dependabot pastes into the PR body
+      # rather than out of the title. #119 (reqwest 0.12 -> 0.13) shipped a
+      # 0.12.x changelog, so the action reported:
+      #
+      #     previous-version: 0.12
+      #     new-version:      0.12.28
+      #     update-type:      version-update:semver-patch
+      #
+      # The guard below saw `semver-patch` and merged a requirement bump that
+      # broke the whole workspace — 16 seconds before its own CI run went red.
+      #
+      # Grouping is computed by Dependabot itself instead of being parsed back
+      # out of the body, and it was not fooled: #119 landed with an empty
+      # `dependency-group`, while a genuine grouped bump reports `cargo-patch`.
+      # So for Cargo, require the group as well; other ecosystems (which get
+      # plain "Bump X from A to B" PRs with trustworthy metadata) keep the
+      # original rule.
+      #
+      # This is the second line of defence, not the first: `gh pr merge --auto`
+      # only waits for checks that a ruleset marks *required*, so the `main`
+      # ruleset has to stay enabled with `test` required for a red CI run to
+      # block a merge at all.
       - name: Enable auto-merge for patch updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch'
+          && (steps.metadata.outputs.package-ecosystem != 'cargo'
+          || steps.metadata.outputs.dependency-group == 'cargo-patch')
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
