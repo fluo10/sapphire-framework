@@ -9,10 +9,10 @@ keywords = ["sync", "server", "json-rpc", "axum"]
 categories = ["web-programming::http-server"]
 
 [dependencies]
-sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.1.0", path = "../sapphire-framework-rpc" }
-sapphire-blob = { package = "sapphire-framework-blob", version = "0.1.0", path = "../sapphire-framework-blob" }
-sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.1.0", path = "../sapphire-framework-retrieve", default-features = false, features = ["redb-store"] }
-sapphire-track = { package = "sapphire-framework-track", version = "0.1.0", path = "../sapphire-framework-track" }
+sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.13.0", path = "../sapphire-framework-rpc" }
+sapphire-blob = { package = "sapphire-framework-blob", version = "0.13.0", path = "../sapphire-framework-blob" }
+sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.13.0", path = "../sapphire-framework-retrieve", default-features = false, features = ["redb-store"] }
+sapphire-track = { package = "sapphire-framework-track", version = "0.13.0", path = "../sapphire-framework-track" }
 axum.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
 redb.workspace = true

@@ -3,19 +3,23 @@
 # 既存タグ運用に合わせて、ワークスペース全体で 1 つの `v{version}` タグと
 # GitHub release だけを作る。crates.io publish は各クレート個別に行う。
 #
-# ── リリースは当面停止中（2026-07 時点） ──────────────────────────────────
-# framework は移行フェーズの途中で API 安定前。アプリは crates.io ではなく
-# git 依存で framework を参照している（docs/HANDOFF.md 参照）ため、当面は
-# 自動 publish を止める。`release = false` でワークスペース全体の
-# 「バージョン bump PR のマージ → crates.io publish / タグ / GitHub release」
-# を無効化する。既存 0.1.0（workspace/sync/retrieve/track）は publish 済みで
-# あり、その再 publish も含めて起きない。
-# リリースを再開するときは `release = true` に戻し、そのタイミングで未公開
-# crate（下記 release=false の面々）を publish 対象に加える。
+# ── リリース再開（2026-09） ───────────────────────────────────────────────
+# 移行が一段落し、アプリ側（agent / journal）が git 依存をやめて crates.io を
+# 参照できるようにするため、publish を再開する。ファサード
+# `sapphire-framework` を公開するには、feature 越しの optional 依存も含めて
+# path 依存の全クレートが crates.io に存在している必要がある（cargo は
+# optional でも publish 済みであることを要求する）。よって
+# `sapphire-framework-gui` も含め、ワークスペースの全クレートを公開対象に
+# 戻し、個別の `release = false` は撤廃する。
+#
+# 全クレートが version_group = "framework" に属するため、bump は常に足並みを
+# そろえる。中身が変わっていないクレートも一緒に再 publish されるが、これは
+# ロックステップ運用の想定内（bevy と同じ）で、利用者側は requirement と
+# lockfile が支配するので影響を受けない。
 changelog_update = true
 dependencies_update = true
-publish = false
-release = false
+publish = true
+release = true
 git_release_enable = false
 git_tag_enable = false
 pr_branch_prefix = "release-plz/"
@@ -38,42 +42,40 @@ version_group = "framework"
 name = "sapphire-framework-track"
 version_group = "framework"
 
-# ── Phase 2/3 で追加した新規クレート（crates.io 未公開・API 安定前） ──────
-# ワークスペース全体の release を再開（`[workspace] release = true`）しても、
-# これらが準備できるまで勝手に publish されないよう個別に明示 false にする。
-# 公開する準備ができたクレートから、この release=false を外していく。
-#
-# 注意: 既に publish 済みの framework crate（workspace/retrieve/track）は
-# 未公開の `sapphire-framework-rpc` に依存しうる。これらを再 publish する際は
-# rpc も同時に publish 対象へ戻さないと `cargo publish` が失敗する。
 [[package]]
 name = "sapphire-framework-rpc"
-release = false
+version_group = "framework"
 
 [[package]]
 name = "sapphire-framework-blob"
-release = false
+version_group = "framework"
+
+[[package]]
+name = "sapphire-framework-registry"
+version_group = "framework"
 
 [[package]]
 name = "sapphire-framework-remote-server"
-release = false
+version_group = "framework"
 
 [[package]]
 name = "sapphire-framework-remote-client"
-release = false
+version_group = "framework"
 
 [[package]]
 name = "sapphire-framework-backend"
-release = false
+version_group = "framework"
 
+# ファサードが `gui` feature で optional 参照する。ファサードを publish する
+# 前提として、これ自身も publish されている必要がある。
 [[package]]
 name = "sapphire-framework-gui"
-release = false
+version_group = "framework"
 
-# 単一依存ファサード（#95）。骨格導入時点では未公開。
+# 単一依存ファサード（#95）。
 [[package]]
 name = "sapphire-framework"
-release = false
+version_group = "framework"
 
 [changelog]
 # 既存 CHANGELOG.md のヘッダーをそのまま維持し、新規エントリは
