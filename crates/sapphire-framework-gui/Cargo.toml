@@ -11,6 +11,6 @@ categories = ["gui"]
 # egui-only (no eframe): these are widgets/screens rendered inside a host app's
 # egui context. All consuming apps must use the same egui major version.
 [dependencies]
-sapphire-backend = { package = "sapphire-framework-backend", version = "0.1.0", path = "../sapphire-framework-backend", default-features = false }
+sapphire-backend = { package = "sapphire-framework-backend", version = "0.13.0", path = "../sapphire-framework-backend", default-features = false }
 egui = "0.36"
 rfd = "0.17"

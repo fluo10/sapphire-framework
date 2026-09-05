@@ -15,8 +15,8 @@ redb-store      = ["sapphire-retrieve/redb-store"]
 fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 
 [dependencies]
-sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.1.0", path = "../sapphire-framework-retrieve", default-features = false }
-sapphire-track    = { package = "sapphire-framework-track", version = "0.1.0", path = "../sapphire-framework-track" }
+sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.13.0", path = "../sapphire-framework-retrieve", default-features = false }
+sapphire-track    = { package = "sapphire-framework-track", version = "0.13.0", path = "../sapphire-framework-track" }
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true
