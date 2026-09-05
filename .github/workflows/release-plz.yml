@@ -28,7 +28,7 @@ jobs:
         run: cargo --version
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake　libwayland-dev libxkbcommon-dev
 
       - uses: release-plz/action@v0.5
         with:
@@ -54,7 +54,7 @@ jobs:
         run: cargo --version
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake　libwayland-dev libxkbcommon-dev
 
       - uses: release-plz/action@v0.5
         with:
