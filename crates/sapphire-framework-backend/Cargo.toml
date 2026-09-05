@@ -13,9 +13,9 @@ default = ["redb-store"]
 redb-store = ["sapphire-workspace/redb-store"]
 
 [dependencies]
-sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.13.0", path = "../sapphire-framework-workspace", default-features = false }
-sapphire-remote-client = { package = "sapphire-framework-remote-client", version = "0.13.0", path = "../sapphire-framework-remote-client" }
-sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.13.0", path = "../sapphire-framework-rpc" }
+sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.14.0", path = "../sapphire-framework-workspace", default-features = false }
+sapphire-remote-client = { package = "sapphire-framework-remote-client", version = "0.14.0", path = "../sapphire-framework-remote-client" }
+sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.14.0", path = "../sapphire-framework-rpc" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait.workspace = true
 thiserror.workspace = true
@@ -25,7 +25,7 @@ serde = { workspace = true }
 indexmap = { workspace = true }
 
 [dev-dependencies]
-sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.13.0", path = "../sapphire-framework-remote-server" }
+sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.14.0", path = "../sapphire-framework-remote-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 tempfile = "3"
