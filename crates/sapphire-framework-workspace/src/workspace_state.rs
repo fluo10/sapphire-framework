@@ -14,7 +14,7 @@ use crate::{
     config::{HybridConfig, RetrieveConfig, VectorDb},
     error::{Error, Result},
     indexer::{
-        IndexHook, SyncReport, SyncWithHookError, build_document_from_disk, file_mtime_secs,
+        IndexHook, SyncReport, SyncWithHookError, build_document_from_disk, file_stamp,
         is_indexable_path, path_to_doc_id, sync_workspace, sync_workspace_full_with_hook,
         sync_workspace_incremental, sync_workspace_with_hook,
     },
@@ -53,7 +53,7 @@ pub struct RetrieveParams<'a> {
 pub struct WorkspaceState {
     pub workspace: Workspace,
     retrieve_db: Mutex<Arc<dyn RetrieveStore + Send + Sync>>,
-    /// mtime-based change-detection store (see [`sapphire_track`]). Unlike the
+    /// mtime/size-based change-detection store (see [`sapphire_track`]). Unlike the
     /// retrieve backend it is never swapped at runtime, so it needs no lock.
     track_db: Arc<dyn TrackStore + Send + Sync>,
     embedder: OnceCell<Option<Box<dyn Embedder + Send + Sync>>>,
@@ -144,9 +144,12 @@ impl WorkspaceState {
 
     /// Delete and recreate the retrieve DB from scratch.
     pub fn rebuild(workspace: Workspace) -> Result<Self> {
-        // Drop the mtime snapshot too, so the rebuilt retrieve index and the
-        // track store start from a consistent (empty) state.
+        // Drop the change-detection snapshot too, so the rebuilt retrieve
+        // index and the track store start from a consistent (empty) state.
+        // The orphaned pre-#118 `track_v1.redb` goes with it, so a rebuild
+        // also clears any stale second-resolution snapshot.
         let _ = std::fs::remove_file(workspace.track_db_path());
+        let _ = std::fs::remove_file(workspace.cache_dir().join("track_v1.redb"));
         let backend = Self::open_initial_backend(&workspace)?;
         let track_db = Self::open_initial_track(&workspace)?;
         Ok(Self {
@@ -194,7 +197,7 @@ impl WorkspaceState {
         let abs = resolved.as_path();
         let path_str = abs.to_string_lossy().into_owned();
 
-        let mtime = file_mtime_secs(abs);
+        let stamp = file_stamp(abs);
 
         let body = std::fs::read_to_string(abs)?;
         let doc_id = path_to_doc_id(abs);
@@ -240,12 +243,12 @@ impl WorkspaceState {
             }
         };
 
-        // Index first, then record the mtime (see the atomicity note in
+        // Index first, then record the stamp (see the atomicity note in
         // `indexer::sync_inner`).
         let db = self.retrieve_db();
         db.upsert_document(&doc)?;
         db.rebuild_fts()?;
-        self.track_db().upsert(&path_str, mtime)?;
+        self.track_db().upsert(&path_str, stamp)?;
 
         Ok(())
     }
@@ -299,9 +302,9 @@ impl WorkspaceState {
             return Ok(());
         }
         let path_str = abs.to_string_lossy().into_owned();
-        let mtime = file_mtime_secs(abs);
+        let stamp = file_stamp(abs);
 
-        hook.on_changed(abs, mtime)
+        hook.on_changed(abs, stamp.mtime_ns)
             .map_err(SyncWithHookError::Hook)?;
 
         let doc_id = path_to_doc_id(abs);
@@ -312,7 +315,7 @@ impl WorkspaceState {
         db.upsert_document(&doc).map_err(map_retrieve_err)?;
         db.rebuild_fts().map_err(map_retrieve_err)?;
         self.track_db()
-            .upsert(&path_str, mtime)
+            .upsert(&path_str, stamp)
             .map_err(|e| SyncWithHookError::Workspace(Error::from(e)))?;
 
         Ok(())
@@ -562,9 +565,10 @@ impl WorkspaceState {
         sync_workspace(&self.workspace, self.retrieve_db(), self.track_db())
     }
 
-    /// Run a mtime-based incremental retrieve cache refresh.
+    /// Run a mtime/size-based incremental retrieve cache refresh.
     ///
-    /// Only re-indexes files whose mtime has changed since the last run.
+    /// Only re-indexes files whose recorded mtime or size has changed since
+    /// the last run.
     /// Does **not** perform any git sync.
     ///
     /// Returns `(upserted, removed)`.
@@ -587,8 +591,8 @@ impl WorkspaceState {
     /// Hook-aware incremental sync (counterpart of
     /// [`sync_retrieve`](Self::sync_retrieve)).
     ///
-    /// Skips files whose mtime matches the cached value; the hook is only
-    /// invoked for new / changed / removed paths.
+    /// Skips files whose recorded stamp (mtime and size) matches the cached
+    /// value; the hook is only invoked for new / changed / removed paths.
     pub fn sync_retrieve_with_hook<H: IndexHook>(
         &self,
         hook: &mut H,

@@ -35,7 +35,8 @@ pub struct WsStoreConfig {
 /// 報告に残す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detection {
-    /// mtime（秒分解能）の比較。同一秒内の連続書き込みは検出できない。
+    /// 保存済みの mtime またはファイルサイズとの比較による検出。#118 以降 mtime は
+    /// ナノ秒分解能なので、同一秒内の書き換えもこれで検出できる。
     Mtime,
 }
 
@@ -93,7 +94,11 @@ impl WsStore {
         let retrieve = open_redb(&base_dir.join("cache").join(format!("{safe}.redb")))?;
         let change_log = ChangeLog::open(&base_dir.join("changelog").join(format!("{safe}.redb")))?;
         let blobs = FsBlobStore::open(base_dir.join("blobs").join(&safe))?;
-        let track_path = base_dir.join("track").join(format!("{safe}.redb"));
+        // #118 以降、track の値は (mtime_ns, len) タプル。ファイル名も workspace 侧と
+        // 同じ方針で v2 にバージョン化した。旧形式の残りファイルが同じ名前に残っていても
+        // 問題なく開けるが（track crate の create_or_reset がスキーマ不一致を検出して
+        // 作り直す）、実際には新規ファイルを作る。
+        let track_path = base_dir.join("track").join(format!("{safe}_v2.redb"));
         std::fs::create_dir_all(track_path.parent().unwrap())?;
         let track = Box::new(sapphire_track::open_redb(&track_path)?);
         // 従来レイアウトに隠しディレクトリは無いので、許可するものも無い。
@@ -124,7 +129,9 @@ impl WsStore {
         };
         let change_log = ChangeLog::open(&state_dir.join("changelog.redb"))?;
         let blobs = FsBlobStore::open(state_dir.join("blobs"))?;
-        let track = Box::new(sapphire_track::open_redb(&state_dir.join("track_v1.redb"))?);
+        // #118 以降値が (mtime_ns, len) になったため v2 に変更。旧ファイルは
+        // 単に分離され、次回以降のフルスキャンで再構築される（workspace 側と同一方針）。
+        let track = Box::new(sapphire_track::open_redb(&state_dir.join("track_v2.redb"))?);
         Ok(Self {
             origin_dir,
             retrieve,
@@ -445,9 +452,9 @@ impl WsStore {
         }
 
         // track db を今回の観測に合わせる。
-        let entries: Vec<(String, i64)> = observed
+        let entries: Vec<(String, sapphire_track::FileStamp)> = observed
             .iter()
-            .map(|o| (o.path.to_string_lossy().into_owned(), o.mtime))
+            .map(|o| (o.path.to_string_lossy().into_owned(), o.stamp))
             .collect();
         self.track.upsert_many(&entries)?;
         for p in &changes.removed {
@@ -828,17 +835,16 @@ mod tests {
 
     #[test]
     fn record_local_write_does_not_touch_the_filesystem() {
-        // mtime は秒分解能なので同一秒内の書き戻しは reconcile からは見えない
-        // (reconcile_does_not_re_upsert_a_file_it_just_recorded 参照)。ここでは
-        // record_local_write が保証すべき本体 — ファイルへの書き込みが一切
-        // 起きないこと — を、OS のフル精度タイムスタンプで直接確認する。
+        // record_local_write が保証すべきものは「origin にファイルを書き戻さないこと」だ。書き戻しは
+        // mtime を動かし、reconcile の誤検出（#118 以降はナノ秒分解能の mtime でも
+        // 見つかってしまう）を呼ぶ。ここではその本体を、OS が保持するタイムスタンプを
+        // 直接比較して確認する。
         let (_t, store) = store();
         let path = store.origin_dir.join("a.md");
         std::fs::write(&path, "hello").unwrap();
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        // 書き込みが起きていれば秒分解能を待たずとも確実にタイムスタンプが動く
-        // よう、わずかに間を置く。
+        // 書き込みが起きていれば確実にタイムスタンプが動くよう、わずかに間を置く。
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         store

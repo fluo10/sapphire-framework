@@ -216,12 +216,15 @@ impl Workspace {
         self.cache_dir().join("retrieve.db")
     }
 
-    /// Path to the [`sapphire-track`](sapphire_track) mtime database file.
+    /// Path to the [`sapphire-track`](sapphire_track) change-detection
+    /// database file (nanosecond mtimes plus file sizes since #118).
     ///
-    /// The filename is versioned so an incompatible redb format bump simply
-    /// orphans the old file; the store is a rebuildable cache.
+    /// The filename is versioned so an incompatible value-format bump simply
+    /// orphans the old file (pre-#118 seconds-only snapshots are orphaned by
+    /// the `v2` bump and rebuilt by the first full scan); the store is a
+    /// rebuildable cache.
     pub fn track_db_path(&self) -> PathBuf {
-        self.cache_dir().join("track_v1.redb")
+        self.cache_dir().join("track_v2.redb")
     }
 }
 
