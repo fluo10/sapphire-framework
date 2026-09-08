@@ -5,17 +5,16 @@ use std::{
 };
 
 use sapphire_retrieve::{Chunker, Document, JsonlChunker, RetrieveStore, TomlChunker};
-use sapphire_track::TrackStore;
+use sapphire_track::{FileStamp, TrackStore};
 use thiserror::Error;
 
 use crate::{error::Result, workspace::Workspace};
 
-/// Return the mtime of `path` as seconds since UNIX epoch, or 0 on error.
-///
-/// Thin re-export of [`sapphire_track::mtime_secs`] kept under the indexer's
-/// name for the single-file update paths in `workspace_state`.
-pub(crate) fn file_mtime_secs(path: &Path) -> i64 {
-    sapphire_track::mtime_secs(path)
+/// The full change-detection stamp for `path` — nanosecond mtime plus file
+/// size (#118), both read from a single `metadata()` call — for comparison
+/// against and storage in the track store.
+pub(crate) fn file_stamp(path: &Path) -> FileStamp {
+    sapphire_track::file_stamp(path)
 }
 
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "rst", "org"];
@@ -147,12 +146,17 @@ pub trait IndexHook {
     /// Error type the hook can produce. Surfaces through [`SyncWithHookError::Hook`].
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Called when a file is new or its mtime changed, after the workspace
-    /// has decided the file is in scope (matching extension etc.). The
-    /// workspace will read the file from disk and upsert it into the retrieve
-    /// DB regardless of what this method does — return `Ok(())` for the
-    /// normal case.
-    fn on_changed(&mut self, path: &Path, disk_mtime: i64) -> std::result::Result<(), Self::Error>;
+    /// Called when a file is new or its recorded stamp (nanosecond mtime /
+    /// file size) changed, after the workspace has decided the file is in
+    /// scope (matching extension etc.). `disk_mtime_ns` is the file's current
+    /// mtime in nanoseconds since the UNIX epoch. The workspace will read the
+    /// file from disk and upsert it into the retrieve DB regardless of what
+    /// this method does — return `Ok(())` for the normal case.
+    fn on_changed(
+        &mut self,
+        path: &Path,
+        disk_mtime_ns: i64,
+    ) -> std::result::Result<(), Self::Error>;
 
     /// Called for each path that was in retrieve DB but is gone from disk,
     /// **before** the workspace removes its document/file row. The hook can
@@ -222,15 +226,16 @@ fn collect_candidates(root: &Path) -> Result<Vec<PathBuf>> {
 /// Hook-driven **incremental** sync.
 ///
 /// Walks `workspace.root` with the same extension set and `.`-hidden filter
-/// as [`sync_workspace_incremental`]. Files whose mtime matches the value in
-/// the retrieve DB are skipped (hook is not invoked for them).
+/// as [`sync_workspace_incremental`]. Files whose recorded stamp (mtime and
+/// size) matches the value in the track store are skipped (hook is not
+/// invoked for them).
 ///
 /// ## Phases
 ///
 /// 1. Collect every in-scope candidate path into a vec.
-/// 2. Per file: compare disk mtime against the cached value; if unchanged,
-///    skip. Otherwise call [`IndexHook::on_changed`], read the file and
-///    upsert it.
+/// 2. Per file: compare the file's current stamp (nanosecond mtime and size)
+///    against the cached value; if both match, skip. Otherwise call
+///    [`IndexHook::on_changed`], read the file and upsert it.
 /// 3. For each path the DB knows about that is gone from disk: call
 ///    [`IndexHook::on_removed`], then `remove_file` + `remove_document`.
 /// 4. [`IndexHook::after_sweep`] is called once before `rebuild_fts`.
@@ -265,7 +270,7 @@ fn sync_inner<H: IndexHook>(
     hook: &mut H,
     full: bool,
 ) -> std::result::Result<SyncReport, SyncWithHookError<H::Error>> {
-    let known_mtimes = track.mtimes().map_err(crate::Error::from)?;
+    let known_stamps = track.mtimes().map_err(crate::Error::from)?;
     let existing_ids: HashSet<i64> = retrieve_db
         .document_ids()
         .map_err(crate::Error::from)?
@@ -284,15 +289,15 @@ fn sync_inner<H: IndexHook>(
         current_paths.insert(path_str.clone());
         current_ids.insert(doc_id);
 
-        let disk_mtime = file_mtime_secs(path);
+        let stamp = file_stamp(path);
         if !full
-            && let Some(&cached_mtime) = known_mtimes.get(&path_str)
-            && cached_mtime == disk_mtime
+            && let Some(&cached) = known_stamps.get(&path_str)
+            && cached == stamp
         {
             continue;
         }
 
-        hook.on_changed(path, disk_mtime)
+        hook.on_changed(path, stamp.mtime_ns)
             .map_err(SyncWithHookError::Hook)?;
 
         let Ok(doc) = build_document_from_disk(path, doc_id) else {
@@ -300,7 +305,7 @@ fn sync_inner<H: IndexHook>(
             continue;
         };
 
-        // Index into the retrieve DB first, then record the mtime. If we crash
+        // Index into the retrieve DB first, then record the stamp. If we crash
         // between the two, the file is re-detected as changed next run and
         // re-indexed (idempotent via the stable `doc_id`) — never silently
         // skipped, which the reverse order would risk. See the crate-split
@@ -308,9 +313,7 @@ fn sync_inner<H: IndexHook>(
         retrieve_db
             .upsert_document(&doc)
             .map_err(crate::Error::from)?;
-        track
-            .upsert(&path_str, disk_mtime)
-            .map_err(crate::Error::from)?;
+        track.upsert(&path_str, stamp).map_err(crate::Error::from)?;
         upserted += 1;
     }
 
@@ -318,7 +321,7 @@ fn sync_inner<H: IndexHook>(
     let mut removed_doc_ids: HashSet<i64> = HashSet::new();
     let mut removed = 0usize;
 
-    for path_str in known_mtimes.keys() {
+    for path_str in known_stamps.keys() {
         if current_paths.contains(path_str) {
             continue;
         }
@@ -362,7 +365,7 @@ impl IndexHook for NoopHook {
     fn on_changed(
         &mut self,
         _path: &Path,
-        _disk_mtime: i64,
+        _disk_mtime_ns: i64,
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
@@ -383,9 +386,9 @@ pub(crate) fn unwrap_infallible(err: SyncWithHookError<std::convert::Infallible>
     }
 }
 
-/// Walk the workspace and update only files whose mtime (tracked in `track`)
-/// has changed since the last sync. Also removes documents for files that no
-/// longer exist.
+/// Walk the workspace and update only files whose recorded stamp (mtime
+/// and size, tracked in `track`) has changed since the last sync. Also
+/// removes documents for files that no longer exist.
 ///
 /// Returns `(upserted, removed)`.
 ///
@@ -459,7 +462,7 @@ mod tests {
         fn on_changed(
             &mut self,
             path: &Path,
-            _disk_mtime: i64,
+            _disk_mtime_ns: i64,
         ) -> std::result::Result<(), Self::Error> {
             self.changed.push(path.to_path_buf());
             Ok(())
@@ -514,6 +517,52 @@ mod tests {
         assert_eq!(second.upserted, 0);
         assert!(hook2.changed.is_empty());
         assert_eq!(hook2.after_sweep_count.get(), 1);
+    }
+
+    #[test]
+    fn same_second_same_length_rewrite_is_detected_as_changed() {
+        // Regression #118: a rewrite that lands in the same second as the
+        // last sync, with the same file length, must still re-index — the
+        // nanosecond mtime is what distinguishes it now: the stored mtime is
+        // pinned to a whole second below, so a second-resolution
+        // implementation would see the rewrite as a no-op.
+        let (_tmp, ws, db, track) = make_workspace();
+        // Content stays exactly 4 bytes ("aaaa" → "bbbb"): only the
+        // sub-second part of the mtime can distinguish the two writes.
+        let file = ws.root.join("ルポ.md");
+        fs::write(&file, "aaaa").unwrap();
+        let whole_second = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                fs::metadata(&file)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(whole_second)
+            .unwrap();
+
+        let mut hook = RecordingHook::new();
+        let first = sync_workspace_with_hook(&ws, db.clone(), &track, &mut hook).unwrap();
+        assert_eq!(first.upserted, 1);
+
+        // Same length, rewritten within the same second (no sleep in between,
+        // and the stored mtime was pinned to the start of that second).
+        fs::write(&file, "bbbb").unwrap();
+
+        let mut hook2 = RecordingHook::new();
+        let second = sync_workspace_with_hook(&ws, db, &track, &mut hook2).unwrap();
+        assert_eq!(
+            second.upserted, 1,
+            "a same-second, same-length rewrite must re-index"
+        );
+        assert_eq!(hook2.changed, vec![file.canonicalize().unwrap()]);
     }
 
     #[test]
@@ -581,7 +630,7 @@ mod tests {
         fn on_changed(
             &mut self,
             _path: &Path,
-            _disk_mtime: i64,
+            _disk_mtime_ns: i64,
         ) -> std::result::Result<(), Self::Error> {
             Err(Boom)
         }

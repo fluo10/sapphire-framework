@@ -2,7 +2,8 @@
 //!
 //! `sapphire-track` owns the "what files changed since last time" concern,
 //! independent of *why* a caller cares about those files. It persists a
-//! `path -> mtime` snapshot and diffs the current filesystem state against it.
+//! `path -> (mtime, len)` snapshot and diffs the current filesystem state
+//! against it.
 //!
 //! The crate deliberately knows nothing about file types: the caller decides
 //! which paths to track by supplying an `accept` predicate to [`scan`] (or by
@@ -33,11 +34,31 @@ mod redb_store;
 pub use error::{Error, Result};
 pub use redb_store::RedbTrackStore;
 
-/// One observed path plus its current mtime (seconds since the UNIX epoch).
+/// The per-path bookkeeping a [`TrackStore`] keeps per file: the last-seen
+/// mtime (nanoseconds since the UNIX epoch) plus the last-seen file size.
+///
+/// The size is part of change detection because not every filesystem records
+/// nanosecond-resolution timestamps (some network and embedded filesystems
+/// store coarser timestamps than ext4's nanoseconds). A rewrite that lands
+/// inside the filesystem's timestamp granularity is caught by `mtime_ns`
+/// wherever the filesystem records sub-second changes, and by `len` whenever
+/// the size differs — second-only resolution alone no longer hides
+/// same-second edits (#118).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Last-seen mtime, **nanoseconds** since the UNIX epoch.
+    pub mtime_ns: i64,
+    /// Last-seen file size in bytes.
+    pub len: u64,
+}
+
+/// One observed path plus its current [`FileStamp`] (nanosecond mtime and
+/// file size).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
     pub path: PathBuf,
-    pub mtime: i64,
+    /// The path's current change-detection stamp.
+    pub stamp: FileStamp,
 }
 
 /// The result of diffing the current filesystem state against a stored
@@ -46,7 +67,7 @@ pub struct Observed {
 pub struct Changes {
     /// Observed now, absent from the stored snapshot.
     pub added: Vec<PathBuf>,
-    /// Present in the snapshot but with a different mtime.
+    /// Present in the snapshot but with a different mtime **or** file size.
     pub modified: Vec<PathBuf>,
     /// Present in the snapshot but not observed now.
     pub removed: Vec<PathBuf>,
@@ -68,18 +89,18 @@ impl Changes {
     }
 }
 
-/// Persistent `path -> mtime` store.
+/// Persistent store mapping each file path to its [`FileStamp`].
 ///
 /// All methods are synchronous, mirroring the style of
 /// `sapphire_retrieve::RetrieveStore`. Paths are stored as their string
 /// representation; the caller is responsible for passing consistent
 /// (e.g. canonicalized) paths.
 pub trait TrackStore: Send + Sync {
-    /// Return the full `path -> mtime` snapshot.
-    fn mtimes(&self) -> Result<HashMap<String, i64>>;
+    /// Return the full snapshot mapping each path to its [`FileStamp`].
+    fn mtimes(&self) -> Result<HashMap<String, FileStamp>>;
 
-    /// Insert or update the mtime for `path`.
-    fn upsert(&self, path: &str, mtime: i64) -> Result<()>;
+    /// Insert or update the stamp for `path`.
+    fn upsert(&self, path: &str, stamp: FileStamp) -> Result<()>;
 
     /// Remove the entry for `path` (no-op if absent).
     fn remove(&self, path: &str) -> Result<()>;
@@ -89,9 +110,9 @@ pub trait TrackStore: Send + Sync {
 
     /// Insert or update many entries. Backends override this to commit the
     /// whole batch in a single transaction.
-    fn upsert_many(&self, entries: &[(String, i64)]) -> Result<()> {
-        for (path, mtime) in entries {
-            self.upsert(path, *mtime)?;
+    fn upsert_many(&self, entries: &[(String, FileStamp)]) -> Result<()> {
+        for (path, stamp) in entries {
+            self.upsert(path, *stamp)?;
         }
         Ok(())
     }
@@ -100,8 +121,11 @@ pub trait TrackStore: Send + Sync {
 /// Diff `observed` (the current filesystem state) against `stored` (the
 /// previous snapshot). Pure: performs no I/O.
 ///
+/// A stored path is `modified` when either recorded value differs — its
+/// mtime **or** its file size (see [`FileStamp`], #118).
+///
 /// Caller-supplied filtering is assumed to already be applied to `observed`.
-pub fn diff(stored: &HashMap<String, i64>, observed: &[Observed]) -> Changes {
+pub fn diff(stored: &HashMap<String, FileStamp>, observed: &[Observed]) -> Changes {
     let mut changes = Changes::default();
     let mut seen: HashSet<String> = HashSet::with_capacity(observed.len());
 
@@ -109,7 +133,7 @@ pub fn diff(stored: &HashMap<String, i64>, observed: &[Observed]) -> Changes {
         let key = obs.path.to_string_lossy().into_owned();
         match stored.get(&key) {
             None => changes.added.push(obs.path.clone()),
-            Some(&prev) if prev != obs.mtime => changes.modified.push(obs.path.clone()),
+            Some(prev) if prev != &obs.stamp => changes.modified.push(obs.path.clone()),
             Some(_) => {}
         }
         seen.insert(key);
@@ -126,7 +150,7 @@ pub fn diff(stored: &HashMap<String, i64>, observed: &[Observed]) -> Changes {
 
 /// Read the stored snapshot from `store` and diff `observed` against it.
 ///
-/// Does **not** mutate the store — the caller commits new mtimes (via
+/// Does **not** mutate the store — the caller commits new stamps (via
 /// [`TrackStore::upsert_many`]) only after successfully processing the
 /// changes, so an interrupted run re-detects the work rather than dropping it.
 pub fn detect_changes(store: &dyn TrackStore, observed: &[Observed]) -> Result<Changes> {
@@ -134,16 +158,53 @@ pub fn detect_changes(store: &dyn TrackStore, observed: &[Observed]) -> Result<C
     Ok(diff(&stored, observed))
 }
 
-/// Return the mtime of `path` as seconds since the UNIX epoch, or 0 on error.
-pub fn mtime_secs(path: &Path) -> i64 {
-    path.metadata()
-        .and_then(|m| m.modified())
-        .map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-        })
-        .unwrap_or(0)
+/// Read both [`FileStamp`] fields of `path` from a **single** `metadata()`
+/// call, so the pair cannot be torn into an (old mtime, new len) mismatch by
+/// a concurrent write, and return the zero stamp on error.
+///
+/// This is the hot path used by [`scan`]; callers that need only one field can
+/// use [`mtime_ns`] or [`file_len`] directly.
+pub fn file_stamp(path: &Path) -> FileStamp {
+    match path.metadata() {
+        Ok(meta) => FileStamp {
+            mtime_ns: meta
+                .modified()
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as i64
+                })
+                .unwrap_or(0),
+            len: meta.len(),
+        },
+        Err(_) => FileStamp {
+            mtime_ns: 0,
+            len: 0,
+        },
+    }
+}
+
+/// Return the mtime of `path` in **nanoseconds** since the UNIX epoch, or 0
+/// on error.
+///
+/// i64 nanoseconds since the epoch cover 1678-04-11 to 2262-04-11 — the
+/// nanosecond resolution is what catches same-second rewrites (#118), and
+/// i64 still carries every realistic file timestamp with centuries to spare.
+///
+/// This stats the file on its own; [`file_stamp`] reads mtime and size from
+/// one `metadata()` call when both fields are needed.
+pub fn mtime_ns(path: &Path) -> i64 {
+    file_stamp(path).mtime_ns
+}
+
+/// Return the size of `path` in bytes, or 0 on error.
+///
+/// Paired with [`mtime_ns`] for change detection: on a filesystem whose
+/// timestamp granularity hides a same-interval rewrite, a size change still
+/// flags the file as modified (#118). See the single-stat note on
+/// [`file_stamp`].
+pub fn file_len(path: &Path) -> u64 {
+    file_stamp(path).len
 }
 
 /// Walk `root` recursively and return an [`Observed`] entry for every file for
@@ -176,7 +237,9 @@ pub fn scan<F: Fn(&Path) -> bool>(root: &Path, accept: F) -> Result<Vec<Observed
             let path = entry.path();
             out.push(Observed {
                 path: path.to_path_buf(),
-                mtime: mtime_secs(path),
+                // One `metadata()` call for both fields: no torn
+                // (old mtime, new len) pair under concurrent writes.
+                stamp: file_stamp(path),
             });
         }
     }
@@ -197,16 +260,16 @@ pub fn open_in_memory() -> InMemoryTrackStore {
 /// no-persistence builds.
 #[derive(Default)]
 pub struct InMemoryTrackStore {
-    inner: std::sync::Mutex<HashMap<String, i64>>,
+    inner: std::sync::Mutex<HashMap<String, FileStamp>>,
 }
 
 impl TrackStore for InMemoryTrackStore {
-    fn mtimes(&self) -> Result<HashMap<String, i64>> {
+    fn mtimes(&self) -> Result<HashMap<String, FileStamp>> {
         Ok(self.inner.lock().unwrap().clone())
     }
 
-    fn upsert(&self, path: &str, mtime: i64) -> Result<()> {
-        self.inner.lock().unwrap().insert(path.to_owned(), mtime);
+    fn upsert(&self, path: &str, stamp: FileStamp) -> Result<()> {
+        self.inner.lock().unwrap().insert(path.to_owned(), stamp);
         Ok(())
     }
 
@@ -224,21 +287,32 @@ impl TrackStore for InMemoryTrackStore {
 mod tests {
     use super::*;
 
-    fn obs(path: &str, mtime: i64) -> Observed {
+    fn obs(path: &str, mtime_ns: i64, len: u64) -> Observed {
         Observed {
             path: PathBuf::from(path),
-            mtime,
+            stamp: FileStamp { mtime_ns, len },
         }
     }
 
-    fn stored(pairs: &[(&str, i64)]) -> HashMap<String, i64> {
-        pairs.iter().map(|(p, m)| (p.to_string(), *m)).collect()
+    fn stored(pairs: &[(&str, i64, u64)]) -> HashMap<String, FileStamp> {
+        pairs
+            .iter()
+            .map(|(p, m, l)| {
+                (
+                    p.to_string(),
+                    FileStamp {
+                        mtime_ns: *m,
+                        len: *l,
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
     fn diff_classifies_added_modified_removed_and_skips_unchanged() {
-        let prev = stored(&[("a", 1), ("b", 2), ("gone", 9)]);
-        let now = [obs("a", 1), obs("b", 5), obs("c", 3)];
+        let prev = stored(&[("a", 1, 1), ("b", 2, 1), ("gone", 9, 1)]);
+        let now = [obs("a", 1, 1), obs("b", 5, 1), obs("c", 3, 1)];
 
         let changes = diff(&prev, &now);
 
@@ -250,24 +324,57 @@ mod tests {
     }
 
     #[test]
+    fn diff_treats_a_same_mtime_length_change_as_modified() {
+        // #118: stored mtime identical, size different → modified.
+        let prev = stored(&[("a", 1, 1)]);
+        let now = [obs("a", 1, 2)];
+        assert_eq!(diff(&prev, &now).modified, vec![PathBuf::from("a")]);
+    }
+
+    #[test]
     fn diff_empty_when_nothing_changed() {
-        let prev = stored(&[("a", 1)]);
-        let now = [obs("a", 1)];
+        let prev = stored(&[("a", 1, 1)]);
+        let now = [obs("a", 1, 1)];
         assert!(diff(&prev, &now).is_empty());
     }
 
     #[test]
     fn in_memory_store_round_trips() {
         let store = open_in_memory();
-        store.upsert("x", 10).unwrap();
+        let x = FileStamp {
+            mtime_ns: 10,
+            len: 1,
+        };
+        store.upsert("x", x).unwrap();
         store
-            .upsert_many(&[("y".into(), 20), ("z".into(), 30)])
+            .upsert_many(&[
+                (
+                    "y".into(),
+                    FileStamp {
+                        mtime_ns: 20,
+                        len: 2,
+                    },
+                ),
+                (
+                    "z".into(),
+                    FileStamp {
+                        mtime_ns: 30,
+                        len: 3,
+                    },
+                ),
+            ])
             .unwrap();
         assert_eq!(store.count().unwrap(), 3);
 
         let m = store.mtimes().unwrap();
-        assert_eq!(m.get("x"), Some(&10));
-        assert_eq!(m.get("y"), Some(&20));
+        assert_eq!(m.get("x"), Some(&x));
+        assert_eq!(
+            m.get("y"),
+            Some(&FileStamp {
+                mtime_ns: 20,
+                len: 2
+            })
+        );
 
         store.remove("x").unwrap();
         assert_eq!(store.count().unwrap(), 2);
@@ -277,8 +384,16 @@ mod tests {
     #[test]
     fn detect_changes_reads_store_then_diffs() {
         let store = open_in_memory();
-        store.upsert("a", 1).unwrap();
-        let now = [obs("a", 1), obs("b", 2)];
+        store
+            .upsert(
+                "a",
+                FileStamp {
+                    mtime_ns: 1,
+                    len: 1,
+                },
+            )
+            .unwrap();
+        let now = [obs("a", 1, 1), obs("b", 2, 2)];
         let changes = detect_changes(&store, &now).unwrap();
         assert_eq!(changes.added, vec![PathBuf::from("b")]);
         assert!(changes.modified.is_empty());
@@ -350,5 +465,117 @@ mod tests {
             .map(|o| o.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["a.txt"]);
+    }
+
+    #[test]
+    fn scan_observes_nanosecond_mtime_and_len() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let observed = scan(tmp.path(), |_| true).unwrap();
+        assert_eq!(observed.len(), 1);
+        let meta = std::fs::metadata(&file).unwrap();
+        assert_eq!(
+            observed[0].stamp.mtime_ns,
+            meta.modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64
+        );
+        assert_eq!(observed[0].stamp.len, meta.len());
+    }
+
+    #[test]
+    fn detect_changes_detects_same_second_rewrite_same_length() {
+        // Regression #118: a rewrite that lands in the same *second* as the
+        // last scan, with the same file length, must still be `modified`.
+        // The recorded mtime is pinned to a whole second first, so an
+        // implementation storing second-resolution mtimes would see the
+        // rewrite as a no-op.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, "aaaa").unwrap();
+        let whole_second = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                std::fs::metadata(&file)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(whole_second)
+            .unwrap();
+
+        let store = open_in_memory();
+        let first = scan(tmp.path(), |_| true).unwrap();
+        store
+            .upsert_many(
+                &first
+                    .iter()
+                    .map(|o| (o.path.to_string_lossy().into_owned(), o.stamp))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+        // Plain rewrite: same length, same second — the recorded mtime is now
+        // the write's own (nanosecond-precision) timestamp, which differs
+        // from the pinned whole-second value in its sub-second part.
+        std::fs::write(&file, "bbbb").unwrap();
+
+        let changes = detect_changes(&store, &scan(tmp.path(), |_| true).unwrap()).unwrap();
+        assert_eq!(
+            changes.modified,
+            vec![file.canonicalize().unwrap_or(file.clone())],
+            "a same-second, same-length rewrite must count as modified"
+        );
+    }
+
+    #[test]
+    fn detect_changes_detects_length_change_with_identical_mtime() {
+        // Regression #118 (coarse-granularity filesystems): even when the
+        // recorded mtime is pinned to be bit-identical, a length change alone
+        // must be detected as `modified`.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, "aaa").unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+        let store = open_in_memory();
+        store
+            .upsert(
+                &file.to_string_lossy(),
+                FileStamp {
+                    mtime_ns: mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as i64,
+                    len: std::fs::metadata(&file).unwrap().len(),
+                },
+            )
+            .unwrap();
+
+        std::fs::write(&file, "aaaaaa").unwrap();
+        // Pin the mtime back to the recorded value: only `len` differs now.
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let changes = detect_changes(&store, &scan(tmp.path(), |_| true).unwrap()).unwrap();
+        assert_eq!(
+            changes.modified,
+            vec![file.clone()],
+            "a same-mtime length change must count as modified"
+        );
     }
 }
