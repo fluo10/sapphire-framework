@@ -9,7 +9,7 @@ keywords = ["sync", "client", "json-rpc", "reqwest"]
 categories = ["web-programming::http-client"]
 
 [dependencies]
-sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.13.0", path = "../sapphire-framework-rpc" }
+sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.14.0", path = "../sapphire-framework-rpc" }
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 serde.workspace = true
@@ -19,7 +19,7 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.13.0", path = "../sapphire-framework-remote-server" }
+sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.14.0", path = "../sapphire-framework-remote-server" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 tempfile = "3"
