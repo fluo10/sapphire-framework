@@ -78,8 +78,8 @@ pub enum AppKind { Cli, Server, Desktop }   // AsRef<str>: "cli" | "server" | "d
 ```rust
 /// Resolve the platform directories via `dirs`, apply the per-binary-type layout,
 /// migrate any legacy layout, create the directories and set all three fields.
-/// First writer wins, as before. Env overrides: SAPPHIRE_<APP-UPPER>_CACHE_DIR /
-> _DATA_DIR / _CONFIG_DIR replace the platform root for that category.
+/// First writer wins, as before. Env overrides: `SAPPHIRE_<APP-UPPER>_CACHE_DIR`,
+/// `..._DATA_DIR`, `..._CONFIG_DIR` replace the platform root for that category.
 pub fn init(&self, kind: AppKind);
 ```
 
