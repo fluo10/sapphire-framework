@@ -6,6 +6,8 @@ pub mod workspace;
 pub mod workspace_state;
 
 mod error;
+#[cfg(test)]
+mod test_env;
 pub use app_dirs::AppKind;
 pub use error::{Error, Result};
 

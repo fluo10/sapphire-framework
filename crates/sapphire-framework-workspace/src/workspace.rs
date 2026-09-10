@@ -1,6 +1,7 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use crate::app_dirs::workspace_dir_env_var;
 use crate::context::AppContext;
 use crate::error::{Error, Result};
 
@@ -114,26 +115,33 @@ impl Workspace {
 
     /// Resolve the workspace directory (no marker required):
     /// 1. `explicit` parameter (no confirmation prompt)
-    /// 2. `SAPPHIRE_WORKSPACE_DIR` env var (no confirmation prompt)
+    /// 2. the per-app env var `SAPPHIRE_<APP-UPPER>_DIR` (see
+    ///    [`workspace_dir_env_var`](crate::app_dirs::workspace_dir_env_var)),
+    ///    falling back to the deprecated `SAPPHIRE_WORKSPACE_DIR`
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
+    ///
+    /// An env var that is set but empty falls through to the cwd.
     pub fn resolve(ctx: &'static AppContext, explicit: Option<&Path>) -> Result<Self> {
-        let root = if let Some(dir) = explicit {
-            dir.canonicalize().map_err(|e| Error::Access {
+        let root = match explicit {
+            Some(dir) => dir.canonicalize().map_err(|e| Error::Access {
                 path: dir.to_owned(),
                 source: e,
-            })?
-        } else if let Ok(val) = std::env::var("SAPPHIRE_WORKSPACE_DIR") {
-            if !val.is_empty() {
-                let p = PathBuf::from(&val);
-                p.canonicalize().map_err(|e| Error::Access {
-                    path: p.clone(),
-                    source: e,
-                })?
-            } else {
-                resolve_cwd()?
-            }
-        } else {
-            resolve_cwd()?
+            })?,
+            None => match env_root(&workspace_dir_env_var(ctx.app_name))? {
+                Some(root) => root,
+                // The per-app var is unset/empty: fall back to the deprecated
+                // global, then to the cwd.
+                None => match env_root("SAPPHIRE_WORKSPACE_DIR")? {
+                    Some(root) => {
+                        tracing::warn!(
+                            "SAPPHIRE_WORKSPACE_DIR is deprecated; set {} instead",
+                            workspace_dir_env_var(ctx.app_name)
+                        );
+                        root
+                    }
+                    None => resolve_cwd()?,
+                },
+            },
         };
         Ok(Self {
             uuid: path_uuid(&root),
@@ -228,6 +236,21 @@ impl Workspace {
     }
 }
 
+/// Read a workspace-root env var: `Some(canonicalized path)` when it is set
+/// to a non-empty value, `None` when it is unset or empty (the empty value
+/// falls through to the cwd, as the pre-unification code did).
+fn env_root(name: &str) -> Result<Option<PathBuf>> {
+    let val = match std::env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    let p = PathBuf::from(&val);
+    match p.canonicalize() {
+        Ok(c) => Ok(Some(c)),
+        Err(source) => Err(Error::Access { path: p, source }),
+    }
+}
+
 fn resolve_cwd() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     if std::io::stdin().is_terminal() {
@@ -278,5 +301,76 @@ mod registry_path_tests {
         assert_eq!(ws.users_path().parent(), ws.config_path().parent());
         assert_eq!(ws.devices_path().file_name().unwrap(), "devices.toml");
         assert_eq!(ws.users_path().file_name().unwrap(), "users.toml");
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::test_env::TestEnv;
+    use tempfile::tempdir;
+
+    #[test]
+    fn explicit_path_beats_the_per_app_env_var() {
+        let _env = TestEnv::lock();
+        let (explicit, env_dir) = (tempdir().unwrap(), tempdir().unwrap());
+        TestEnv::set("SAPPHIRE_RESOLVEAPP1_DIR", env_dir.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp1")));
+        let ws = Workspace::resolve(ctx, Some(explicit.path())).unwrap();
+        assert_eq!(ws.root, std::fs::canonicalize(explicit.path()).unwrap());
+    }
+
+    #[test]
+    fn per_app_env_var_names_the_workspace_root() {
+        let _env = TestEnv::lock();
+        let env_dir = tempdir().unwrap();
+        TestEnv::set("SAPPHIRE_RESOLVEAPP2_DIR", env_dir.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp2")));
+        let ws = Workspace::resolve(ctx, None).unwrap();
+        assert_eq!(ws.root, std::fs::canonicalize(env_dir.path()).unwrap());
+        assert_eq!(ws.uuid, path_uuid(&ws.root));
+    }
+
+    #[test]
+    fn deprecated_global_env_var_still_resolves_when_per_app_var_is_unset() {
+        let _env = TestEnv::lock();
+        let env_dir = tempdir().unwrap();
+        TestEnv::remove("SAPPHIRE_RESOLVEAPP3_DIR");
+        TestEnv::set("SAPPHIRE_WORKSPACE_DIR", env_dir.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp3")));
+        let ws = Workspace::resolve(ctx, None).unwrap();
+        assert_eq!(ws.root, std::fs::canonicalize(env_dir.path()).unwrap());
+    }
+
+    #[test]
+    fn per_app_env_var_beats_the_deprecated_global_one() {
+        let _env = TestEnv::lock();
+        let (per_app, global) = (tempdir().unwrap(), tempdir().unwrap());
+        TestEnv::set("SAPPHIRE_RESOLVEAPP4_DIR", per_app.path());
+        TestEnv::set("SAPPHIRE_WORKSPACE_DIR", global.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp4")));
+        let ws = Workspace::resolve(ctx, None).unwrap();
+        assert_eq!(ws.root, std::fs::canonicalize(per_app.path()).unwrap());
+    }
+
+    #[test]
+    fn an_empty_per_app_env_var_falls_through_to_the_cwd() {
+        let _env = TestEnv::lock();
+        TestEnv::set("SAPPHIRE_RESOLVEAPP5_DIR", std::path::Path::new(""));
+        TestEnv::remove("SAPPHIRE_WORKSPACE_DIR");
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp5")));
+        let ws = Workspace::resolve(ctx, None).unwrap();
+        assert_eq!(ws.root, std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn a_missing_env_directory_is_an_access_error() {
+        let _env = TestEnv::lock();
+        TestEnv::set("SAPPHIRE_RESOLVEAPP6_DIR", std::path::Path::new("/nonexistent-sapphire-path-6f3a1c"));
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp6")));
+        match Workspace::resolve(ctx, None) {
+            Err(Error::Access { path, .. }) => assert_eq!(path, std::path::PathBuf::from("/nonexistent-sapphire-path-6f3a1c")),
+            other => panic!("expected Error::Access, got a {} workspace", match other { Ok(w) => w.root.display().to_string(), Err(_) => "different error".into() }),
+        }
     }
 }
