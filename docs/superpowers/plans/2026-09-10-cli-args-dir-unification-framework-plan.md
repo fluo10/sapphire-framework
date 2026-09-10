@@ -278,9 +278,9 @@ git commit -m "feat(workspace): app_dirs module — per-kind layout, migration, 
 
 **Interfaces:**
 - Consumes: Task 1's `AppKind`, `app_dir_env_var`, `migrate_app_dir`, `migrate_keys_to_data`, `workspace_dir_env_var`.
-- Produces: `AppContext::init(&'static self, kind: AppKind)` (sets cache+data via the new layout, idempotent), `AppContext::config_dir() -> &Path`, `AppContext::set_config_dir(PathBuf)`, `Workspace::resolve(ctx, explicit)` unchanged signature, new env resolution order `explicit → {APP}_DIR → SAPPHIRE_WORKSPACE_DIR (warn) → cwd`. Task 4/5 (app PRs) call `CTX.init(AppKind::Server)`.
+- Produces: `AppContext::init(&self, kind: AppKind)` — resolves the three platform roots (`dirs::cache_dir` / `dirs::data_dir` / `dirs::config_dir`, falling back to `std::env::temp_dir()`), applies each category's env override (`SAPPHIRE_<APP>_CACHE_DIR` etc. — replaces the *platform root* only), applies the per-kind layout + migration to **all three** trees (config included — the agent CLI's `config.toml` moving to `<config>/sapphire-agent/cli/` is a free rename via the same option-A migration), creates the leaf dirs, and sets all three `OnceLock`s (first writer wins). Also produces `AppContext::config_dir() -> &Path` / `set_config_dir(PathBuf)` and the unchanged-signature `Workspace::resolve` with new precedence `explicit → {APP}_DIR → SAPPHIRE_WORKSPACE_DIR (warn) → cwd`. App PRs call `CTX.init(AppKind::Server)`.
 
-- [ ] **Step 1: Write failing tests** — `context.rs` tests (one `AppContext` per test via `Box::leak`, following the existing `workspace.rs` test pattern):
+- [ ] **Step 1: Write failing tests** — `context.rs` tests. Each test builds its own `'static AppContext` via `Box::leak` (existing `workspace.rs` test pattern) and controls the platform roots by setting the category env vars to tempdirs *before* calling `init` (env override IS the test hook; use a unique app name per test so the OnceLocks and env vars never race between tests):
 
 ```rust
 #[cfg(test)]
@@ -290,68 +290,72 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn init_sets_cache_and_data_under_the_kind_directory() {
-        let cache = tempdir().unwrap();
-        let data = tempdir().unwrap();
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-journal")));
-        ctx.init(cache.path(), data.path(), AppKind::Server);
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-journal").join("server"));
-        assert_eq!(ctx.data_dir(), data.path().join("sapphire-journal").join("server"));
-        // Idempotent: a second init never overwrites (first writer wins).
-        ctx.init(tempdir().unwrap().path(), tempdir().unwrap().path(), AppKind::Cli);
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-journal").join("server"));
+    fn init_sets_all_three_dirs_under_the_kind_directory() {
+        let (cache, data, config) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL_CACHE_DIR", cache.path());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL_DATA_DIR", data.path());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL_CONFIG_DIR", config.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal")));
+        ctx.init(AppKind::Server);
+        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal").join("server"));
+        assert_eq!(ctx.data_dir(), data.path().join("sapphire-testjournal").join("server"));
+        assert_eq!(ctx.config_dir(), config.path().join("sapphire-testjournal").join("server"));
+    }
+
+    #[test]
+    fn init_is_idempotent_first_writer_wins() {
+        let (cache, data, config) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL2_CACHE_DIR", cache.path());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL2_DATA_DIR", data.path());
+        std::env::set_var("SAPPHIRE_TESTJOURNAL2_CONFIG_DIR", config.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal2")));
+        ctx.init(AppKind::Server);
+        ctx.init(AppKind::Cli); // first writer wins — no change
+        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal2").join("server"));
     }
 
     #[test]
     fn cache_dir_for_appends_the_workspace_uuid() {
         let cache = tempdir().unwrap();
-        let data = tempdir().unwrap();
+        std::env::set_var("SAPPHIRE_TESTJOURNAL3_CACHE_DIR", cache.path());
+        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal3")));
+        ctx.init(AppKind::Cli);
         let root = tempdir().unwrap();
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-ledger")));
-        ctx.init(cache.path(), data.path(), AppKind::Cli);
         let uuid = crate::path_uuid(root.path()).to_string();
-        assert_eq!(ctx.cache_dir_for(root.path()), cache.path().join("sapphire-ledger").join("cli").join(uuid));
+        assert_eq!(ctx.cache_dir_for(root.path()), cache.path().join("sapphire-testjournal3").join("cli").join(uuid));
     }
 }
 ```
 
-And `workspace.rs` tests appended to the existing `registry_path_tests` module (or a new module): resolve precedence with an explicit path beats the env var; when the env var `{APP}_DIR` names a marker-bearing dir, resolve returns it.
+And `workspace.rs` tests appended to a new `mod resolve_tests`: an explicit path beats the env var; a marker-bearing dir named by `{APP}_DIR` is returned; `SAPPHIRE_WORKSPACE_DIR` still resolves (with the warn) when the per-app var is unset.
 
 - [ ] **Step 2: Run — expect compile failure (`init`/`config_dir` missing)**
 
 Run: `cargo test -p sapphire-framework-workspace context` → FAIL.
 
-- [ ] **Step 3: Implement in `context.rs`** — replace the "does not depend on platform path crates" doc paragraph (the dirs-independence policy is retired by this issue); add:
+- [ ] **Step 3: Implement in `context.rs`** — replace the "does not depend on platform path crates" doc paragraph (that policy is retired by this issue: `dirs` is now a direct dependency, re-exported for apps). Add a `config_dir: OnceLock<PathBuf>` field plus `set_config_dir`/`config_dir` mirroring the cache/data pair, and:
 
 ```rust
-    /// App-local config directory (`<platform-config>/<app>/<kind>`), set by
-    /// [`init`](Self::init) or [`set_config_dir`](Self::set_config_dir).
-    config_dir: OnceLock<PathBuf>,
-```
-
-```rust
-/// Initialise cache and data directories from the platform defaults, applying
-/// the per-binary-type layout and one-shot migration (see [`crate::app_dirs`]).
-///
-/// `cache_root` / `data_root` are the *platform* roots — the apps pass the
-/// `dirs`-resolved root or an env override; `init` appends `<app_name>/<kind>`
-/// itself and creates the leaf directory. First writer wins, as with
-/// [`set_cache_dir`](Self::set_cache_dir).
-pub fn init(&self, cache_root: &Path, data_root: &Path, kind: AppKind) {
-    let app = |root: &Path| root.join(self.app_name);
-    let cache = crate::app_dirs::migrate_app_dir(&app(cache_root), kind);
-    let data = crate::app_dirs::migrate_app_dir(&app(data_root), kind);
-    if let (Ok(cache), Ok(data)) = (&cache, &data) {
-        let _ = crate::app_dirs::migrate_keys_to_data(
-            &app(cache_root), &app(data_root), kind,
-        );
-        let _ = self.cache_dir.set(cache.clone());
-        let _ = self.data_dir.set(data.clone());
-    }
+/// Initialise the cache, data and config directories from the platform
+/// defaults, applying the per-binary-type layout and one-shot migration
+/// (see [`crate::app_dirs`]). Each category's platform root can be replaced
+/// by its env var (`SAPPHIRE_<APP-UPPER>_CACHE_DIR`, `..._DATA_DIR`,
+/// `..._CONFIG_DIR`); the `<app>/<kind>` layering always applies on top.
+/// First writer wins, as with [`set_cache_dir`](Self::set_cache_dir).
+pub fn init(&self, kind: AppKind) {
+    let roots = [
+        (dirs::cache_dir, "cache", &self.cache_dir),
+        (dirs::data_dir, "data", &self.data_dir),
+        (dirs::config_dir, "config", &self.config_dir),
+    ];
+    // … for each: env override or platform root (fallback temp_dir), then
+    // migrate_app_dir(&root.join(self.app_name), kind), set the OnceLock
+    // once Ok; after the cache+data pair is set, run migrate_keys_to_data
+    // once (secrets move into the data tree; see app_docs) …
 }
 ```
 
-(plus `set_config_dir`/`config_dir` mirroring the existing cache/data pair; the config tree is **not** per-kind — the agent stores `config.toml` directly in `<platform-config>/<app>/`, so `config_dir()` returns `<platform-config>/<app>/` as-is; document that). Update the struct's module doc example to use `init`.
+Implementation note: iterate the three categories with a small helper rather than the tuple-of-closures sketch above (OnceLocks of different fields cannot live in one array cleanly — set each field via its setter after migrating its tree). The keys.toml migration runs only after both cache and data trees exist; run it best-effort right after the data tree migration.
 
 `workspace.rs` `resolve`: replace the hard-coded env read with:
 
@@ -364,11 +368,9 @@ pub fn init(&self, cache_root: &Path, data_root: &Path, kind: AppKind) {
         } else {
 ```
 
-- [ ] **Step 4: Run tests + clippy — PASS** (run with `--test-threads=1` only if env tests race).
+- [ ] **Step 4: Run tests + clippy — PASS** (`std::env::set_var` from tests: run the crate tests single-threaded **only if** they actually race; prefer unique app names per test, as above, so they don't).
 
-- [ ] **Step 5: Commit** `feat(workspace): AppContext::init with per-kind layout + migration; per-app workspace-dir env (#129)`
-
----
+- [ ] **Step 5: Commit** `feat(workspace): AppContext::init — per-kind layout, migration, unified env resolution (#129)`
 
 ### Task 3: `WorkspaceArgs` + `clap`/`serde` re-exports + facade passthrough
 
