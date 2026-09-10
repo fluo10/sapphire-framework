@@ -58,20 +58,38 @@ fn is_uuid_name(name: &str) -> bool {
 /// Move `from` to `to`, preferring a same-filesystem `std::fs::rename`.
 /// If the rename fails (typically `EXDEV` when source and destination are on
 /// different mounts — the cache and data trees may be different filesystems
-/// via env overrides), fall back to a recursive copy of `from` onto `to`
-/// followed by deleting `from`. `to` must not exist yet (callers guard).
+/// via env overrides), fall back to [`copy_then_delete`]. `to` must not exist
+/// yet (callers guard).
 fn move_item(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            copy_path(from, to)?;
-            std::fs::remove_dir_all(from)
-        }
+        Err(err) => copy_then_delete(from, to)
+            .map_err(|fallback_err| std::io::Error::other(format!(
+                "cross-device fallback move of {} to {} failed after rename failed ({}): {}",
+                from.display(),
+                to.display(),
+                err,
+                fallback_err
+            ))),
+    }
+}
+
+/// Cross-device fallback for [`move_item`]: recursively copy `from` onto `to`
+/// (creating `to`), then delete `from` — `remove_file` for a plain file
+/// (`remove_dir_all` fails with `ENOTDIR` on a file), `remove_dir_all` for a
+/// directory tree. Symlinked entries inside a tree are dereferenced: they are
+/// copied as regular files, not recreated as symlinks.
+fn copy_then_delete(from: &Path, to: &Path) -> std::io::Result<()> {
+    copy_path(from, to)?;
+    if from.is_file() {
+        std::fs::remove_file(from)
+    } else {
+        std::fs::remove_dir_all(from)
     }
 }
 
 /// Recursive copy of a file or directory tree (`from` onto `to`, which is
-/// created). Used by [`move_item`] as the cross-device fallback for `rename`.
+/// created). Used by [`copy_then_delete`] as the cross-device fallback.
 fn copy_path(from: &Path, to: &Path) -> std::io::Result<()> {
     if from.is_file() {
         if let Some(parent) = to.parent() {
@@ -81,17 +99,14 @@ fn copy_path(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     for entry in walkdir::WalkDir::new(from) {
         let entry = entry.map_err(std::io::Error::other)?;
-        let rel = entry
-            .path()
-            .strip_prefix(from)
-            .map_err(|_| std::io::Error::other("walkdir path escaped source"))?;
+        let Ok(rel) = entry.path().strip_prefix(from) else {
+            return Err(std::io::Error::other("walkdir path escaped source"));
+        };
         let dest = to.join(rel);
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(dest)?;
-        } else {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+        } else if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
             std::fs::copy(entry.path(), dest)?;
         }
     }
@@ -262,22 +277,36 @@ mod tests {
 
     #[test]
     fn move_item_falls_back_to_copy_and_delete_when_rename_is_not_possible() {
-        // move_item first tries rename; when that is not possible the
-        // copy + delete-source fallback must reproduce the same end state.
+        // move_item first tries rename; on a single filesystem a plain rename
+        // works and the fallback is never reached — so the fallback itself
+        // (the copy + delete-source path move_item delegates to on EXDEV) is
+        // exercised directly here, for both a directory tree and a plain file.
         let root = tempdir().unwrap();
+
+        // directory tree (Option-A / shared-layout shape)
         let from = root.path().join("src-tree").join("nested");
         let to = root.path().join("other-mount").join("moved");
         std::fs::create_dir_all(from.join("inner")).unwrap();
         std::fs::write(from.join("keys.toml"), "secret").unwrap();
         std::fs::write(from.join("inner").join("index.bin"), "bytes").unwrap();
 
-        // force the fallback path directly (same-fs rename would normally work)
-        super::copy_path(&from, &to).unwrap();
-        std::fs::remove_dir_all(&from).unwrap();
+        copy_then_delete(&from, &to).unwrap();
 
         assert!(!from.exists());
         assert_eq!(std::fs::read_to_string(to.join("keys.toml")).unwrap(), "secret");
         assert_eq!(std::fs::read_to_string(to.join("inner").join("index.bin")).unwrap(), "bytes");
+
+        // plain file (the keys.toml-between-mounts case): removing the
+        // file source must not take the remove_dir_all path
+        let file_from = root.path().join("cache-tree").join("keys.toml");
+        std::fs::create_dir_all(file_from.parent().unwrap()).unwrap();
+        std::fs::write(&file_from, "secret").unwrap();
+        let file_to = root.path().join("data-tree").join("keys.toml");
+
+        copy_then_delete(&file_from, &file_to).unwrap();
+
+        assert!(!file_from.exists());
+        assert_eq!(std::fs::read_to_string(&file_to).unwrap(), "secret");
     }
 
     #[test]
