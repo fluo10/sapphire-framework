@@ -3612,6 +3612,7 @@ name = "sapphire-framework-workspace"
 version = "0.14.0"
 dependencies = [
  "chrono",
+ "dirs",
  "indexmap",
  "md-5",
  "sapphire-framework-retrieve",

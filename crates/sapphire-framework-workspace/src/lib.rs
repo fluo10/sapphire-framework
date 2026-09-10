@@ -1,3 +1,4 @@
+pub mod app_dirs;
 pub mod config;
 pub mod context;
 pub mod indexer;
@@ -5,6 +6,7 @@ pub mod workspace;
 pub mod workspace_state;
 
 mod error;
+pub use app_dirs::AppKind;
 pub use error::{Error, Result};
 
 pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
