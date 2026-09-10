@@ -6,7 +6,7 @@
 //! (`cli`, `server`, `desktop`). Two legacy layouts are migrated on first launch:
 //!
 //! - **Option A** (`<platform-root>/<app-name>-<kind>/`, agent today): the whole
-//!   directory is renamed into place with one `rename`.
+//!   directory is moved into place, normally with one `rename`.
 //! - **Shared** (`<platform-root>/<app-name>/<uuid>/` directly, journal/ledger
 //!   today): UUID-named per-workspace directories are moved under `<kind>/` the
 //!   first time a kind runs; later kinds just get their own empty directory and
@@ -15,6 +15,10 @@
 //! `keys.toml` files found under a migrated *cache* tree are moved into the
 //! matching per-workspace directory of the *data* tree once — they are secrets,
 //! not rebuildable cache.
+//!
+//! Every move is a same-filesystem `std::fs::rename` when possible; if the
+//! rename fails (e.g. the trees are on different mounts, `EXDEV`), it falls
+//! back to copying the source and deleting it afterwards (`move_item`).
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +31,7 @@ pub enum AppKind {
 }
 
 impl AppKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             AppKind::Cli => "cli",
             AppKind::Server => "server",
@@ -51,6 +55,49 @@ fn is_uuid_name(name: &str) -> bool {
     uuid::Uuid::parse_str(name).is_ok()
 }
 
+/// Move `from` to `to`, preferring a same-filesystem `std::fs::rename`.
+/// If the rename fails (typically `EXDEV` when source and destination are on
+/// different mounts — the cache and data trees may be different filesystems
+/// via env overrides), fall back to a recursive copy of `from` onto `to`
+/// followed by deleting `from`. `to` must not exist yet (callers guard).
+fn move_item(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_path(from, to)?;
+            std::fs::remove_dir_all(from)
+        }
+    }
+}
+
+/// Recursive copy of a file or directory tree (`from` onto `to`, which is
+/// created). Used by [`move_item`] as the cross-device fallback for `rename`.
+fn copy_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_file() {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return std::fs::copy(from, to).map(|_| ());
+    }
+    for entry in walkdir::WalkDir::new(from) {
+        let entry = entry.map_err(std::io::Error::other)?;
+        let rel = entry
+            .path()
+            .strip_prefix(from)
+            .map_err(|_| std::io::Error::other("walkdir path escaped source"))?;
+        let dest = to.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
 /// Apply the per-kind layout to `app_dir` (`<platform-root>/<app-name>`),
 /// migrating a legacy layout if one is present, and return the created
 /// per-kind directory. Idempotent: guarded by existence checks.
@@ -67,7 +114,7 @@ pub fn migrate_app_dir(app_dir: &Path, kind: AppKind) -> std::io::Result<PathBuf
         let legacy = parent.join(format!("{app_name}-{}", kind.as_str()));
         if legacy.is_dir() && !kind_dir.exists() {
             std::fs::create_dir_all(app_dir)?;
-            std::fs::rename(&legacy, &kind_dir)?;
+            move_item(&legacy, &kind_dir)?;
             return Ok(kind_dir);
         }
     }
@@ -82,7 +129,7 @@ pub fn migrate_app_dir(app_dir: &Path, kind: AppKind) -> std::io::Result<PathBuf
         let name = entry.file_name();
         let Some(name_str) = name.to_str().map(str::to_owned) else { continue };
         if is_uuid_name(&name_str) && entry.file_type()?.is_dir() {
-            std::fs::rename(app_dir.join(&name_str), kind_dir.join(&name_str))?;
+            move_item(&app_dir.join(&name_str), &kind_dir.join(&name_str))?;
         }
     }
     Ok(kind_dir)
@@ -90,7 +137,9 @@ pub fn migrate_app_dir(app_dir: &Path, kind: AppKind) -> std::io::Result<PathBuf
 
 /// Move per-workspace `keys.toml` files from the (already migrated) cache
 /// tree's `<app>/<kind>/<uuid>/` layout into the data tree's. Once per uuid:
-/// skipped when the data tree already has that workspace directory.
+/// skipped when the data tree already has that workspace directory, which is
+/// what keeps this a once-ever migration (and protects an already-migrated
+/// `keys.toml` from being overwritten on later launches).
 pub fn migrate_keys_to_data(cache_app_dir: &Path, data_app_dir: &Path, kind: AppKind) -> std::io::Result<()> {
     let kind_str = kind.as_str();
     let (cache_kind, data_kind) = (cache_app_dir.join(kind_str), data_app_dir.join(kind_str));
@@ -104,12 +153,17 @@ pub fn migrate_keys_to_data(cache_app_dir: &Path, data_app_dir: &Path, kind: App
         if !is_uuid_name(&name) || !entry.file_type()?.is_dir() {
             continue;
         }
-        migrated_any = true;
+        let dest = data_kind.join(&name);
+        // Once-per-uuid guard: a data-tree dir that already exists for this
+        // workspace means the migration (or later use) already happened.
+        if dest.exists() {
+            continue;
+        }
         let key = cache_kind.join(&name).join("keys.toml");
         if key.exists() {
-            let dest = data_kind.join(&name);
             std::fs::create_dir_all(&dest)?;
-            std::fs::rename(&key, dest.join("keys.toml"))?;
+            move_item(&key, &dest.join("keys.toml"))?;
+            migrated_any = true;
         }
     }
     if migrated_any {
@@ -180,6 +234,50 @@ mod tests {
 
         assert!(data.join("sapphire-ledger/server").join(uuid).join("keys.toml").exists());
         assert!(!cache.join("sapphire-ledger/server").join(uuid).join("keys.toml").exists());
+    }
+
+    #[test]
+    fn second_migrate_keys_to_data_is_a_noop_and_does_not_overwrite() {
+        let root = tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let data = root.path().join("data");
+        let uuid = "2f1c0000-0000-8000-8000-000000000000";
+        let cache_uuid = cache.join("sapphire-ledger/server").join(uuid);
+        let data_uuid = data.join("sapphire-ledger/server").join(uuid);
+        std::fs::create_dir_all(&cache_uuid).unwrap();
+        std::fs::create_dir_all(&data_uuid).unwrap();
+        std::fs::write(cache_uuid.join("keys.toml"), "original").unwrap();
+
+        migrate_keys_to_data(&cache.join("sapphire-ledger"), &data.join("sapphire-ledger"), AppKind::Server).unwrap();
+        // the data tree now owns the (already-migrated) file
+        std::fs::write(data_uuid.join("keys.toml"), "rotated").unwrap();
+        std::fs::write(cache_uuid.join("keys.toml"), "stale").unwrap();
+
+        // a second call must skip this uuid entirely — no overwrite, no error
+        migrate_keys_to_data(&cache.join("sapphire-ledger"), &data.join("sapphire-ledger"), AppKind::Server).unwrap();
+
+        assert_eq!(std::fs::read_to_string(data_uuid.join("keys.toml")).unwrap(), "rotated");
+        assert!(cache_uuid.join("keys.toml").exists()); // untouched, not moved back
+    }
+
+    #[test]
+    fn move_item_falls_back_to_copy_and_delete_when_rename_is_not_possible() {
+        // move_item first tries rename; when that is not possible the
+        // copy + delete-source fallback must reproduce the same end state.
+        let root = tempdir().unwrap();
+        let from = root.path().join("src-tree").join("nested");
+        let to = root.path().join("other-mount").join("moved");
+        std::fs::create_dir_all(from.join("inner")).unwrap();
+        std::fs::write(from.join("keys.toml"), "secret").unwrap();
+        std::fs::write(from.join("inner").join("index.bin"), "bytes").unwrap();
+
+        // force the fallback path directly (same-fs rename would normally work)
+        super::copy_path(&from, &to).unwrap();
+        std::fs::remove_dir_all(&from).unwrap();
+
+        assert!(!from.exists());
+        assert_eq!(std::fs::read_to_string(to.join("keys.toml")).unwrap(), "secret");
+        assert_eq!(std::fs::read_to_string(to.join("inner").join("index.bin")).unwrap(), "bytes");
     }
 
     #[test]
