@@ -43,7 +43,11 @@ impl AppKind {
 /// Env var that overrides the platform root for one directory category:
 /// `SAPPHIRE_JOURNAL_CACHE_DIR` for ("sapphire-journal", "cache").
 pub fn app_dir_env_var(app_name: &str, category: &str) -> String {
-    format!("{}_{}_DIR", app_name.to_uppercase().replace('-', "_"), category.to_uppercase())
+    format!(
+        "{}_{}_DIR",
+        app_name.to_uppercase().replace('-', "_"),
+        category.to_uppercase()
+    )
 }
 
 /// Env var that names the workspace root for an app: `SAPPHIRE_JOURNAL_DIR`.
@@ -63,14 +67,15 @@ fn is_uuid_name(name: &str) -> bool {
 fn move_item(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(err) => copy_then_delete(from, to)
-            .map_err(|fallback_err| std::io::Error::other(format!(
+        Err(err) => copy_then_delete(from, to).map_err(|fallback_err| {
+            std::io::Error::other(format!(
                 "cross-device fallback move of {} to {} failed after rename failed ({}): {}",
                 from.display(),
                 to.display(),
                 err,
                 fallback_err
-            ))),
+            ))
+        }),
     }
 }
 
@@ -142,7 +147,9 @@ pub fn migrate_app_dir(app_dir: &Path, kind: AppKind) -> std::io::Result<PathBuf
     for entry in std::fs::read_dir(app_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name_str) = name.to_str().map(str::to_owned) else { continue };
+        let Some(name_str) = name.to_str().map(str::to_owned) else {
+            continue;
+        };
         if is_uuid_name(&name_str) && entry.file_type()?.is_dir() {
             move_item(&app_dir.join(&name_str), &kind_dir.join(&name_str))?;
         }
@@ -155,7 +162,11 @@ pub fn migrate_app_dir(app_dir: &Path, kind: AppKind) -> std::io::Result<PathBuf
 /// skipped when the data tree already has that workspace directory, which is
 /// what keeps this a once-ever migration (and protects an already-migrated
 /// `keys.toml` from being overwritten on later launches).
-pub fn migrate_keys_to_data(cache_app_dir: &Path, data_app_dir: &Path, kind: AppKind) -> std::io::Result<()> {
+pub fn migrate_keys_to_data(
+    cache_app_dir: &Path,
+    data_app_dir: &Path,
+    kind: AppKind,
+) -> std::io::Result<()> {
     let kind_str = kind.as_str();
     let (cache_kind, data_kind) = (cache_app_dir.join(kind_str), data_app_dir.join(kind_str));
     if !cache_kind.is_dir() || !data_kind.is_dir() {
@@ -164,7 +175,9 @@ pub fn migrate_keys_to_data(cache_app_dir: &Path, data_app_dir: &Path, kind: App
     let mut migrated_any = false;
     for entry in std::fs::read_dir(&cache_kind)? {
         let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
         if !is_uuid_name(&name) || !entry.file_type()?.is_dir() {
             continue;
         }
@@ -197,9 +210,18 @@ mod tests {
 
     #[test]
     fn env_var_names_follow_the_app_name_rule() {
-        assert_eq!(app_dir_env_var("sapphire-journal", "cache"), "SAPPHIRE_JOURNAL_CACHE_DIR");
-        assert_eq!(app_dir_env_var("sapphire-agent", "data"), "SAPPHIRE_AGENT_DATA_DIR");
-        assert_eq!(workspace_dir_env_var("sapphire-ledger"), "SAPPHIRE_LEDGER_DIR");
+        assert_eq!(
+            app_dir_env_var("sapphire-journal", "cache"),
+            "SAPPHIRE_JOURNAL_CACHE_DIR"
+        );
+        assert_eq!(
+            app_dir_env_var("sapphire-agent", "data"),
+            "SAPPHIRE_AGENT_DATA_DIR"
+        );
+        assert_eq!(
+            workspace_dir_env_var("sapphire-ledger"),
+            "SAPPHIRE_LEDGER_DIR"
+        );
     }
 
     #[test]
@@ -213,7 +235,11 @@ mod tests {
         let kind_dir = migrate_app_dir(&app_dir, AppKind::Server).unwrap();
 
         assert_eq!(kind_dir, app_dir.join("server"));
-        assert!(kind_dir.join("2f1c0000-0000-8000-8000-000000000000").is_dir());
+        assert!(
+            kind_dir
+                .join("2f1c0000-0000-8000-8000-000000000000")
+                .is_dir()
+        );
         assert!(!legacy.exists());
     }
 
@@ -243,12 +269,35 @@ mod tests {
         let uuid = "2f1c0000-0000-8000-8000-000000000000";
         std::fs::create_dir_all(cache.join("sapphire-ledger/server").join(uuid)).unwrap();
         std::fs::create_dir_all(data.join("sapphire-ledger/server")).unwrap();
-        std::fs::write(cache.join("sapphire-ledger/server").join(uuid).join("keys.toml"), "k").unwrap();
+        std::fs::write(
+            cache
+                .join("sapphire-ledger/server")
+                .join(uuid)
+                .join("keys.toml"),
+            "k",
+        )
+        .unwrap();
 
-        migrate_keys_to_data(&cache.join("sapphire-ledger"), &data.join("sapphire-ledger"), AppKind::Server).unwrap();
+        migrate_keys_to_data(
+            &cache.join("sapphire-ledger"),
+            &data.join("sapphire-ledger"),
+            AppKind::Server,
+        )
+        .unwrap();
 
-        assert!(data.join("sapphire-ledger/server").join(uuid).join("keys.toml").exists());
-        assert!(!cache.join("sapphire-ledger/server").join(uuid).join("keys.toml").exists());
+        assert!(
+            data.join("sapphire-ledger/server")
+                .join(uuid)
+                .join("keys.toml")
+                .exists()
+        );
+        assert!(
+            !cache
+                .join("sapphire-ledger/server")
+                .join(uuid)
+                .join("keys.toml")
+                .exists()
+        );
     }
 
     #[test]
@@ -263,15 +312,28 @@ mod tests {
         std::fs::create_dir_all(&data_uuid).unwrap();
         std::fs::write(cache_uuid.join("keys.toml"), "original").unwrap();
 
-        migrate_keys_to_data(&cache.join("sapphire-ledger"), &data.join("sapphire-ledger"), AppKind::Server).unwrap();
+        migrate_keys_to_data(
+            &cache.join("sapphire-ledger"),
+            &data.join("sapphire-ledger"),
+            AppKind::Server,
+        )
+        .unwrap();
         // the data tree now owns the (already-migrated) file
         std::fs::write(data_uuid.join("keys.toml"), "rotated").unwrap();
         std::fs::write(cache_uuid.join("keys.toml"), "stale").unwrap();
 
         // a second call must skip this uuid entirely — no overwrite, no error
-        migrate_keys_to_data(&cache.join("sapphire-ledger"), &data.join("sapphire-ledger"), AppKind::Server).unwrap();
+        migrate_keys_to_data(
+            &cache.join("sapphire-ledger"),
+            &data.join("sapphire-ledger"),
+            AppKind::Server,
+        )
+        .unwrap();
 
-        assert_eq!(std::fs::read_to_string(data_uuid.join("keys.toml")).unwrap(), "rotated");
+        assert_eq!(
+            std::fs::read_to_string(data_uuid.join("keys.toml")).unwrap(),
+            "rotated"
+        );
         assert!(cache_uuid.join("keys.toml").exists()); // untouched, not moved back
     }
 
@@ -293,8 +355,14 @@ mod tests {
         copy_then_delete(&from, &to).unwrap();
 
         assert!(!from.exists());
-        assert_eq!(std::fs::read_to_string(to.join("keys.toml")).unwrap(), "secret");
-        assert_eq!(std::fs::read_to_string(to.join("inner").join("index.bin")).unwrap(), "bytes");
+        assert_eq!(
+            std::fs::read_to_string(to.join("keys.toml")).unwrap(),
+            "secret"
+        );
+        assert_eq!(
+            std::fs::read_to_string(to.join("inner").join("index.bin")).unwrap(),
+            "bytes"
+        );
 
         // plain file (the keys.toml-between-mounts case): removing the
         // file source must not take the remove_dir_all path

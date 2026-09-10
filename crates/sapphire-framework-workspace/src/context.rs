@@ -100,7 +100,8 @@ impl AppContext {
         // Once-per-workspace secrets migration, once both trees exist:
         // keys.toml files move from the cache tree into the data tree (the
         // app dir is the parent of each per-kind directory).
-        let app_dir = |dir: &Option<PathBuf>| dir.as_deref().and_then(|p| p.parent().map(Path::to_owned));
+        let app_dir =
+            |dir: &Option<PathBuf>| dir.as_deref().and_then(|p| p.parent().map(Path::to_owned));
         if let (Some(cache_app), Some(data_app)) = (app_dir(&cache), app_dir(&data))
             && let Err(err) = migrate_keys_to_data(&cache_app, &data_app, kind)
         {
@@ -113,7 +114,12 @@ impl AppContext {
     /// [`migrate_app_dir`](crate::app_dirs::migrate_app_dir) on
     /// `<root>/<app_name>`.  `None` (with a warning) when the tree cannot be
     /// prepared.
-    fn init_category(&self, category: &str, kind: AppKind, platform_root: Option<PathBuf>) -> Option<PathBuf> {
+    fn init_category(
+        &self,
+        category: &str,
+        kind: AppKind,
+        platform_root: Option<PathBuf>,
+    ) -> Option<PathBuf> {
         let root = std::env::var(app_dir_env_var(self.app_name, category))
             .ok()
             .filter(|v| !v.is_empty())
@@ -124,7 +130,11 @@ impl AppContext {
         match migrate_app_dir(&app_dir, kind) {
             Ok(kind_dir) => Some(kind_dir),
             Err(err) => {
-                tracing::warn!("could not prepare the {} directory {}: {err}", category, app_dir.display());
+                tracing::warn!(
+                    "could not prepare the {} directory {}: {err}",
+                    category,
+                    app_dir.display()
+                );
                 None
             }
         }
@@ -234,9 +244,18 @@ mod tests {
         TestEnv::set("SAPPHIRE_TESTJOURNAL_CONFIG_DIR", config.path());
         let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal")));
         ctx.init(AppKind::Server);
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal").join("server"));
-        assert_eq!(ctx.data_dir(), data.path().join("sapphire-testjournal").join("server"));
-        assert_eq!(ctx.config_dir(), config.path().join("sapphire-testjournal").join("server"));
+        assert_eq!(
+            ctx.cache_dir(),
+            cache.path().join("sapphire-testjournal").join("server")
+        );
+        assert_eq!(
+            ctx.data_dir(),
+            data.path().join("sapphire-testjournal").join("server")
+        );
+        assert_eq!(
+            ctx.config_dir(),
+            config.path().join("sapphire-testjournal").join("server")
+        );
     }
 
     #[test]
@@ -246,12 +265,22 @@ mod tests {
         TestEnv::set("SAPPHIRE_TESTJOURNAL2_CACHE_DIR", cache.path());
         TestEnv::set("SAPPHIRE_TESTJOURNAL2_DATA_DIR", data.path());
         TestEnv::set("SAPPHIRE_TESTJOURNAL2_CONFIG_DIR", config.path());
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal2")));
+        let ctx: &'static AppContext =
+            Box::leak(Box::new(AppContext::new("sapphire-testjournal2")));
         ctx.init(AppKind::Server);
         ctx.init(AppKind::Cli); // first writer wins — no change
-        assert_eq!(ctx.cache_dir(), cache.path().join("sapphire-testjournal2").join("server"));
-        assert_eq!(ctx.data_dir(), data.path().join("sapphire-testjournal2").join("server"));
-        assert_eq!(ctx.config_dir(), config.path().join("sapphire-testjournal2").join("server"));
+        assert_eq!(
+            ctx.cache_dir(),
+            cache.path().join("sapphire-testjournal2").join("server")
+        );
+        assert_eq!(
+            ctx.data_dir(),
+            data.path().join("sapphire-testjournal2").join("server")
+        );
+        assert_eq!(
+            ctx.config_dir(),
+            config.path().join("sapphire-testjournal2").join("server")
+        );
     }
 
     #[test]
@@ -261,12 +290,22 @@ mod tests {
         let uuid = "2f1c0000-0000-8000-8000-000000000000";
         std::fs::create_dir_all(cache.path().join("sapphire-testjournal4").join(uuid)).unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL4_CACHE_DIR", cache.path());
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal4")));
+        let ctx: &'static AppContext =
+            Box::leak(Box::new(AppContext::new("sapphire-testjournal4")));
         ctx.init(AppKind::Cli);
         let kind_dir = cache.path().join("sapphire-testjournal4").join("cli");
         assert_eq!(ctx.cache_dir(), kind_dir);
-        assert!(kind_dir.join(uuid).is_dir(), "shared-layout UUID dir must move under the kind dir");
-        assert!(!cache.path().join("sapphire-testjournal4").join(uuid).exists());
+        assert!(
+            kind_dir.join(uuid).is_dir(),
+            "shared-layout UUID dir must move under the kind dir"
+        );
+        assert!(
+            !cache
+                .path()
+                .join("sapphire-testjournal4")
+                .join(uuid)
+                .exists()
+        );
     }
 
     #[test]
@@ -274,15 +313,27 @@ mod tests {
         let _env = TestEnv::lock();
         let (cache, data) = (tempdir().unwrap(), tempdir().unwrap());
         let uuid = "2f1c0000-0000-8000-8000-000000000000";
-        let cache_uuid = cache.path().join("sapphire-testjournal5").join("server").join(uuid);
+        let cache_uuid = cache
+            .path()
+            .join("sapphire-testjournal5")
+            .join("server")
+            .join(uuid);
         std::fs::create_dir_all(&cache_uuid).unwrap();
         std::fs::write(cache_uuid.join("keys.toml"), "secret").unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL5_CACHE_DIR", cache.path());
         TestEnv::set("SAPPHIRE_TESTJOURNAL5_DATA_DIR", data.path());
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal5")));
+        let ctx: &'static AppContext =
+            Box::leak(Box::new(AppContext::new("sapphire-testjournal5")));
         ctx.init(AppKind::Server);
-        let data_uuid = data.path().join("sapphire-testjournal5").join("server").join(uuid);
-        assert_eq!(std::fs::read_to_string(data_uuid.join("keys.toml")).unwrap(), "secret");
+        let data_uuid = data
+            .path()
+            .join("sapphire-testjournal5")
+            .join("server")
+            .join(uuid);
+        assert_eq!(
+            std::fs::read_to_string(data_uuid.join("keys.toml")).unwrap(),
+            "secret"
+        );
         assert!(!cache_uuid.join("keys.toml").exists());
     }
 
@@ -291,13 +342,18 @@ mod tests {
         let _env = TestEnv::lock();
         let cache = tempdir().unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL3_CACHE_DIR", cache.path());
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal3")));
+        let ctx: &'static AppContext =
+            Box::leak(Box::new(AppContext::new("sapphire-testjournal3")));
         ctx.init(AppKind::Cli);
         let root = tempdir().unwrap();
         let uuid = crate::path_uuid(root.path()).to_string();
         assert_eq!(
             ctx.cache_dir_for(root.path()),
-            cache.path().join("sapphire-testjournal3").join("cli").join(uuid)
+            cache
+                .path()
+                .join("sapphire-testjournal3")
+                .join("cli")
+                .join(uuid)
         );
     }
 
@@ -306,11 +362,16 @@ mod tests {
         let _env = TestEnv::lock();
         let cache = tempdir().unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL6_CACHE_DIR", cache.path());
-        let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-testjournal6")));
+        let ctx: &'static AppContext =
+            Box::leak(Box::new(AppContext::new("sapphire-testjournal6")));
         ctx.init(AppKind::Desktop);
         assert_eq!(
             ctx.model_cache_dir(),
-            cache.path().join("sapphire-testjournal6").join("desktop").join("models")
+            cache
+                .path()
+                .join("sapphire-testjournal6")
+                .join("desktop")
+                .join("models")
         );
     }
 }

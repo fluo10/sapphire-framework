@@ -366,11 +366,23 @@ mod resolve_tests {
     #[test]
     fn a_missing_env_directory_is_an_access_error() {
         let _env = TestEnv::lock();
-        TestEnv::set("SAPPHIRE_RESOLVEAPP6_DIR", std::path::Path::new("/nonexistent-sapphire-path-6f3a1c"));
+        TestEnv::set(
+            "SAPPHIRE_RESOLVEAPP6_DIR",
+            std::path::Path::new("/nonexistent-sapphire-path-6f3a1c"),
+        );
         let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-resolveapp6")));
         match Workspace::resolve(ctx, None) {
-            Err(Error::Access { path, .. }) => assert_eq!(path, std::path::PathBuf::from("/nonexistent-sapphire-path-6f3a1c")),
-            other => panic!("expected Error::Access, got a {} workspace", match other { Ok(w) => w.root.display().to_string(), Err(_) => "different error".into() }),
+            Err(Error::Access { path, .. }) => assert_eq!(
+                path,
+                std::path::PathBuf::from("/nonexistent-sapphire-path-6f3a1c")
+            ),
+            other => panic!(
+                "expected Error::Access, got a {} workspace",
+                match other {
+                    Ok(w) => w.root.display().to_string(),
+                    Err(_) => "different error".into(),
+                }
+            ),
         }
     }
 }

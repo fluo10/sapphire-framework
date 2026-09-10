@@ -1,4 +1,5 @@
 pub mod app_dirs;
+pub mod args;
 pub mod config;
 pub mod context;
 pub mod indexer;
@@ -9,7 +10,16 @@ mod error;
 #[cfg(test)]
 mod test_env;
 pub use app_dirs::AppKind;
+pub use args::WorkspaceArgs;
 pub use error::{Error, Result};
+
+// Re-exported so apps can depend on this crate alone: `WorkspaceArgs` below is
+// a clap `Args`, and `context` resolves platform directories through `dirs`
+// (issues #128/#129). Apps that depend on this crate alone get the same
+// clap/serde/dirs versions it builds with.
+pub use clap;
+pub use dirs;
+pub use serde;
 
 pub use config::{EmbeddingConfig, HybridConfig, RetrieveConfig, VectorDb};
 pub use context::AppContext;
