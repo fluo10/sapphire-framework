@@ -150,6 +150,44 @@ search.semantic     {ws, q, limit}                           -> 当面 fts フ�
 ローカルキャッシュへ pull/apply・push する。競合は MVP で LWW(`updated_at`)+tombstone+`conflicts`再pull。CRDT は後続。
 （旧 `ChangeSource`/`SyncBackend` 抽象は #90 で撤去。同期は中央サーバに一本化した。）
 
+## アプリディレクトリ構成と CLI 規約（#128 / #129）
+
+これまでの「**dirs 非依存**（プラットフォームディレクトリの解決はアプリ側の注入に
+任せる）」方針は**撤去**した。`dirs` は `sapphire-framework-workspace` の通常依存となり、
+`clap` / `serde` とともにファサードから re-export される
+（`sapphire_framework::{clap, serde, dirs}`）。ディレクトリ解決は framework 側の
+`AppContext::init(AppKind)` が吸収する（first-writer-wins は従来どおり）。
+
+**レイアウト（option B）**：cache / data / config の3階層とも
+`<プラットフォームルート>/<app-name>/<kind>/`（`kind` = `cli` / `server` / `desktop`）。
+プラットフォームルート（`dirs::cache_dir()` 等）が解決できない場合は
+`std::env::temp_dir()` にフォールバックする。`cache_dir_for(root)` の意味は不変で、
+結果としてキャッシュは `<app>/<kind>/<uuid>/` になる。
+
+**環境変数名は統一規約**：カテゴリ別のオーバーライドは
+`SAPPHIRE_<APP>_<CATEGORY>_DIR`（`CATEGORY` は `CACHE` / `DATA` / `CONFIG`）。
+env var が置換するのは**プラットフォームルートのみ**で、`<app>/<kind>` の階層は常に
+framework 側で適用される。ワークスペースルートは `SAPPHIRE_<APP>_DIR`。
+旧名（`SAPPHIRE_JOURNAL_SERVER_DIR` / `SAPPHIRE_LEDGER_SERVER_DIR` 等の `*_SERVER_*`）は
+1リリースサイクル `warn!` 付きで受け付ける（撤去は後続コミット）。
+
+**一回限りの移行**（`init` 内で実行・冪等・削除なし）:
+
+- **option A → B**（agent）: `<app>-<kind>` ディレクトリを `<app>/<kind>/` へ rename
+  （同一FSの `std::fs::rename` 優先。EXDEV 等の場合は copy + delete にフォールバック）。
+- **共有 → per-kind**（journal / ledger）: `<app>/` 直下の UUID 名ディレクトリを
+  `<kind>/` 直下へ移動。最初に起動した kind が移行し、以後の kind は空の独自ディレクトリを
+  作るだけ（キャッシュは再構築）。
+- **`keys.toml` は cache ツリーから data ツリーへ**（秘密情報であり再構築可能なキャッシュでは
+  ないため）。移行は cache 側の `<app>/<kind>/<uuid>/keys.toml` を data 側の同一パスへ
+  一回だけ移動する（UUID 単位のガードで移行済みデータの上書きはしない）。
+
+**CLI 引数の統一**：共通引数 `WorkspaceArgs`（clap の `Args`。アプリは
+`#[command(flatten)]` で組み込む）の正規名は `--workspace-dir`。旧名
+（`--journal-dir` / `--ledger-dir` / `--data-dir`）は clap alias として1サイクル受け付ける。
+解決順序は `Workspace::resolve` が担い、**明示引数 → `SAPPHIRE_<APP>_DIR` →
+撤去予定の `SAPPHIRE_WORKSPACE_DIR`（warn 付き）→ カレントディレクトリ** の順。
+
 ## 実装フェーズ
 
 - **Phase 0**（scaffold）✅: 履歴保持で crate 移設・`sapphire-framework-*` リネーム。

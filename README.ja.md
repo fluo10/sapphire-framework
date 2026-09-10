@@ -84,14 +84,15 @@ state.delete_file(Path::new("notes/old.md"))?;
 
 ## ワークスペースの検出
 
-ワークスペースルートは、マーカーディレクトリが見つかるまでディレクトリツリーを上へ辿ることで検出されます。すべての構築メソッドに`AppContext`を渡して`app_name`を設定すると、マーカーディレクトリとXDGキャッシュがホストアプリケーションの名前空間を使うようになります：
+ワークスペースルートは、マーカーディレクトリが見つかるまでディレクトリツリーを上へ辿ることで検出されます。すべての構築メソッドに`AppContext`を渡して`app_name`を設定すると、マーカーディレクトリとXDGキャッシュがホストアプリケーションの名前空間を使うようになります。スタートアップで一度`init(AppKind::…)`を呼び出すと、キャッシュ／データ／設定ディレクトリをプラットフォームルート以下のper-binary-typeレイアウト`<プラットフォームルート>/<app-name>/<kind>/`（`kind` = `cli`/`server`/`desktop`、first-writer-wins）に解決し、一回限りのディレクトリ移行を適用します：
 
 ```rust
-use sapphire_workspace::AppContext;
+use sapphire_workspace::{AppContext, AppKind};
 
 let ctx = AppContext::new("sapphire-journal");
+ctx.init(AppKind::Server);
 // marker: {root}/.sapphire-journal/
-// cache:  $XDG_CACHE_HOME/sapphire-journal/{uuid}/
+// cache:  $XDG_CACHE_HOME/sapphire-journal/server/{uuid}/
 ```
 
 ## 安定したワークスペースUUID
