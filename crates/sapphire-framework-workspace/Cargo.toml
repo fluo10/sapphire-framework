@@ -18,12 +18,14 @@ fastembed-embed = ["sapphire-retrieve/fastembed-embed"]
 sapphire-retrieve = { package = "sapphire-framework-retrieve", version = "0.14.0", path = "../sapphire-framework-retrieve", default-features = false }
 sapphire-track    = { package = "sapphire-framework-track", version = "0.14.0", path = "../sapphire-framework-track" }
 thiserror.workspace = true
+clap.workspace = true
 serde.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 indexmap.workspace = true
 walkdir = "2"
+dirs.workspace = true
 uuid.workspace = true
 chrono = { workspace = true }
 md-5 = "0.11"

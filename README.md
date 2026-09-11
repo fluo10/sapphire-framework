@@ -91,14 +91,18 @@ state.delete_file(Path::new("notes/old.md"))?;
 A workspace root is detected by walking up the directory tree until a
 marker directory is found.  Pass an `AppContext` to every construction
 method to set the `app_name` so that marker directories and XDG caches
-use the host application's namespace:
+use the host application's namespace.  Initialise the context once at
+startup with `init(AppKind::…)`; it resolves the cache / data / config
+directories to the per-binary-type layout `<platform-root>/<app-name>/<kind>/`
+(first writer wins) and applies the one-shot directory migration:
 
 ```rust
-use sapphire_workspace::AppContext;
+use sapphire_workspace::{AppContext, AppKind};
 
 let ctx = AppContext::new("sapphire-journal");
+ctx.init(AppKind::Server);
 // marker: {root}/.sapphire-journal/
-// cache:  $XDG_CACHE_HOME/sapphire-journal/{uuid}/
+// cache:  $XDG_CACHE_HOME/sapphire-journal/server/{uuid}/
 ```
 
 ## Stable workspace UUID
