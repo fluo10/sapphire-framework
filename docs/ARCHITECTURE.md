@@ -179,8 +179,11 @@ framework 側で適用される。ワークスペースルートは `SAPPHIRE_<A
   `<kind>/` 直下へ移動。最初に起動した kind が移行し、以後の kind は空の独自ディレクトリを
   作るだけ（キャッシュは再構築）。
 - **`keys.toml` は cache ツリーから data ツリーへ**（秘密情報であり再構築可能なキャッシュでは
-  ないため）。移行は cache 側の `<app>/<kind>/<uuid>/keys.toml` を data 側の同一パスへ
-  一回だけ移動する（UUID 単位のガードで移行済みデータの上書きはしない）。
+  ないため）。移行は最初に起動した kind の data ツリー `<app>/<kind>/<uuid>/keys.toml` へ
+  1回だけ行う（UUID 単位のガードで移行済みデータの上書きはしないため、アプリ全体で
+  コピーは常に1つだけ）。data ディレクトリ自体は per-kind なので、キーファイルの検索は
+  アプリ側が kind 非依存で行う（ワークスペース UUID の `keys.toml` を per-kind の
+  data ディレクトリから探す。この検索規約はアプリ移行 PR 側で実装する）。
 
 **CLI 引数の統一**：共通引数 `WorkspaceArgs`（clap の `Args`。アプリは
 `#[command(flatten)]` で組み込む）の正規名は `--workspace-dir`。旧名

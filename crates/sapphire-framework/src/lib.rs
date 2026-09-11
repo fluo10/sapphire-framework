@@ -75,8 +75,8 @@ pub use sapphire_framework_remote_server as remote_server;
 pub mod prelude {
     #[cfg(feature = "workspace")]
     pub use crate::workspace::{
-        AppContext, FileSearchResult, RetrieveConfig, RetrieveParams, SearchMode, Workspace,
-        WorkspaceArgs, WorkspaceState,
+        AppContext, AppKind, FileSearchResult, RetrieveConfig, RetrieveParams, SearchMode,
+        Workspace, WorkspaceArgs, WorkspaceState,
     };
 
     #[cfg(feature = "backend")]

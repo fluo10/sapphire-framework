@@ -120,7 +120,8 @@ impl Workspace {
     ///    falling back to the deprecated `SAPPHIRE_WORKSPACE_DIR`
     /// 3. Current working directory (TTY: ask for confirmation; non-TTY: use directly)
     ///
-    /// An env var that is set but empty falls through to the cwd.
+    /// An env var that is set but empty is treated as unset: the per-app env var
+    /// falls through to the deprecated global, and that to the cwd.
     pub fn resolve(ctx: &'static AppContext, explicit: Option<&Path>) -> Result<Self> {
         let root = match explicit {
             Some(dir) => dir.canonicalize().map_err(|e| Error::Access {

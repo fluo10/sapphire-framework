@@ -52,6 +52,37 @@ mod tests {
         }
     }
 
+    #[derive(Parser)]
+    struct Sub {
+        #[command(flatten)]
+        args: WorkspaceArgs,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum Cmd {
+        Sub(Box<Sub>),
+    }
+
+    #[derive(Parser)]
+    struct App {
+        #[command(subcommand)]
+        cmd: Option<Cmd>,
+    }
+
+    #[test]
+    fn global_flag_parses_after_a_subcommand() {
+        let app = App::try_parse_from(["app", "sub", "--workspace-dir", "/tmp/y"]).unwrap();
+        match app.cmd {
+            Some(Cmd::Sub(sub)) => {
+                assert_eq!(
+                    sub.args.workspace_dir.unwrap(),
+                    std::path::PathBuf::from("/tmp/y")
+                )
+            }
+            None => panic!("subcommand was not parsed"),
+        }
+    }
+
     #[test]
     fn absent_flag_is_none() {
         assert!(

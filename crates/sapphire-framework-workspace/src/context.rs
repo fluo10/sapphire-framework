@@ -123,7 +123,10 @@ impl AppContext {
         let root = std::env::var(app_dir_env_var(self.app_name, category))
             .ok()
             .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
+            .map(|v| {
+                let p = PathBuf::from(v);
+                p.clone().canonicalize().unwrap_or(p)
+            })
             .or(platform_root)
             .unwrap_or_else(std::env::temp_dir);
         let app_dir = root.join(self.app_name);
@@ -172,7 +175,7 @@ impl AppContext {
         self.cache_dir
             .get()
             .map(|p| p.as_path())
-            .expect("AppContext::set_cache_dir must be called at startup")
+            .expect("AppContext cache dir not initialised: init() failed for this category or was never called")
     }
 
     /// Compute the cache directory for a workspace rooted at `root`.
@@ -205,7 +208,7 @@ impl AppContext {
         self.data_dir
             .get()
             .map(|p| p.as_path())
-            .expect("AppContext::set_data_dir must be called at startup")
+            .expect("AppContext data dir not initialised: init() failed for this category or was never called")
     }
 
     /// Set the app config directory directly (see
@@ -224,7 +227,7 @@ impl AppContext {
         self.config_dir
             .get()
             .map(|p| p.as_path())
-            .expect("AppContext::set_config_dir must be called at startup")
+            .expect("AppContext config dir not initialised: init() failed for this category or was never called")
     }
 }
 
@@ -286,10 +289,12 @@ mod tests {
     #[test]
     fn init_moves_legacy_shared_uuid_dirs_under_the_kind_directory() {
         let _env = TestEnv::lock();
-        let cache = tempdir().unwrap();
+        let (cache, data, config) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
         let uuid = "2f1c0000-0000-8000-8000-000000000000";
         std::fs::create_dir_all(cache.path().join("sapphire-testjournal4").join(uuid)).unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL4_CACHE_DIR", cache.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL4_DATA_DIR", data.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL4_CONFIG_DIR", config.path());
         let ctx: &'static AppContext =
             Box::leak(Box::new(AppContext::new("sapphire-testjournal4")));
         ctx.init(AppKind::Cli);
@@ -312,6 +317,7 @@ mod tests {
     fn init_moves_keys_toml_from_the_cache_tree_into_the_data_tree() {
         let _env = TestEnv::lock();
         let (cache, data) = (tempdir().unwrap(), tempdir().unwrap());
+        let config = tempdir().unwrap();
         let uuid = "2f1c0000-0000-8000-8000-000000000000";
         let cache_uuid = cache
             .path()
@@ -322,6 +328,7 @@ mod tests {
         std::fs::write(cache_uuid.join("keys.toml"), "secret").unwrap();
         TestEnv::set("SAPPHIRE_TESTJOURNAL5_CACHE_DIR", cache.path());
         TestEnv::set("SAPPHIRE_TESTJOURNAL5_DATA_DIR", data.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL5_CONFIG_DIR", config.path());
         let ctx: &'static AppContext =
             Box::leak(Box::new(AppContext::new("sapphire-testjournal5")));
         ctx.init(AppKind::Server);
@@ -340,8 +347,10 @@ mod tests {
     #[test]
     fn cache_dir_for_appends_the_workspace_uuid() {
         let _env = TestEnv::lock();
-        let cache = tempdir().unwrap();
+        let (cache, data, config) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
         TestEnv::set("SAPPHIRE_TESTJOURNAL3_CACHE_DIR", cache.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL3_DATA_DIR", data.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL3_CONFIG_DIR", config.path());
         let ctx: &'static AppContext =
             Box::leak(Box::new(AppContext::new("sapphire-testjournal3")));
         ctx.init(AppKind::Cli);
@@ -360,8 +369,10 @@ mod tests {
     #[test]
     fn model_cache_dir_is_under_the_kind_cache_directory() {
         let _env = TestEnv::lock();
-        let cache = tempdir().unwrap();
+        let (cache, data, config) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
         TestEnv::set("SAPPHIRE_TESTJOURNAL6_CACHE_DIR", cache.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL6_DATA_DIR", data.path());
+        TestEnv::set("SAPPHIRE_TESTJOURNAL6_CONFIG_DIR", config.path());
         let ctx: &'static AppContext =
             Box::leak(Box::new(AppContext::new("sapphire-testjournal6")));
         ctx.init(AppKind::Desktop);
