@@ -119,7 +119,9 @@ fn place(staged: &Path, dest: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(e.into());
     }
-    fs::remove_file(staged)?;
+    // The file is in place; the staged copy is a cache. Failing to remove it must not
+    // turn a completed placement into an error and leave the state uncommitted.
+    let _ = fs::remove_file(staged);
     Ok(())
 }
 
