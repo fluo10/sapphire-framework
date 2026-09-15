@@ -32,16 +32,22 @@ pub fn rel_from_native(root: &Path, abs: &Path) -> Option<String> {
 }
 
 /// A well-formed workspace-relative POSIX path that cannot escape the root.
+/// Rejects paths with drive-letter prefixes in any segment (e.g., `C:`, `x:`) to prevent
+/// escaping on Windows, where `PathBuf::push` replaces the whole path if given a drive prefix.
 pub fn is_valid_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
         return false;
     }
-    let first = rel.split('/').next().unwrap_or_default().as_bytes();
-    if first.len() >= 2 && first[0].is_ascii_alphabetic() && first[1] == b':' {
-        return false;
-    }
-    rel.split('/')
-        .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    rel.split('/').all(|seg| {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+        let bytes = seg.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return false;
+        }
+        true
+    })
 }
 
 /// Whether this OS can hold a file at `rel`.
@@ -101,7 +107,8 @@ mod tests {
             assert!(is_valid_rel(ok), "{ok}");
         }
         for bad in [
-            "", "/a", "a\\b", "C:/x", "c:x", "a//b", "./a", "a/../b", "a/.",
+            "", "/a", "a\\b", "C:/x", "c:x", "a//b", "./a", "a/../b", "a/.", "a/C:/b", "a/c:x",
+            "dir/Z:",
         ] {
             assert!(!is_valid_rel(bad), "{bad}");
         }
