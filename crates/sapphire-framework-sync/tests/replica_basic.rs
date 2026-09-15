@@ -160,6 +160,15 @@ fn malformed_updates_are_ignored() {
     let report = b.replica.apply(&[update], &a.replica).unwrap();
     assert_eq!(report.changed, 0);
     assert!(b.replica.states().unwrap().is_empty());
+
+    // A dot with counter 0 has no predecessor for `disk.seen` to pin a loser at.
+    let mut zeroed: PathUpdate = a.replica.delta_for(b.replica.vv()).unwrap().remove(0);
+    for v in &mut zeroed.versions {
+        v.dot.counter = 0;
+    }
+    let report = b.replica.apply(&[zeroed], &a.replica).unwrap();
+    assert_eq!(report.changed, 0);
+    assert!(b.replica.states().unwrap().is_empty());
 }
 
 #[test]

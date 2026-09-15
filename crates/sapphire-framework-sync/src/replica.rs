@@ -320,9 +320,14 @@ impl Replica {
         let mut report = Report::default();
         let now = self.clock.now_ms();
         for update in updates {
+            // A counter of 0 is not a dot any replica assigns (`next_entry` increments
+            // first), and it has no predecessor for `disk_seen` to pin a loser at.
             let well_formed = paths::is_valid_rel(&update.path)
                 && !update.versions.is_empty()
-                && update.versions.iter().all(|v| v.path == update.path);
+                && update
+                    .versions
+                    .iter()
+                    .all(|v| v.path == update.path && v.dot.counter > 0);
             if !well_formed {
                 tracing::warn!(path = %update.path, "ignoring a malformed path update");
                 continue;
@@ -715,7 +720,7 @@ impl Replica {
             }
             if self.store.get(&copy_rel)?.is_none() {
                 let slot = seen.0.entry(loser.dot.replica).or_insert(0);
-                *slot = (*slot).min(loser.dot.counter - 1);
+                *slot = (*slot).min(loser.dot.counter.saturating_sub(1));
             }
         }
         Ok(seen)
