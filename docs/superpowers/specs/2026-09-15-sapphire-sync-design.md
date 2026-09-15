@@ -5,7 +5,7 @@
   `sapphire-framework` repository; a one-line addition to `CONTRIBUTING.md`; release-plz
   configuration
 - Depends on: [`2026-09-15-p2p-sync-iroh-design.md`](./2026-09-15-p2p-sync-iroh-design.md)
-  (called "the framework spec" below). Everything about replication, meshes, pairing,
+  (called "the framework spec" below). Everything about replication, groups, pairing,
   the node directory, `NodeCommand` and `ServiceCommand` is defined there; this spec only
   covers the application.
 
@@ -19,7 +19,7 @@ serves three roles:
 1. **Reference implementation and E2E test bed** of the framework's `sync` / `net` crates,
    and proof that they work without `-workspace`'s search stack (`-retrieve`).
 2. **Headless node for servers** — the always-on peer (and, with the embedded relay, the
-   relay) of a mesh. It can be the production central server.
+   relay) of a group. It can be the production central server.
 3. **Dedicated background sync service** on everyday machines (the framework spec's
    dedicated service mode, `embedded_node = false`) — the role iCloud's background daemon
    plays for apps.
@@ -79,8 +79,8 @@ crate name."
 | command | kind | behaviour |
 |---|---|---|
 | `sapphire-sync` (no subcommand; `run` is an equivalent explicit form) | server | Runs the node as a **dedicated** holder: tries the lock regardless of `embedded_node`, retries every 10 s while another process holds it, logs to stdout and to the shared `node.log`. |
-| `sapphire-sync init <path> [--name <name>] [--mesh <name\|id>]` | cli | Turns a directory into a sapphire-sync workspace and shares it (below). |
-| framework `NodeCommand` | cli | `sync`, `node status`, `node log [--follow]`, `mesh create` / `join` / `list`, `device invite` / `list` / `retire`, `workspace list` / `share` / `map` / `unmap`. |
+| `sapphire-sync init <path> [--name <name>] [--group <name\|id>]` | cli | Turns a directory into a sapphire-sync workspace and shares it (below). |
+| framework `NodeCommand` | cli | `sync`, `node status`, `node log [--follow]`, `group create` / `join` / `list`, `device invite` / `list` / `retire`, `workspace list` / `share` / `map` / `unmap`. |
 | `sapphire-sync service install` / `uninstall` / `status` | cli | framework `ServiceCommand` (§3). |
 
 `init <path>`:
@@ -89,14 +89,14 @@ crate name."
 2. If `<path>/.sapphireignore` does not exist, write a template that is only comments:
    what the file does, gitignore syntax, that it is synced to every device, and two
    commented-out examples (`*.tmp`, `node_modules/`).
-3. Call the framework's `share_workspace(mesh, "sapphire-sync", path, name)`; `name`
+3. Call the framework's `share_workspace(group, "sapphire-sync", path, name)`; `name`
    defaults to the directory name.
 
 It is sapphire-sync's name for `workspace share`, which remains available and behaves the
 same for a directory that already has the marker.
 
 **Hosting other apps' workspaces**: `workspace map <name|id> <dir>` takes `app_name` from
-the mesh listing and creates that app's marker (e.g. `.journal/`). Filtering uses the
+the group listing and creates that app's marker (e.g. `.journal/`). Filtering uses the
 framework's built-in rule for that app name, so no app code is needed.
 
 **Node lifecycle** (`sapphire-sync` / `sapphire-sync run`):
@@ -133,9 +133,9 @@ system-wide install off Linux) is the framework's behaviour.
 
 ```
 server$ sudo sapphire-sync service install              # system unit, User=alice
-server$ sapphire-sync mesh create --name home
+server$ sapphire-sync group create --name home
 server$ sapphire-sync device invite --name laptop       # prints a ticket
-laptop$ sapphire-sync mesh join <ticket>
+laptop$ sapphire-sync group join <ticket>
 laptop$ sapphire-sync init ~/Documents/notes            # workspace "notes"
 server$ sapphire-sync workspace list                     # notes appears
 server$ sapphire-sync workspace map notes /srv/sync/notes
@@ -143,7 +143,7 @@ server$ sapphire-sync workspace map notes /srv/sync/notes
 
 README sections (English and Japanese, cross-linked at the top, per `CONTRIBUTING.md`):
 quick start; server setup (system-wide install, `loginctl enable-linger` for user units,
-embedded relay and publishing relay URLs to the mesh); hosting other apps' workspaces;
+embedded relay and publishing relay URLs to the group); hosting other apps' workspaces;
 `.sapphireignore`; how conflicts appear (conflict copies); checking status and logs
 (`node status`, `node log --follow`, which process runs the node).
 
@@ -163,7 +163,7 @@ Harness:
 
 Scenarios:
 
-1. **Pair and propagate**: `mesh create` → `device invite` → `mesh join` → `init` →
+1. **Pair and propagate**: `group create` → `device invite` → `group join` → `init` →
    `workspace map`; files created, modified and deleted on either host appear on the other.
 2. **Conflict copy**: stop both nodes, edit the same file differently on each, restart;
    both hosts end with the same winner and one `*.conflict-<grain-id>-<n>.*` copy.

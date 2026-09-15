@@ -1,6 +1,6 @@
 # Peer-to-peer workspace sync over iroh
 
-- Date: 2026-09-15 (revised the same day: shared host node, device meshes, single user, grain-id identifiers, service installation)
+- Date: 2026-09-15 (revised the same day: shared host node, sync groups, single user, grain-id identifiers, service installation)
 - Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-net`, `-keys`, `-service`;
   changes to `-registry`, `-backend`, the facade; removal of `-rpc`, `-remote-client`,
   `-remote-server`, `-blob`
@@ -43,7 +43,7 @@ What does not fit, and must be redesigned:
 | LWW on client wall clock (`updated_at`) | Hybrid logical clock + replica id tie-break |
 | `generation` to detect a recreated log | Unnecessary (state-based delta sync) |
 | Server-only fix-ups (journal `dedupe.rs`, ledger `reconcile`) | External-edit detection on every node; app fix-ups as content-deterministic rules inside each app |
-| API keys (`keys.toml`) for sync, per app | One host `NodeId` checked against a cross-app device mesh; pairing tickets |
+| API keys (`keys.toml`) for sync, per app | One host `NodeId` checked against a cross-app sync group; pairing tickets |
 | Users + devices | Devices only (single user) |
 
 ## Decisions
@@ -80,12 +80,12 @@ Agreed during brainstorming on 2026-09-15:
    processes only touch files and take over when the lock frees. No handoff protocol, no
    daemon requirement. Where a shared directory is impossible (mobile sandboxes), each app
    keeps its own directory and becomes its own device — same mechanism, different location.
-9. **Devices form cross-app meshes.** A device pairs into a mesh once and can then host any
-   of that mesh's workspaces; each device chooses which workspaces it keeps a copy of
-   (`workspace map`). Layout, wire format and authorization support a host in several meshes
+9. **Devices form cross-app sync groups.** A device pairs into a group once and can then host any
+   of that group's workspaces; each device chooses which workspaces it keeps a copy of
+   (`workspace map`). Layout, wire format and authorization support a host in several groups
    (e.g. work and personal); the first release's CLI limits a host to one.
-10. **User-visible identifiers are grain-ids** (`mesh_id`, `workspace_id`, `device_id`, ids
-    in file names); only the internal `ReplicaId` stays a UUID (§2.1). Workspaces and meshes
+10. **User-visible identifiers are grain-ids** (`group_id`, `workspace_id`, `device_id`, ids
+    in file names); only the internal `ReplicaId` stays a UUID (§2.1). Workspaces and groups
     can also be selected by name.
 11. **`sapphire-framework-service`** provides `service install` for any app: user-level
     units by default, a system-wide systemd unit when run as root on Linux, with a per-app
@@ -112,7 +112,7 @@ Agreed during brainstorming on 2026-09-15:
 | crate | role | depends on |
 |---|---|---|
 | `sapphire-framework-sync` | Replication core, **transport-agnostic**: wire types, `ReplicaStore` (redb), merge rules, HLC, conflict copies, declarative filtering, external-edit detection via `TrackStore` | serde, redb, sha2, ignore, `-track` |
-| `sapphire-framework-net` | Shared node directory and lock, iroh `Endpoint`, protocol handlers (`sync`, `blob`, `pair`), authorization against the mesh, discovery and relay configuration, `SyncNode` runtime, file watcher, workspace registration API, `NodeCommand` CLI subcommands (feature `cli`), embedded relay (feature `embedded-relay`) | iroh 1.x, `-sync`, `-registry` |
+| `sapphire-framework-net` | Shared node directory and lock, iroh `Endpoint`, protocol handlers (`sync`, `blob`, `pair`), authorization against the group, discovery and relay configuration, `SyncNode` runtime, file watcher, workspace registration API, `NodeCommand` CLI subcommands (feature `cli`), embedded relay (feature `embedded-relay`) | iroh 1.x, `-sync`, `-registry` |
 | `sapphire-framework-keys` | `KeyStore` / `KeyEntry` / `protect`, moved out of `-remote-server` (#103). For non-sync HTTP endpoints | serde, toml, axum (feature) |
 | `sapphire-framework-service` | `ServiceCommand` (`service install` / `uninstall` / `status`) and `ServiceSpec`: registers an app's long-running command with the OS service manager (§5.5). Not sync-specific; reused by `sapphire-sync`, `sapphire-agent`, … | clap, `-workspace` (`AppContext`) |
 
@@ -181,9 +181,9 @@ File metadata (mtime, permissions) is not synced. Adding it later as a
 `#[serde(default)]` field does not break the wire format.
 
 A replica is opened from its registration (§3.2):
-`ReplicaConfig { mesh_id: GrainId, app_name, workspace_id: GrainId, root: PathBuf, max_file_size: u64 /* default 64 MiB */ }`.
+`ReplicaConfig { group_id: GrainId, app_name, workspace_id: GrainId, root: PathBuf, max_file_size: u64 /* default 64 MiB */ }`.
 
-**Identifier policy.** Identifiers a user can see or type (`mesh_id`, `workspace_id`,
+**Identifier policy.** Identifiers a user can see or type (`group_id`, `workspace_id`,
 `device_id`, and ids embedded in file names) are grain-ids. `ReplicaId` stays a UUID: it is
 never typed, and a collision would reuse dots, which is unrecoverable, so it gets the wider
 id space. Where a replica must appear in a file name, it is shown as a grain-id derived from
@@ -298,7 +298,7 @@ Skipped paths are reported in `status.json` (§3.1).
 Tombstone GC (possible once every active device's reported version vector covers the
 tombstone), first-class moves/renames, per-file-type merge, chunked/resumable transfer.
 
-## 3. Host node, mesh and pairing (`sapphire-framework-net`)
+## 3. Host node, group and pairing (`sapphire-framework-net`)
 
 ### 3.1 The shared node directory
 
@@ -308,15 +308,15 @@ tombstone), first-class moves/renames, per-file-type merge, chunked/resumable tr
     node.key                               # iroh secret key -> this device's NodeId
     node.lock                              # OS file lock, held by the process running the node
     net.toml                               # host-local network config (discovery, relays, embedded relay)
-    workspaces.toml                        # workspaces this host keeps: {mesh_id, id, app_name, root, max_file_size}
+    workspaces.toml                        # workspaces this host keeps: {group_id, id, app_name, root, max_file_size}
     invites.toml                           # pending pairing invites
     status.json                            # written by the running node, including who runs it
     logs/node.log                          # sync log, written by whichever process runs the node
     staging/
     replicas/<workspace-id>/sync.redb
-    meshes/<mesh-id>/                      # one directory per mesh this host belongs to (§3.5)
-        replica/sync.redb                  #   replica store of the mesh workspace itself
-        root/                              #   the mesh workspace's files, synced among its devices
+    groups/<group-id>/                      # one directory per group this host belongs to (§3.5)
+        replica/sync.redb                  #   replica store of the group workspace itself
+        root/                              #   the group workspace's files, synced among its devices
 ```
 
 It is framework-wide: it carries no app name and no kind. This sits outside the per-app,
@@ -327,7 +327,7 @@ for a different path (two copies of a workspace with the same id on one host).
 
 **Environments without a shared directory** (mobile app sandboxes, or an app configured
 with its own `SAPPHIRE_NODE_DIR`) simply use a private directory. The app then is its own
-device in the mesh (e.g. `phone-journal` and `phone-ledger`). If the platform later offers a
+device in the group (e.g. `phone-journal` and `phone-ledger`). If the platform later offers a
 shared container (e.g. an iOS App Group), pointing both apps at it merges them into one
 device with no other change.
 
@@ -344,15 +344,15 @@ newer app. A process that finds an older format migrates it (idempotently) befor
   its content is the same on every device, so it never conflicts. Re-registering a
   workspace (e.g. after losing the node directory) reads the existing id. Cache keys keep
   using the path-derived UUID.
-- **Share** (a new workspace): `net::share_workspace(mesh, app_name, root, name)` reads or
-  creates `sync-id` (a fresh grain-id that is not already listed in the mesh), adds an entry
-  to `workspaces.toml`, and publishes `{app_name, name}` to the mesh's
+- **Share** (a new workspace): `net::share_workspace(group, app_name, root, name)` reads or
+  creates `sync-id` (a fresh grain-id that is not already listed in the group), adds an entry
+  to `workspaces.toml`, and publishes `{app_name, name}` to the group's
   `workspaces/<workspace-id>.toml`. `name` defaults to the root directory's name. Apps call
   it when the user enables sync for a workspace.
 - **Map** (an existing workspace onto a local directory): `workspace map <name|id> <dir>`
-  looks the workspace up in the mesh, creates `<dir>` and its marker `.<app_name>/` with
+  looks the workspace up in the group, creates `<dir>` and its marker `.<app_name>/` with
   `sync-id`, and adds the `workspaces.toml` entry. **Unmap** (`workspace unmap <name|id>`)
-  removes the entry; local files stay, and the workspace stays listed in the mesh.
+  removes the entry; local files stay, and the workspace stays listed in the group.
 - **Selectors** follow the registry's rule: a selector matches a name first, then parses as a
   grain-id; a name shared by several workspaces cannot be used as a selector.
 - The running node watches `workspaces.toml` and opens or closes replicas as entries
@@ -405,60 +405,60 @@ ALPNs are common to every app:
 |---|---|
 | `sapphire/sync/1` | replication (§3.7) |
 | `sapphire/blob/1` | `{workspace_id, hash}` → bytes; requester verifies SHA-256 |
-| `sapphire/pair/1` | joining a mesh (§3.6) |
+| `sapphire/pair/1` | joining a group (§3.6) |
 
 Messages are length-delimited postcard frames.
 
-### 3.5 Meshes and authorization
+### 3.5 Groups and authorization
 
-A mesh is a group of devices that share workspaces. **The data model, on-disk layout and
-wire format support a host belonging to several meshes** (e.g. a laptop in both a "work"
-and a "personal" mesh, while a work-only machine sees only the work mesh). In the first
-release the CLI allows **one** mesh per host: `mesh create` / `mesh join` refuse when the
-host already belongs to a mesh. Lifting that limit is a CLI change, not a format change.
+A **sync group** ("group" in the CLI; `SyncGroup` / `group_id` in code) is a set of devices that share workspaces. **The data model, on-disk layout and
+wire format support a host belonging to several groups** (e.g. a laptop in both a "work"
+and a "personal" group, while a work-only machine sees only the work group). In the first
+release the CLI allows **one** group per host: `group create` / `group join` refuse when the
+host already belongs to a group. Lifting that limit is a CLI change, not a format change.
 
-- A mesh is identified by a `mesh_id` (grain-id) and has a `name`, both chosen by the device
+- A group is identified by a `group_id` (grain-id) and has a `name`, both chosen by the device
   that creates it.
-- Each mesh's workspace (`meshes/<mesh-id>/root/`) is synced among that mesh's devices,
+- Each group's workspace (`groups/<group-id>/root/`) is synced among that group's devices,
   always. It holds:
-  - `mesh.toml` — `{name}`;
+  - `group.toml` — `{name}`;
   - `devices/<grain-id>.toml` — `{name, node_id, retired_at?}`, one file per device, so
     concurrent pairings on different devices never collide in one file;
   - `workspaces/<workspace-id>.toml` — `{app_name, name}`;
-  - `net.toml` — optional relay URLs published to the mesh (§3.8).
-- **Every workspace belongs to exactly one mesh** (`workspaces.toml` records `mesh_id`).
-- **Device ids are per mesh.** One host has one `NodeId` but a separate device record, and
-  so a separate `device_id`, in each mesh it belongs to. `Entry.author` is the device id in
-  the workspace's mesh.
-- **Founding device**: creating a mesh writes the device's own record, so it has a
+  - `net.toml` — optional relay URLs published to the group (§3.8).
+- **Every workspace belongs to exactly one group** (`workspaces.toml` records `group_id`).
+- **Device ids are per group.** One host has one `NodeId` but a separate device record, and
+  so a separate `device_id`, in each group it belongs to. `Entry.author` is the device id in
+  the workspace's group.
+- **Founding device**: creating a group writes the device's own record, so it has a
   `device_id` to use as `Entry.author` before its first sync.
 - **Authorization**: a connection is accepted if the remote `NodeId` belongs to a
-  non-retired device of **at least one mesh this host also belongs to**. Only workspaces of
-  meshes both sides share are exchanged. There is no per-workspace permission inside a mesh
+  non-retired device of **at least one group this host also belongs to**. Only workspaces of
+  groups both sides share are exchanged. There is no per-workspace permission inside a group
   (single user).
-- **Revocation**: retiring a device is a change to that mesh; as it replicates, every node
-  stops exchanging that mesh's workspaces with the device, and drops the connection once
-  no shared mesh remains.
-- Attribution of mesh changes comes from the sync `Entry` (`author`, `hlc`).
-- **Mesh selectors** (`--mesh <name|id>`) use the same name-first rule as workspaces. The
-  flag may be omitted while the host belongs to a single mesh.
+- **Revocation**: retiring a device is a change to that group; as it replicates, every node
+  stops exchanging that group's workspaces with the device, and drops the connection once
+  no shared group remains.
+- Attribution of group changes comes from the sync `Entry` (`author`, `hlc`).
+- **Group selectors** (`--group <name|id>`) use the same name-first rule as workspaces. The
+  flag may be omitted while the host belongs to a single group.
 
 ### 3.6 Pairing
 
-1. **Invite** (on any device): `device invite --name phone [--mesh <name|id>]` creates a ticket encoding
-   `{mesh_id, inviter NodeAddr, secret: 32 random bytes, expires_at}` (postcard, base32,
+1. **Invite** (on any device): `device invite --name phone [--group <name|id>]` creates a ticket encoding
+   `{group_id, inviter NodeAddr, secret: 32 random bytes, expires_at}` (postcard, base32,
    prefixed `sapphire:`). The invite goes to `invites.toml`: single use, default TTL
    10 minutes. The holder re-reads the file on each pairing attempt, so any process can
    issue invites. If no process holds the lock, the inviting CLI takes it and runs the node
    in the foreground until the invite is used or expires.
-2. **Join** (on the new device): `mesh join <ticket>` connects over `pair/1` and sends the
+2. **Join** (on the new device): `group join <ticket>` connects over `pair/1` and sends the
    secret and the proposed device name.
 3. **Admit** (holder on the inviter's host): verify the secret in constant time, check
    expiry and unused status, write the device record (with `node_id`) as a local write,
-   mark the invite used, reply `{mesh_id, device_id}`.
-4. **Sync**: the joiner syncs the mesh workspace and can then `workspace map` any listed
+   mark the invite used, reply `{group_id, device_id}`.
+4. **Sync**: the joiner syncs the group workspace and can then `workspace map` any listed
    workspace.
-   At first only the inviter knows the new device; other devices accept it once the mesh
+   At first only the inviter knows the new device; other devices accept it once the group
    change reaches them.
 
 ### 3.7 Connections and sessions
@@ -466,11 +466,11 @@ host already belongs to a mesh. Lifting that limit is a CLI change, not a format
 Per connection (bidirectional control stream):
 
 1. Both sides send
-   `Hello { meshes: [{ mesh_id, device_id, hosted: [(workspace_id, app_name)] }] }`, listing
-   only meshes the peer's `NodeId` is authorized for (a node does not reveal meshes the
-   peer is not in). No shared mesh closes the connection with a reason (logged, not
+   `Hello { groups: [{ group_id, device_id, hosted: [(workspace_id, app_name)] }] }`, listing
+   only groups the peer's `NodeId` is authorized for (a node does not reveal groups the
+   peer is not in). No shared group closes the connection with a reason (logged, not
    retried).
-2. For each workspace both sides host in a shared mesh — including each shared mesh's own
+2. For each workspace both sides host in a shared group — including each shared group's own
    workspace — a dedicated stream runs a session:
    1. Both sides send `SessionHello { workspace_id, replica_id, vv }`.
    2. Each side sends, in pages, every `cur` entry whose dot is not covered by the peer's
@@ -481,7 +481,7 @@ Per connection (bidirectional control stream):
       simply resent next time.
    4. Missing larger content is fetched over `blob/1`.
    5. The stream stays open for live propagation (§4.2).
-3. Workspaces registered later on either side, and changes in shared meshes, are announced
+3. Workspaces registered later on either side, and changes in shared groups, are announced
    on the control stream; sessions start or stop accordingly.
 
 ### 3.8 Endpoint configuration (`net.toml`, host-local)
@@ -489,8 +489,8 @@ Per connection (bidirectional control stream):
 - **Discovery**: n0 DNS (pkarr) and local-network mDNS, both on by default; static
   addresses may be added.
 - **Relays**: n0 default, custom URLs, or disabled. Custom relay URLs may also be published
-  in a mesh's `net.toml` (synced), so installing one server makes every device of that mesh
-  use its relay. A host in several meshes uses the union.
+  in a group's `net.toml` (synced), so installing one server makes every device of that group
+  use its relay. A host in several groups uses the union.
 - **Embedded relay** (`[relay.embedded]`): runs iroh-relay in-process, TLS via ACME or
   supplied certificates. Honoured only by binaries built with feature `embedded-relay`
   (in practice `sapphire-sync` on a server); a holder built without it logs a warning.
@@ -501,7 +501,7 @@ Per connection (bidirectional control stream):
 
 Run by the lock holder. It:
 
-- owns the iroh `Endpoint` and one replica per registered workspace, plus one per mesh;
+- owns the iroh `Endpoint` and one replica per registered workspace, plus one per group;
 - tracks, per session, the peer's last known version vector;
 - watches every registered root (`notify`, debounced) plus a periodic full scan
   (default 5 min). Its own materializations match `materialized` and are not mistaken for
@@ -515,9 +515,9 @@ an error state. The app keeps running in follower mode.
 
 ### 4.2 Dialing and live propagation
 
-- **Dial**: every non-retired device of every mesh this host belongs to (one connection per
-  remote `NodeId`, however many meshes are shared), plus mDNS-discovered devices of those
-  meshes. Full mesh — device counts are small. Exponential backoff, max 5 min.
+- **Dial**: every non-retired device of every group this host belongs to (one connection per
+  remote `NodeId`, however many groups are shared), plus mDNS-discovered devices of those
+  groups. Every device dials every other — device counts are small. Exponential backoff, max 5 min.
 - **Live**: after the initial exchange, sessions stay open. Local commits are pushed to all
   connected peers hosting that workspace. Entries received from one peer that changed state
   are forwarded to other connected peers whose known version vector does not cover them, so
@@ -556,7 +556,7 @@ Whether a cli syncs automatically after write commands is the app's choice.
 ### 4.5 Errors
 
 - Session errors are logged; the connection is dropped and redialed with backoff.
-- Mesh mismatches and unauthorized `NodeId`s are rejected with a reason and logged; they
+- Group mismatches and unauthorized `NodeId`s are rejected with a reason and logged; they
   are not retried.
 - A replica that fails to open (format too new, root path mismatch, I/O) is reported in
   `status.json` and skipped; other workspaces keep syncing.
@@ -588,16 +588,16 @@ through sync.
 |---|---|
 | `sync` | one-shot sync (§4.3) |
 | `node status`, `node log [--follow]` | holder, peers, per-workspace state; shared sync log |
-| `mesh create --name <name>`, `mesh join <ticket>`, `mesh list` | create or join a mesh (one per host in the first release) |
-| `device invite --name <name>`, `device list`, `device retire <name\|id>` | pairing and revocation, in the selected mesh |
-| `workspace list` | name, grain-id, app, mesh, local directory (`-` if unmapped) |
-| `workspace share <path> [--name <name>]` | publish a local workspace to the mesh |
-| `workspace map <name\|id> <dir>` | place an existing mesh workspace in a local directory |
-| `workspace unmap <name\|id>` | stop keeping it locally (files and mesh listing stay) |
+| `group create --name <name>`, `group join <ticket>`, `group list` | create or join a group (one per host in the first release) |
+| `device invite --name <name>`, `device list`, `device retire <name\|id>` | pairing and revocation, in the selected group |
+| `workspace list` | name, grain-id, app, group, local directory (`-` if unmapped) |
+| `workspace share <path> [--name <name>]` | publish a local workspace to the group |
+| `workspace map <name\|id> <dir>` | place an existing group workspace in a local directory |
+| `workspace unmap <name\|id>` | stop keeping it locally (files and group listing stay) |
 
-Commands acting on a mesh take `--mesh <name|id>`, optional while the host is in one mesh.
+Commands acting on a group take `--group <name|id>`, optional while the host is in one group.
 Apps embed `NodeCommand` with `#[command(flatten)]`, like `WorkspaceArgs` (#128). Because the
-node is shared, running these from any app acts on the same meshes.
+node is shared, running these from any app acts on the same groups.
 
 This reverses the earlier "the framework ships no subcommands" stance: pairing written four
 times would drift between apps.
@@ -612,7 +612,7 @@ Each gets its own spec.
   dedicated sync service of §3.3.
 - **timer**: drop the `remote` subcommand; embed `NodeCommand`; call `register_workspace`.
 - **ledger**: remove `sapphire-ledger-sync` and the server's `/rpc`; replace the
-  token → device lookup in `identity.rs` with the host device from the mesh. `updated_by`
+  token → device lookup in `identity.rs` with the host device from the group. `updated_by`
   is the local device id for local writes (remote changes arrive as file content that
   already carries it).
 - **journal**: rewrite `dedupe.rs` as a content-deterministic fix-up (§5.1) inside the
@@ -622,7 +622,7 @@ Each gets its own spec.
   the node's local state and can diverge. This is the largest item in journal's spec.
   `updated_by` displays the device name; the user lookup goes away.
 - **agent**: import `KeyStore` from `keys`. Its HTTP device table (key → device →
-  room_profile) no longer needs users; whether it uses mesh devices or keeps its own
+  room_profile) no longer needs users; whether it uses group devices or keeps its own
   per-workspace table is decided in agent's spec.
 
 ### 5.4 Compatibility
@@ -635,11 +635,11 @@ Each gets its own spec.
   on the wire are unchanged. Golden tests pin the behaviour of each format version (fixed
   inputs → expected store state and file tree) so an accidental change fails CI.
 - No sync data migration (not in production): existing server change logs are discarded;
-  devices pair into a new mesh.
+  devices pair into a new group.
 - Registry: a migration from single-file `devices.toml` to one file per record is provided
   (idempotent, retryable), because agent already authenticates against the registry.
   `users.toml` and `user_id` fields are ignored on load and dropped on the next write.
-  Moving an app's existing device table into the mesh is decided per app.
+  Moving an app's existing device table into the group is decided per app.
 
 ### 5.5 Service installation (`sapphire-framework-service`)
 
@@ -682,20 +682,20 @@ directories are chowned to that user. `sapphire-sync` uses it to write
 `embedded_node = false` into the target user's `net.toml` (skipped with `--keep-embedded`).
 
 An agent running as root with an embedded node uses root's node directory and therefore
-joins meshes as its own device; agent's spec records this.
+joins groups as its own device; agent's spec records this.
 
 ### 5.6 Implementation order (framework)
 
 1. **Sync core**: types, redb store, merge rules, external-edit detection, conflict copies,
    declarative filtering. Tested with several in-memory replicas, no network.
 2. **Registry**: users removed, one file per record + migration, `node_id`.
-3. **Node directory**: layout (per-mesh directories), format versioning, lock and roles,
+3. **Node directory**: layout (per-group directories), format versioning, lock and roles,
    `sync-id`, share/map/unmap registration, missing root guard, `status.json` with holder
    info, shared sync log.
-4. **Net basics**: `Endpoint`, control stream + `sync/1`, `blob/1`, per-mesh authorization,
+4. **Net basics**: `Endpoint`, control stream + `sync/1`, `blob/1`, per-group authorization,
    `SyncNode`, live propagation, watcher.
-5. **Pairing**: mesh creation, `pair/1`, invites, `NodeCommand`.
-6. **Server features**: `embedded-relay`, relay URLs from mesh `net.toml`.
+5. **Pairing**: group creation, `pair/1`, invites, `NodeCommand`.
+6. **Server features**: `embedded-relay`, relay URLs from group `net.toml`.
 7. **Service**: `sapphire-framework-service`.
 8. **Cleanup**: extract `keys`; remove `rpc`, `remote-*`, `blob`; `SyncedBackend`; facade;
    rewrite the sync sections of `ARCHITECTURE.md`, mark WASM out of scope, remove users.
@@ -735,8 +735,8 @@ sapphire-sync → timer → ledger → journal → agent.
 - missing root guard: removing (then restoring) a root or its marker pauses (then resumes)
   the replica and records no tombstones; a freshly mapped empty workspace is not paused.
 - `sync-id`: share creates it; re-registering after deleting the node directory reuses it;
-  map writes the mesh's id; selectors resolve names first, reject ambiguous names.
-- the first release refuses a second `mesh create` / `mesh join`.
+  map writes the group's id; selectors resolve names first, reject ambiguous names.
+- the first release refuses a second `group create` / `group join`.
 - dedicated service mode: with `embedded_node = false`, an embedding process never takes
   the lock; a dedicated node does.
 - fault isolation: a panic injected into a node task stops the node, releases the lock and
@@ -754,12 +754,12 @@ addresses — no external network.
   content ≤ 64 KiB
 - a workspace hosted on only one side gets no session
 - **A–S–B topology** (A and B not connected): live propagation through S
-- rejection: unknown `NodeId`, mesh mismatch, retired device (connection dropped once the
+- rejection: unknown `NodeId`, group mismatch, retired device (connection dropped once the
   retirement arrives)
-- pairing: success, expired, reused, wrong secret; the joiner sees the mesh's workspaces
-- multiple meshes (constructed directly, bypassing the first-release CLI limit): with A–B in
-  mesh C and B–D in mesh E, A and D never receive each other's workspaces, and `Hello` does
-  not list a mesh the peer is not in
+- pairing: success, expired, reused, wrong secret; the joiner sees the group's workspaces
+- multiple groups (constructed directly, bypassing the first-release CLI limit): with A–B in
+  group C and B–D in group E, A and D never receive each other's workspaces, and `Hello` does
+  not list a group the peer is not in
 - blob fallback: content changed on one peer, fetched from another
 - follower writes reach peers through the holder
 
@@ -793,6 +793,6 @@ A real-relay test exists as `#[ignore]`, run manually.
    may still need n0 relays.
 7. **iroh API evolution** within 1.x (wire-stable, but API-level changes are possible), and
    the exact names of discovery features must be confirmed against 1.2.
-8. **Large workspaces**: full-mesh dialing and whole-file transfer are sized for a handful of
+8. **Large workspaces**: all-pairs dialing and whole-file transfer are sized for a handful of
    devices and files under the cap; chunking and smarter topology are deferred.
 9. **Tombstones grow without GC** until tombstone GC is designed.
