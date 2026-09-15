@@ -46,6 +46,23 @@ fn a_missing_marker_pauses() {
 }
 
 #[test]
+fn fetch_missing_refuses_while_paused() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, "a.txt", "one");
+    scan(&mut a);
+    sync(&mut a, &mut b);
+
+    let parked = a.root.with_file_name("parked");
+    std::fs::rename(&a.root, &parked).unwrap();
+    assert!(matches!(
+        a.replica.fetch_missing(&b.replica),
+        Err(Error::Paused(PauseReason::RootMissing))
+    ));
+
+    std::fs::rename(&parked, &a.root).unwrap();
+}
+
+#[test]
 fn an_empty_new_replica_without_a_root_is_not_paused() {
     let a = node(1);
     std::fs::remove_dir_all(&a.root).unwrap();
@@ -82,6 +99,41 @@ fn an_interrupted_write_is_finished_on_the_next_scan() {
         Some("hello"),
         "written from the staged copy"
     );
+}
+
+#[test]
+fn an_interrupted_delete_is_finished_on_the_next_scan() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, "a.txt", "hello");
+    scan(&mut a);
+    sync(&mut a, &mut b);
+
+    remove(&a, "a.txt");
+    scan(&mut a);
+
+    b.replica.inject_fault(FaultPoint::AfterCommitBeforeWrite);
+    let updates = a.replica.delta_for(b.replica.vv()).unwrap();
+    assert!(matches!(
+        b.replica.apply(&updates, &a.replica),
+        Err(Error::InjectedFault)
+    ));
+    assert!(
+        read(&b, "a.txt").is_some(),
+        "the file is not removed before the fault fires"
+    );
+    let state = b.replica.state("a.txt").unwrap().unwrap();
+    assert!(
+        state.winner().content.is_tombstone(),
+        "the tombstone was committed"
+    );
+
+    let mut b = reopen(b);
+    let report = scan(&mut b);
+    assert!(
+        report.recorded.is_empty(),
+        "the file still on disk is not mistaken for a local re-creation"
+    );
+    assert_eq!(read(&b, "a.txt"), None);
 }
 
 #[test]
