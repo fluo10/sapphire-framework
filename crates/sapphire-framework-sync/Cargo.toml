@@ -25,6 +25,8 @@ uuid.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+grain-id.workspace = true
 proptest = "1"
 sapphire-framework-sync = { path = ".", features = ["test-util"] }
 tempfile = "3"
+walkdir.workspace = true

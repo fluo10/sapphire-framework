@@ -1,0 +1,611 @@
+//! A replica: one workspace root kept in sync with peers by joining path states.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use grain_id::GrainId;
+
+use crate::entry::{Content, Entry, PathUpdate};
+use crate::error::{Error, Result};
+use crate::filter::SyncFilter;
+use crate::hash::ContentHash;
+use crate::hlc::Clock;
+use crate::id::ReplicaId;
+use crate::merge;
+use crate::paths;
+use crate::report::{Report, ScanOutcome, SkipReason, Skipped};
+use crate::state::{DiskState, PathState};
+use crate::store::{Meta, ReplicaStore};
+use crate::vv::{Dot, VersionVector};
+
+/// Files larger than this are not synced unless configured otherwise.
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
+
+/// A file whose mtime is this close to when it was checked is re-hashed.
+const RACY_NS: i64 = 2_000_000_000;
+
+/// Where a replica gets bytes it does not have: a peer, in practice.
+pub trait ContentSource {
+    fn fetch(&self, hash: &ContentHash) -> Option<Vec<u8>>;
+}
+
+/// How a replica is set up.
+#[derive(Clone, Debug)]
+pub struct ReplicaConfig {
+    pub app_name: String,
+    pub root: PathBuf,
+    /// Recorded as `Entry::author` on local writes.
+    pub device_id: GrainId,
+    pub max_file_size: u64,
+    pub store_path: PathBuf,
+    pub staging_dir: PathBuf,
+}
+
+impl ReplicaConfig {
+    /// A config keeping the store and staging directory under `state_dir`.
+    pub fn new(
+        app_name: impl Into<String>,
+        root: impl Into<PathBuf>,
+        device_id: GrainId,
+        state_dir: &Path,
+    ) -> Self {
+        Self {
+            app_name: app_name.into(),
+            root: root.into(),
+            device_id,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            store_path: state_dir.join("sync.redb"),
+            staging_dir: state_dir.join("staging"),
+        }
+    }
+}
+
+/// One workspace root and its replica store.
+pub struct Replica {
+    config: ReplicaConfig,
+    store: ReplicaStore,
+    meta: Meta,
+    clock: Arc<dyn Clock>,
+}
+
+fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn stamp_of(meta: &fs::Metadata) -> (i64, u64) {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    (mtime, meta.len())
+}
+
+fn is_racy(disk: &DiskState) -> bool {
+    disk.mtime_ns.saturating_add(RACY_NS) >= disk.checked_ns
+}
+
+/// Move a verified staged file into place, falling back to copy + rename when the
+/// staging directory is on another volume.
+fn place(staged: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(staged, dest).is_ok() {
+        return Ok(());
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dest.with_file_name(format!(".{name}.sapphire-tmp"));
+    fs::copy(staged, &tmp)?;
+    fs::rename(&tmp, dest)?;
+    fs::remove_file(staged)?;
+    Ok(())
+}
+
+impl Replica {
+    pub fn open(config: ReplicaConfig, clock: Arc<dyn Clock>) -> Result<Self> {
+        Self::open_inner(config, clock, None)
+    }
+
+    fn open_inner(
+        config: ReplicaConfig,
+        clock: Arc<dyn Clock>,
+        id: Option<ReplicaId>,
+    ) -> Result<Self> {
+        fs::create_dir_all(&config.staging_dir)?;
+        let root = config.root.to_string_lossy().into_owned();
+        let store = ReplicaStore::open_with_id(&config.store_path, &root, id)?;
+        let meta = store.meta()?;
+        Ok(Self {
+            config,
+            store,
+            meta,
+            clock,
+        })
+    }
+
+    pub fn replica_id(&self) -> ReplicaId {
+        self.meta.replica_id
+    }
+
+    pub fn vv(&self) -> &VersionVector {
+        &self.meta.vv
+    }
+
+    pub fn config(&self) -> &ReplicaConfig {
+        &self.config
+    }
+
+    pub fn state(&self, path: &str) -> Result<Option<PathState>> {
+        self.store.get(path)
+    }
+
+    pub fn states(&self) -> Result<Vec<(String, PathState)>> {
+        self.store.all()
+    }
+
+    fn filter(&self) -> Result<SyncFilter> {
+        SyncFilter::load(&self.config.root, &self.config.app_name)
+    }
+
+    /// Record every unrecorded edit under the root and finish pending writes.
+    pub fn scan(&mut self) -> Result<ScanOutcome> {
+        let filter = self.filter()?;
+        let mut report = Report::default();
+        let mut rels = BTreeSet::new();
+        if self.config.root.is_dir() {
+            let root = self.config.root.clone();
+            let walker = walkdir::WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    e.depth() == 0
+                        || paths::rel_from_native(&root, e.path())
+                            .is_some_and(|rel| filter.allows(&rel, e.file_type().is_dir()))
+                });
+            for item in walker {
+                let item = item.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+                if item.depth() == 0 || item.file_type().is_dir() {
+                    continue;
+                }
+                let Some(rel) = paths::rel_from_native(&root, item.path()) else {
+                    continue;
+                };
+                if item.file_type().is_symlink() {
+                    report.skipped.push(Skipped {
+                        path: rel,
+                        reason: SkipReason::Symlink,
+                    });
+                    continue;
+                }
+                rels.insert(rel);
+            }
+        }
+        for (rel, _) in self.store.all()? {
+            rels.insert(rel);
+        }
+        for rel in rels {
+            self.reconcile_path(&rel, &filter, None, &mut report)?;
+        }
+        Ok(ScanOutcome::Scanned(report))
+    }
+
+    /// Path states the peer with version vector `peer` has not merged.
+    pub fn delta_for(&self, peer: &VersionVector) -> Result<Vec<PathUpdate>> {
+        Ok(self
+            .store
+            .all()?
+            .into_iter()
+            .filter(|(_, s)| !peer.covers(&s.seen))
+            .map(|(path, s)| PathUpdate {
+                path,
+                versions: s.versions,
+                seen: s.seen,
+            })
+            .collect())
+    }
+
+    /// Join updates received from a peer, fetching content from `source`.
+    pub fn apply(&mut self, updates: &[PathUpdate], source: &dyn ContentSource) -> Result<Report> {
+        let filter = self.filter()?;
+        let mut report = Report::default();
+        let now = self.clock.now_ms();
+        for update in updates {
+            let well_formed = paths::is_valid_rel(&update.path)
+                && !update.versions.is_empty()
+                && update.versions.iter().all(|v| v.path == update.path);
+            if !well_formed {
+                tracing::warn!(path = %update.path, "ignoring a malformed path update");
+                continue;
+            }
+            for version in &update.versions {
+                self.meta.hlc = self.meta.hlc.observe(version.hlc, now);
+            }
+            self.reconcile_path(&update.path, &filter, Some(source), &mut report)?;
+            self.integrate(update.clone(), None, &filter, Some(source), &mut report)?;
+        }
+        Ok(report)
+    }
+
+    /// Declare that every update of a session with `peer` has been applied.
+    pub fn commit_session(&mut self, peer: &VersionVector) -> Result<()> {
+        self.meta.vv.merge(peer);
+        self.store.commit(&self.meta, &[])
+    }
+
+    /// Retry writes that were waiting for content.
+    pub fn fetch_missing(&mut self, source: &dyn ContentSource) -> Result<Report> {
+        let filter = self.filter()?;
+        let mut report = Report::default();
+        for (rel, _) in self.store.all()? {
+            self.reconcile_path(&rel, &filter, Some(source), &mut report)?;
+        }
+        Ok(report)
+    }
+
+    /// Bytes with `hash` from a file on disk or the staging directory.
+    pub fn read_content(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        for (rel, state) in self.store.all()? {
+            if state.disk.hash.as_ref() != Some(hash) {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(paths::to_native(&self.config.root, &rel))
+                && ContentHash::of_bytes(&bytes) == *hash
+            {
+                return Ok(Some(bytes));
+            }
+        }
+        if let Ok(bytes) = fs::read(self.config.staging_dir.join(hash.to_hex()))
+            && ContentHash::of_bytes(&bytes) == *hash
+        {
+            return Ok(Some(bytes));
+        }
+        Ok(None)
+    }
+
+    fn next_entry(&mut self, rel: &str, content: Content, context: VersionVector) -> Entry {
+        self.meta.counter += 1;
+        self.meta.hlc = self.meta.hlc.tick(self.clock.now_ms());
+        let dot = Dot {
+            replica: self.meta.replica_id,
+            counter: self.meta.counter,
+        };
+        self.meta.vv.add_dot(&dot);
+        Entry {
+            path: rel.to_owned(),
+            content,
+            hlc: self.meta.hlc,
+            dot,
+            context,
+            author: self.config.device_id,
+        }
+    }
+
+    /// Compare one path's file with its state: record an edit, or settle the state.
+    fn reconcile_path(
+        &mut self,
+        rel: &str,
+        filter: &SyncFilter,
+        source: Option<&dyn ContentSource>,
+        report: &mut Report,
+    ) -> Result<()> {
+        if !filter.allows(rel, false) || !paths::representable(rel) {
+            return Ok(());
+        }
+        let abs = paths::to_native(&self.config.root, rel);
+        let state = self.store.get(rel)?;
+        let disk = state.as_ref().map(|s| s.disk.clone()).unwrap_or_default();
+        // On a case-insensitive filesystem, `a.txt` would find the file of `A.txt`.
+        if disk.hash.is_none() && self.case_twin(rel)?.is_some() {
+            if let Some(state) = state {
+                self.settle(rel, state, filter, source, report)?;
+            }
+            return Ok(());
+        }
+        let fs_meta = match fs::symlink_metadata(&abs) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let mut stamp = (0, 0);
+        let file_hash = match &fs_meta {
+            Some(m) if m.file_type().is_symlink() => {
+                report.skipped.push(Skipped {
+                    path: rel.to_owned(),
+                    reason: SkipReason::Symlink,
+                });
+                return Ok(());
+            }
+            Some(m) if m.is_file() => {
+                stamp = stamp_of(m);
+                if disk.hash.is_some() && stamp == (disk.mtime_ns, disk.len) && !is_racy(&disk) {
+                    disk.hash
+                } else if m.len() > self.config.max_file_size {
+                    report.skipped.push(Skipped {
+                        path: rel.to_owned(),
+                        reason: SkipReason::TooLarge {
+                            len: m.len(),
+                            max: self.config.max_file_size,
+                        },
+                    });
+                    return Ok(());
+                } else {
+                    Some(ContentHash::of_file(&abs)?)
+                }
+            }
+            _ => None,
+        };
+
+        if file_hash == disk.hash {
+            if let Some(mut state) = state {
+                if file_hash.is_some() && (stamp != (disk.mtime_ns, disk.len) || is_racy(&disk)) {
+                    state.disk.mtime_ns = stamp.0;
+                    state.disk.len = stamp.1;
+                    state.disk.checked_ns = now_ns();
+                    self.store
+                        .commit(&self.meta, &[(rel.to_owned(), state.clone())])?;
+                }
+                self.settle(rel, state, filter, source, report)?;
+            }
+            return Ok(());
+        }
+
+        let content = match file_hash {
+            Some(hash) => Content::File { hash, len: stamp.1 },
+            None => Content::Tombstone,
+        };
+        if state.is_none() && content.is_tombstone() {
+            return Ok(());
+        }
+        let entry = self.next_entry(rel, content, disk.seen.clone());
+        report.recorded.push(entry.clone());
+        let mut seen = entry.context.clone();
+        seen.add_dot(&entry.dot);
+        let new_disk = DiskState {
+            hash: file_hash,
+            seen: seen.clone(),
+            mtime_ns: stamp.0,
+            len: stamp.1,
+            checked_ns: now_ns(),
+        };
+        let update = PathUpdate {
+            path: rel.to_owned(),
+            versions: vec![entry],
+            seen,
+        };
+        self.integrate(update, Some(new_disk), filter, source, report)
+    }
+
+    /// Join `update` into the stored state, commit, then settle the file.
+    /// `local_disk` is set when the update is a local write already on disk.
+    fn integrate(
+        &mut self,
+        update: PathUpdate,
+        local_disk: Option<DiskState>,
+        filter: &SyncFilter,
+        source: Option<&dyn ContentSource>,
+        report: &mut Report,
+    ) -> Result<()> {
+        let rel = update.path.clone();
+        let old = self.store.get(&rel)?;
+        let joined = merge::join(
+            old.as_ref().map(|s| (s.versions.as_slice(), &s.seen)),
+            &update.versions,
+            &update.seen,
+        );
+        let Some((versions, seen)) = joined else {
+            return Ok(());
+        };
+        let disk = match local_disk {
+            Some(d) => d,
+            None => old.map(|s| s.disk).unwrap_or_default(),
+        };
+        let state = PathState {
+            versions,
+            seen,
+            disk,
+        };
+        self.store
+            .commit(&self.meta, &[(rel.clone(), state.clone())])?;
+        report.changed += 1;
+        self.settle(&rel, state, filter, source, report)
+    }
+
+    /// Make the file on disk hold the winner, then record what it reflects.
+    fn settle(
+        &mut self,
+        rel: &str,
+        mut state: PathState,
+        filter: &SyncFilter,
+        source: Option<&dyn ContentSource>,
+        report: &mut Report,
+    ) -> Result<()> {
+        let winner = state.winner().clone();
+        if winner.content.hash() == state.disk.hash {
+            let seen = self.disk_seen(&state)?;
+            if seen != state.disk.seen {
+                state.disk.seen = seen;
+                self.store.commit(&self.meta, &[(rel.to_owned(), state)])?;
+            }
+            return Ok(());
+        }
+        if let Some(reason) = self.skip_reason(rel, &winner, filter)? {
+            report.skipped.push(Skipped {
+                path: rel.to_owned(),
+                reason,
+            });
+            return Ok(());
+        }
+        let abs = paths::to_native(&self.config.root, rel);
+        match winner.content {
+            Content::Tombstone => {
+                match fs::remove_file(&abs) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                state.disk = DiskState::default();
+            }
+            Content::File { hash, .. } => {
+                let Some(staged) = self.stage(&hash, source)? else {
+                    report.skipped.push(Skipped {
+                        path: rel.to_owned(),
+                        reason: SkipReason::ContentUnavailable,
+                    });
+                    return Ok(());
+                };
+                place(&staged, &abs)?;
+                let (mtime_ns, len) = stamp_of(&fs::metadata(&abs)?);
+                state.disk = DiskState {
+                    hash: Some(hash),
+                    seen: VersionVector::new(),
+                    mtime_ns,
+                    len,
+                    checked_ns: now_ns(),
+                };
+            }
+        }
+        state.disk.seen = self.disk_seen(&state)?;
+        self.store.commit(&self.meta, &[(rel.to_owned(), state)])
+    }
+
+    /// Versions the file on disk reflects once the winner is written.
+    /// (Task 6 excludes losers whose conflict copy could not be made.)
+    fn disk_seen(&self, state: &PathState) -> Result<VersionVector> {
+        Ok(state.seen.clone())
+    }
+
+    fn skip_reason(
+        &self,
+        rel: &str,
+        winner: &Entry,
+        filter: &SyncFilter,
+    ) -> Result<Option<SkipReason>> {
+        if !filter.allows(rel, false) {
+            return Ok(Some(SkipReason::Ignored));
+        }
+        if !paths::representable(rel) {
+            return Ok(Some(SkipReason::Unrepresentable));
+        }
+        if let Content::File { len, .. } = winner.content
+            && len > self.config.max_file_size
+        {
+            return Ok(Some(SkipReason::TooLarge {
+                len,
+                max: self.config.max_file_size,
+            }));
+        }
+        if !winner.content.is_tombstone()
+            && let Some(other) = self.case_twin(rel)?
+        {
+            return Ok(Some(SkipReason::CaseCollision { other }));
+        }
+        Ok(None)
+    }
+
+    /// Another stored path, differing from `rel` only in case, whose file is on disk.
+    /// Always `None` on case-sensitive filesystems.
+    fn case_twin(&self, rel: &str) -> Result<Option<String>> {
+        if !paths::CASE_INSENSITIVE_FS {
+            return Ok(None);
+        }
+        let lower = rel.to_lowercase();
+        Ok(self
+            .store
+            .all()?
+            .into_iter()
+            .find(|(other, s)| {
+                other != rel && other.to_lowercase() == lower && s.disk.hash.is_some()
+            })
+            .map(|(other, _)| other))
+    }
+
+    /// A verified copy of `hash` in the staging directory, if one can be had.
+    fn stage(
+        &self,
+        hash: &ContentHash,
+        source: Option<&dyn ContentSource>,
+    ) -> Result<Option<PathBuf>> {
+        let staged = self.config.staging_dir.join(hash.to_hex());
+        if staged.is_file() && ContentHash::of_file(&staged)? == *hash {
+            return Ok(Some(staged));
+        }
+        let bytes = match self.read_content(hash)? {
+            Some(bytes) => Some(bytes),
+            None => source.and_then(|s| s.fetch(hash)),
+        };
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if ContentHash::of_bytes(&bytes) != *hash {
+            tracing::warn!(%hash, "content source returned bytes with the wrong hash");
+            return Ok(None);
+        }
+        fs::write(&staged, &bytes)?;
+        Ok(Some(staged))
+    }
+}
+
+impl ContentSource for Replica {
+    fn fetch(&self, hash: &ContentHash) -> Option<Vec<u8>> {
+        self.read_content(hash).ok().flatten()
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Replica {
+    /// Open with a fixed replica id (used only when the store is created).
+    pub fn open_with_replica_id(
+        config: ReplicaConfig,
+        clock: Arc<dyn Clock>,
+        id: ReplicaId,
+    ) -> Result<Self> {
+        Self::open_inner(config, clock, Some(id))
+    }
+
+    /// Everything that must agree across converged replicas, without timestamps of
+    /// the local filesystem.
+    pub fn logical_dump(&self) -> Result<serde_json::Value> {
+        let mut path_states = serde_json::Map::new();
+        for (rel, s) in self.store.all()? {
+            path_states.insert(
+                rel,
+                serde_json::json!({
+                    "versions": s.versions,
+                    "seen": s.seen,
+                    "disk_hash": s.disk.hash,
+                    "disk_seen": s.disk.seen,
+                }),
+            );
+        }
+        let mut files = serde_json::Map::new();
+        if self.config.root.is_dir() {
+            for item in walkdir::WalkDir::new(&self.config.root).sort_by_file_name() {
+                let item = item.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+                if !item.file_type().is_file() {
+                    continue;
+                }
+                if let Some(rel) = paths::rel_from_native(&self.config.root, item.path()) {
+                    files.insert(rel, serde_json::json!(ContentHash::of_file(item.path())?));
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "replica_id": self.meta.replica_id,
+            "vv": self.meta.vv,
+            "paths": path_states,
+            "files": files,
+        }))
+    }
+}
