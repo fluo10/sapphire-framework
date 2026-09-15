@@ -31,12 +31,13 @@ versioned in lockstep with the framework crates.
 
 Agreed during brainstorming on 2026-09-15:
 
-1. **One binary**, `sapphire-sync`, Syncthing-style: `run` is the long-running node
+1. **One binary**, `sapphire-sync`, Syncthing-style: running `sapphire-sync` **without a
+   subcommand** starts the long-running node (`run` is an equivalent explicit form)
    (`AppKind::Server`); every other subcommand is a one-shot CLI invocation
    (`AppKind::Cli`). A desktop/tray app, if ever built, is a separate crate.
 2. **Location**: `apps/sapphire-sync/`; a future desktop crate goes to
    `apps/sapphire-sync-desktop/`. `CONTRIBUTING.md` gains a rule for this repository.
-3. **First-release scope**: the framework's node commands, `run`, `init`, and service
+3. **First-release scope**: the framework's node commands, the node itself, `init`, and service
    installation. Out of scope: send-only / receive-only folders, file versioning, a web UI,
    a desktop app, binary release artifacts.
 4. **Any app's workspaces can be hosted**, not only sapphire-sync's own: mapping a journal
@@ -61,7 +62,7 @@ apps/sapphire-sync/
         run.rs          # dedicated node lifecycle
         init.rs         # init <path>
     tests/
-        e2e/            # multi-host scenarios (§4)
+        e2e/            # multi-host scenarios (§5)
 ```
 
 Dependencies: the `sapphire-framework` facade with features `sync`, `net` (with `cli`),
@@ -77,7 +78,7 @@ crate name."
 
 | command | kind | behaviour |
 |---|---|---|
-| `sapphire-sync run` | server | Runs the node as a **dedicated** holder: tries the lock regardless of `embedded_node`, retries every 10 s while another process holds it, logs to stdout and to the shared `node.log`. |
+| `sapphire-sync` (no subcommand; `run` is an equivalent explicit form) | server | Runs the node as a **dedicated** holder: tries the lock regardless of `embedded_node`, retries every 10 s while another process holds it, logs to stdout and to the shared `node.log`. |
 | `sapphire-sync init <path> [--name <name>] [--mesh <name\|id>]` | cli | Turns a directory into a sapphire-sync workspace and shares it (below). |
 | framework `NodeCommand` | cli | `sync`, `node status`, `node log [--follow]`, `mesh create` / `join` / `list`, `device invite` / `list` / `retire`, `workspace list` / `share` / `map` / `unmap`. |
 | `sapphire-sync service install` / `uninstall` / `status` | cli | framework `ServiceCommand` (§3). |
@@ -98,13 +99,13 @@ same for a directory that already has the marker.
 the mesh listing and creates that app's marker (e.g. `.journal/`). Filtering uses the
 framework's built-in rule for that app name, so no app code is needed.
 
-**`run` lifecycle**:
+**Node lifecycle** (`sapphire-sync` / `sapphire-sync run`):
 
 - Start: `AppContext::init(AppKind::Server)`, open the node directory, take the lock or
   wait as a follower.
 - SIGTERM / SIGINT (Ctrl-C; on Windows, console control events): stop accepting new work,
   finish in-flight materializations, close sessions, release the lock, exit 0.
-- A node failure (the framework's fault isolation reports it) is logged; `run` exits
+- A node failure (the framework's fault isolation reports it) is logged; the process exits
   non-zero so the service manager's `Restart=on-failure` restarts it.
 
 **Output**: human-readable tables and messages. No `--json`; machine consumers (including
@@ -117,7 +118,7 @@ when another process already runs the node.
 
 `ServiceSpec` for sapphire-sync:
 
-- `args = ["run"]`
+- `args = []` — the unit runs the bare binary
 - `system_run_as = RunAs::InvokingUser` — `sudo sapphire-sync service install` creates
   `/etc/systemd/system/sapphire-sync.service` with `User=$SUDO_USER`; `--run-as <user>`
   overrides; without either, install fails with an explanation.
@@ -166,14 +167,14 @@ Scenarios:
    `workspace map`; files created, modified and deleted on either host appear on the other.
 2. **Conflict copy**: stop both nodes, edit the same file differently on each, restart;
    both hosts end with the same winner and one `*.conflict-<grain-id>-<n>.*` copy.
-3. **Takeover**: two `run` processes on one host; kill the holder; the other takes the
+3. **Takeover**: two node processes (`sapphire-sync`) on one host; kill the holder; the other takes the
    lock, `status.json` names it, `node.log` records `holder changed`.
 4. **Missing root guard**: rename a mapped root away while running; the replica pauses and
    the peer's files are untouched; rename it back; syncing resumes.
 5. **Other app's workspace**: share a workspace with a `.journal/` marker from one host
    (via `workspace share`), `workspace map` it on the other; hidden files other than
    `.journal/` do not sync.
-6. **One-shot sync**: with no `run` process, `sapphire-sync sync` on each host converges
+6. **One-shot sync**: with no node process running, `sapphire-sync sync` on each host converges
    both.
 7. **Filtering and limits**: `.sapphireignore` patterns and a file above `max_file_size`
    are not synced and appear as skipped in `status.json`.
@@ -192,7 +193,7 @@ service file generation lives in the framework crate.
   idempotent on an already-initialized directory.
 - `post_install`: `net.toml` created or updated preserving other keys; `--keep-embedded`
   leaves it alone.
-- `run` shutdown: a signal while a materialization is in flight completes it before the lock
+- Node shutdown: a signal while a materialization is in flight completes it before the lock
   is released (with the framework's fault-injection hook).
 
 ## 6. Release
@@ -205,7 +206,7 @@ service file generation lives in the framework crate.
 
 Development tracks the framework spec's implementation order:
 
-1. After framework step 3 (node directory): crate skeleton, `init`, `run` as a holder
+1. After framework step 3 (node directory): crate skeleton, `init`, the node (bare invocation) as a holder
    without networking; unit tests.
 2. After framework step 4 (net basics): E2E harness and scenarios 3–7 and 9.
 3. After framework step 5 (pairing): scenarios 1, 2 and 8.
