@@ -477,14 +477,31 @@ impl Replica {
                 continue;
             };
             let copy_rel = merge::conflict_path(rel, &loser.dot);
+            if !filter.allows(&copy_rel, false) {
+                report.skipped.push(Skipped {
+                    path: copy_rel,
+                    reason: SkipReason::Ignored,
+                });
+                continue;
+            }
+            if !paths::representable(&copy_rel) {
+                report.skipped.push(Skipped {
+                    path: copy_rel,
+                    reason: SkipReason::Unrepresentable,
+                });
+                continue;
+            }
             if self.store.get(&copy_rel)?.is_some() {
                 continue;
             }
             let copy_abs = paths::to_native(&self.config.root, &copy_rel);
             if !copy_abs.exists() {
-                // The loser may be exactly what is on disk at `rel` right now.
+                // The loser may be exactly what is on disk at `rel` right now. A read
+                // error here must propagate rather than be swallowed as unavailable
+                // content: `settle` would otherwise overwrite the only local copy of
+                // the loser's bytes.
                 let on_disk = if state.disk.hash == Some(hash) {
-                    fs::read(paths::to_native(&self.config.root, rel)).ok()
+                    Some(fs::read(paths::to_native(&self.config.root, rel))?)
                 } else {
                     None
                 };
@@ -530,7 +547,7 @@ impl Replica {
     ) -> Result<()> {
         let winner = state.winner().clone();
         if winner.content.hash() == state.disk.hash {
-            let seen = self.disk_seen(&state)?;
+            let seen = self.disk_seen(&state, filter)?;
             if seen != state.disk.seen {
                 state.disk.seen = seen;
                 self.store.commit(&self.meta, &[(rel.to_owned(), state)])?;
@@ -580,14 +597,17 @@ impl Replica {
                 };
             }
         }
-        state.disk.seen = self.disk_seen(&state)?;
+        state.disk.seen = self.disk_seen(&state, filter)?;
         self.store.commit(&self.meta, &[(rel.to_owned(), state)])
     }
 
     /// Versions the file on disk reflects once the winner is written: everything
     /// merged, except losers still waiting for a conflict copy — a local edit must
-    /// not supersede a version whose bytes were never preserved.
-    fn disk_seen(&self, state: &PathState) -> Result<VersionVector> {
+    /// not supersede a version whose bytes were never preserved. A loser whose copy
+    /// path the filter rejects, or that the local OS cannot represent, is never
+    /// excluded this way: no copy will ever be attempted for it, so pinning it here
+    /// would keep it out of `seen` forever.
+    fn disk_seen(&self, state: &PathState, filter: &SyncFilter) -> Result<VersionVector> {
         let winner = state.winner();
         let mut seen = state.seen.clone();
         for loser in state
@@ -595,11 +615,11 @@ impl Replica {
             .iter()
             .filter(|v| v.dot != winner.dot && merge::needs_copy(v, winner))
         {
-            if self
-                .store
-                .get(&merge::conflict_path(&loser.path, &loser.dot))?
-                .is_none()
-            {
+            let copy_rel = merge::conflict_path(&loser.path, &loser.dot);
+            if !filter.allows(&copy_rel, false) || !paths::representable(&copy_rel) {
+                continue;
+            }
+            if self.store.get(&copy_rel)?.is_none() {
                 let slot = seen.0.entry(loser.dot.replica).or_insert(0);
                 *slot = (*slot).min(loser.dot.counter - 1);
             }

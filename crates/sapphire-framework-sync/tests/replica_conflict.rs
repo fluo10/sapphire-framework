@@ -147,3 +147,36 @@ fn a_loser_without_content_is_not_superseded_by_a_later_local_edit() {
     assert!(contents(&b).contains("from a"));
     assert_eq!(tree(&a), tree(&b));
 }
+
+#[test]
+fn an_ignored_copy_path_does_not_pin_the_loser_forever() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, ".sapphireignore", "*.conflict-*\n");
+    based(&mut a, &mut b);
+    write(&a, "a.txt", "from a");
+    scan(&mut a);
+    b.clock.set(9_000_000);
+    write(&b, "a.txt", "from b");
+    scan(&mut b);
+    sync(&mut a, &mut b);
+    sync(&mut a, &mut b);
+    assert!(
+        tree(&a).keys().all(|p| !p.contains(".conflict-")),
+        "no copy written into an ignored path"
+    );
+    assert!(tree(&b).keys().all(|p| !p.contains(".conflict-")));
+
+    // A later edit on b supersedes the loser: the user opted out of copies for these names.
+    write(&b, "a.txt", "b again");
+    scan(&mut b);
+    sync(&mut a, &mut b);
+    assert_eq!(a.replica.state("a.txt").unwrap().unwrap().versions.len(), 1);
+    assert_eq!(b.replica.state("a.txt").unwrap().unwrap().versions.len(), 1);
+    assert!(
+        scan(&mut b)
+            .skipped
+            .iter()
+            .all(|s| !s.path.contains(".conflict-")),
+        "no per-scan noise"
+    );
+}
