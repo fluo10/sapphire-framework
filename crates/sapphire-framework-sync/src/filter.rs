@@ -10,6 +10,9 @@ use crate::paths;
 /// Name of the per-workspace ignore file.
 pub const IGNORE_FILE: &str = ".sapphireignore";
 
+/// Prefix of a conflict copy of the ignore file (`merge::conflict_path`).
+const IGNORE_FILE_CONFLICT_PREFIX: &str = ".sapphireignore.conflict-";
+
 /// Declarative sync filter: the built-in rule for an app name plus `.sapphireignore`.
 pub struct SyncFilter {
     app_dir: String,
@@ -41,6 +44,13 @@ impl SyncFilter {
             return false;
         }
         if rel == IGNORE_FILE {
+            return true;
+        }
+        // A conflict copy of the ignore file is a hidden name, which the built-in rule
+        // below would reject — so no replica could ever write it, and a concurrent edit
+        // to the ignore file would be silently superseded everywhere. The file the
+        // filter can never exclude cannot have its copy excluded either.
+        if rel.starts_with(IGNORE_FILE_CONFLICT_PREFIX) {
             return true;
         }
         if !rel
@@ -100,5 +110,21 @@ mod tests {
         let (_d, f) = filter_with(Some("*\n"));
         assert!(f.allows(IGNORE_FILE, false));
         assert!(!f.allows("anything", false));
+    }
+
+    #[test]
+    fn a_conflict_copy_of_the_ignore_file_is_allowed() {
+        for ignore in [None, Some("*\n"), Some("*.conflict-*\n")] {
+            let (_d, f) = filter_with(ignore);
+            assert!(
+                f.allows(".sapphireignore.conflict-123abc-4", false),
+                "{ignore:?}"
+            );
+        }
+        // Only the copies of the ignore file itself; other hidden names stay excluded.
+        let (_d, f) = filter_with(None);
+        assert!(!f.allows(".sapphireignored", false));
+        assert!(!f.allows(".other.conflict-123abc-4", false));
+        assert!(!f.allows("dir/.sapphireignore.conflict-123abc-4", false));
     }
 }

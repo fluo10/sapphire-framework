@@ -180,3 +180,30 @@ fn an_ignored_copy_path_does_not_pin_the_loser_forever() {
         "no per-scan noise"
     );
 }
+
+#[test]
+fn concurrent_ignore_file_edits_keep_both_versions() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, ".sapphireignore", "*.tmp\n");
+    scan(&mut a);
+    sync(&mut a, &mut b);
+
+    write(&a, ".sapphireignore", "*.tmp\n*.log\n");
+    write(&b, ".sapphireignore", "*.tmp\n*.bak\n");
+    scan(&mut a);
+    scan(&mut b);
+    sync(&mut a, &mut b);
+    sync(&mut a, &mut b);
+
+    assert_eq!(tree(&a), tree(&b));
+    assert_eq!(
+        contents(&a),
+        BTreeSet::from(["*.tmp\n*.log\n".to_string(), "*.tmp\n*.bak\n".to_string()]),
+        "the loser's ignore file survived as a copy"
+    );
+    let copy = tree(&a)
+        .into_keys()
+        .find(|p| p != ".sapphireignore")
+        .unwrap();
+    assert!(copy.starts_with(".sapphireignore.conflict-"), "{copy}");
+}
