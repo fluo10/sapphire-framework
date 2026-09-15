@@ -4,9 +4,9 @@
 - Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-net`, `-keys`;
   changes to `-registry`, `-backend`, the facade; removal of `-rpc`, `-remote-client`,
   `-remote-server`, `-blob`
-- Follow-ups (separate specs, in their own repositories): `sapphire-sync` (new reference
-  app, first consumer), then `sapphire-timer`, `sapphire-ledger`, `sapphire-journal`,
-  `sapphire-agent`
+- Follow-ups (separate specs): `sapphire-sync` (new sync app, first consumer; lives in
+  this repository), then `sapphire-timer`, `sapphire-ledger`, `sapphire-journal`,
+  `sapphire-agent` (each in its own repository)
 - Related issues: #83, #86, #87, #90, #92, #103, #104, #117
 
 ## Background
@@ -85,9 +85,17 @@ Agreed during brainstorming on 2026-09-15:
 10. **Any file type is synced, with a size cap.** Content is addressed by hash for all
     files; whole-file transfer only (default cap 64 MiB); chunked/resumable transfer is
     deferred.
-11. **A reference app, `sapphire-sync` (Syncthing-like), is built before migrating the
-    existing apps.** It is also the way to run a headless node (e.g. on a server) without
-    any other app.
+11. **A sync-only app, `sapphire-sync` (Syncthing-like), is built before migrating the
+    existing apps.** It is the reference implementation, the headless node for servers
+    (it can serve as the production always-on peer), and the dedicated background sync
+    service for hosts that prefer one — the role iCloud's background daemon plays, which
+    keeps a later move to an OS-service-style deployment an operational choice rather than
+    a redesign. Because it is a core component, it **lives in the `sapphire-framework`
+    repository** and is versioned in lockstep with the framework crates. Its directory
+    layout and packaging are decided in its own spec.
+12. **Guardrails for embedding the node in apps**: a compatibility policy tied to the format
+    version, fault isolation so a node failure never takes the app down, and a per-host
+    switch that leaves the node to a dedicated service (§3.3, §4.1, §5.4).
 
 ## 1. Crate layout
 
@@ -320,6 +328,11 @@ newer app. A process that finds an older format migrates it (idempotently) befor
   the holder. No handoff is needed; sync pauses for a few seconds.
 - A follower's writes reach peers because the holder watches every registered root
   (§2.5).
+- **Dedicated service mode**: with `embedded_node = false` in `net.toml`, processes that
+  embed the node as a library never try the lock and stay followers. Only a process started
+  as a dedicated node (`sapphire-sync` running as a service) takes it. Recommended on
+  servers and everyday machines, where fault isolation and a single framework version
+  matter more than zero setup; apps need no change, they simply become followers.
 - **Inter-process communication is files only**: invites via `invites.toml`, state via
   `status.json` (connected peers, per-workspace progress, skipped paths, conflicts; written
   every 5 s and on change), registration via `workspaces.toml`. A local socket can be added
@@ -431,6 +444,11 @@ Run by the lock holder. It:
   external edits;
 - writes `status.json`.
 
+**Fault isolation.** The node runs on its own threads and its own async runtime, never on
+the app's. Panics inside node tasks are caught; the node shuts down, logs the failure,
+releases the lock (so another process can take over) and reports the failure to the app as
+an error state. The app keeps running in follower mode.
+
 ### 4.2 Dialing and live propagation
 
 - **Dial**: every non-retired device of the mesh, plus mDNS-discovered mesh devices. Full
@@ -510,11 +528,12 @@ times would drift between apps.
 
 ### 5.3 App migration requirements
 
-Each gets its own spec in its own repository.
+Each gets its own spec.
 
-- **`sapphire-sync`** (new, first): Syncthing-like folder sync over arbitrary directories
-  (`app_name = "sapphire-sync"`, filtering via `.sapphireignore`); the reference
-  implementation, the E2E test bed, and the headless server node.
+- **`sapphire-sync`** (new, first; in this repository): Syncthing-like folder sync over
+  arbitrary directories (`app_name = "sapphire-sync"`, filtering via `.sapphireignore`);
+  the reference implementation, the E2E test bed, the headless server node, and the
+  dedicated sync service of §3.3.
 - **timer**: drop the `remote` subcommand; embed `NodeCommand`; call `register_workspace`.
 - **ledger**: remove `sapphire-ledger-sync` and the server's `/rpc`; replace the
   token → device lookup in `identity.rs` with the host device from the mesh. `updated_by`
@@ -533,6 +552,12 @@ Each gets its own spec in its own repository.
 ### 5.4 Compatibility
 
 - Breaking wire and crate changes: release as **0.15.0**.
+- **Behavioural compatibility policy.** Because a node built from one app's framework
+  version may sync another app's workspaces, anything that changes what two nodes would do
+  with the same input — merge rules, conflict-copy naming, filtering rules, the meaning of
+  a wire field — requires bumping the format version (§3.1), even when the bytes on disk or
+  on the wire are unchanged. Golden tests pin the behaviour of each format version (fixed
+  inputs → expected store state and file tree) so an accidental change fails CI.
 - No sync data migration (not in production): existing server change logs are discarded;
   devices pair into a new mesh.
 - Registry: a migration from single-file `devices.toml` to one file per record is provided
@@ -573,6 +598,8 @@ sapphire-sync → timer → ledger → journal → agent.
     causally overwritten, present at the end either as the final version or as a conflict
     copy.
   - **Idempotence**: merging the same entries again changes nothing.
+- **Golden behaviour tests** per format version (§5.4): fixed scenarios whose resulting store
+  state and file tree are checked in; a change requires a format bump.
 - **Crash recovery**: a fault-injection point between store commit and file write; after
   restart the scan re-materializes instead of recording an external edit.
 - **Filtering**: built-in rule per app name, `.sapphireignore`, size cap, unrepresentable
@@ -584,6 +611,10 @@ sapphire-sync → timer → ledger → journal → agent.
   that is killed); format too new → follower; older format → migrated.
 - registration: adding/removing `workspaces.toml` entries opens/closes replicas.
 - root path mismatch refuses to open a replica.
+- dedicated service mode: with `embedded_node = false`, an embedding process never takes
+  the lock; a dedicated node does.
+- fault isolation: a panic injected into a node task stops the node, releases the lock and
+  leaves the host process running as a follower.
 - holder visibility: `status.json` names the holder; a follower logs the holder line at
   startup and after a takeover; the shared log records `holder changed` and rotates at the
   size limit.
@@ -616,14 +647,19 @@ A real-relay test exists as `#[ignore]`, run manually.
 
 1. **journal's id reassignment** must become content-deterministic; until it does, journal
    cannot migrate safely.
-2. **Framework version skew across apps on one host.** Format versioning keeps an old app
-   from corrupting newer state, but a host whose newest app is not running does not sync.
-3. **File locks** behave poorly on network filesystems; the node directory must be local.
-4. **Mobile devices appear once per app** unless the platform allows a shared container.
-5. **Embedded relay** needs a publicly reachable address and TLS; home servers behind NAT
+2. **Framework version skew across apps on one host.** Format versioning and the
+   behavioural compatibility policy keep an old app from corrupting newer state or merging
+   differently, but a host whose newest app is not running does not sync. Dedicated service
+   mode (§3.3) removes the skew where it matters.
+3. **A bug in one app's process can pause sync for all apps** on the host until another
+   process takes over (≤ 10 s); fault isolation (§4.1) keeps the app itself running, and
+   dedicated service mode removes the exposure.
+4. **File locks** behave poorly on network filesystems; the node directory must be local.
+5. **Mobile devices appear once per app** unless the platform allows a shared container.
+6. **Embedded relay** needs a publicly reachable address and TLS; home servers behind NAT
    may still need n0 relays.
-6. **iroh API evolution** within 1.x (wire-stable, but API-level changes are possible), and
+7. **iroh API evolution** within 1.x (wire-stable, but API-level changes are possible), and
    the exact names of discovery features must be confirmed against 1.2.
-7. **Large workspaces**: full-mesh dialing and whole-file transfer are sized for a handful of
+8. **Large workspaces**: full-mesh dialing and whole-file transfer are sized for a handful of
    devices and files under the cap; chunking and smarter topology are deferred.
-8. **Tombstones grow without GC** until tombstone GC is designed.
+9. **Tombstones grow without GC** until tombstone GC is designed.
