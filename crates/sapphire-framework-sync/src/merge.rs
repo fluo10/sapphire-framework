@@ -31,6 +31,13 @@ pub fn join(
     incoming: &[Entry],
     incoming_seen: &VersionVector,
 ) -> Option<(Vec<Entry>, VersionVector)> {
+    // With no version on either side there is nothing to return but an empty sibling
+    // set, and `winner` — also `pub` — panics on one. The `local = None` branch below
+    // would otherwise hand the empty `incoming` straight back.
+    if incoming.is_empty() && local.is_none_or(|(versions, _)| versions.is_empty()) {
+        tracing::error!("join of two empty sibling sets; keeping the local state");
+        return None;
+    }
     let Some((local, local_seen)) = local else {
         let mut versions = incoming.to_vec();
         versions.sort_by_key(|e| e.dot);
@@ -218,6 +225,25 @@ mod tests {
             "X is superseded; the delete and Z are siblings"
         );
         assert_eq!(winner(&orders[0].0).dot, dot(3, 1));
+    }
+
+    /// `join` and `winner` are both `pub`: a join must never return a sibling set
+    /// `winner` would panic on.
+    #[test]
+    fn an_empty_join_never_returns_an_empty_sibling_set() {
+        let seen = vv(&[dot(1, 1)]);
+        assert_eq!(join(None, &[], &seen), None);
+        assert_eq!(join(Some((&[], &seen)), &[], &seen), None);
+        let x = written(file(dot(1, 1), 10, "x", &[]));
+        for got in [
+            join(Some((&x.0, &x.1)), &[], &seen),
+            join(Some((&[], &seen)), &x.0, &x.1),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(!got.0.is_empty());
+        }
     }
 
     #[test]
