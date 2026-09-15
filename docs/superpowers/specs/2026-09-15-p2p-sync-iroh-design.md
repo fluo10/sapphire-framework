@@ -266,6 +266,13 @@ The grain-id is derived from the replica UUID's suffix (§2.1).
 - If the loser's bytes are unavailable, no copy is made here, and the file's `disk.seen`
   excludes that loser (§2.5) so a later local edit does not supersede it; a replica that has
   the bytes will create the copy.
+- A loser whose copy path no replica could ever write — one the workspace's own
+  `.sapphireignore` rejects, or one the local OS cannot represent — is the exception: it
+  stays in `disk.seen` and the next edit supersedes it without a copy, because excluding it
+  would pin the path out of `disk.seen` forever and block every later edit. An ignore
+  pattern matching a copy name is a deliberate opt-out, and an unrepresentable name is
+  still preserved on the replicas that can hold it; the copy of `.sapphireignore` itself is
+  always allowed by the filter, so the built-in hidden-name rule never swallows it.
 
 Before joining an update into a path, the node checks that path's file for an unrecorded
 external edit (§2.5) and records it first, so a pending local edit is never overwritten
@@ -749,7 +756,8 @@ sapphire-sync → timer → ledger → journal → agent.
     are identical.
   - **No silent loss**: any content a replica ever recorded is, unless
     causally overwritten, present at the end either as the final version or as a conflict
-    copy.
+    copy — except where that copy's path is rejected by the workspace's own
+    `.sapphireignore` or is unrepresentable on the replica's OS (§2.4).
   - **Idempotence**: joining the same updates again changes nothing.
 - **Golden behaviour tests** per format version (§5.4): fixed scenarios whose resulting store
   state and file tree are checked in; a change requires a format bump.
