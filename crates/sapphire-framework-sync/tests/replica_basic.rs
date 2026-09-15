@@ -177,6 +177,48 @@ fn state_survives_reopening() {
     ));
 }
 
+#[test]
+fn an_incoming_update_leaves_an_oversized_local_file_alone() {
+    let mut a = node(1);
+    let mut b = node_with(2, |c| c.max_file_size = 8);
+    write(&a, "a.txt", "small");
+    scan(&mut a);
+    push(&a, &mut b);
+    write(&b, "a.txt", "this is far too large");
+    scan(&mut b);
+    write(&a, "a.txt", "tiny");
+    scan(&mut a);
+    let report = push(&a, &mut b);
+    assert_eq!(read(&b, "a.txt").as_deref(), Some("this is far too large"));
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.path == "a.txt" && s.reason == SkipReason::Occupied),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_directory_in_the_way_does_not_wedge_the_replica() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, "notes", "a file");
+    scan(&mut a);
+    write(&b, "notes/inner.txt", "a directory here");
+    scan(&mut b);
+    let report = push(&a, &mut b);
+    assert!(
+        report.skipped.iter().any(|s| s.path == "notes"),
+        "{report:?}"
+    );
+    assert_eq!(
+        read(&b, "notes/inner.txt").as_deref(),
+        Some("a directory here")
+    );
+    write(&b, "later.txt", "still recorded");
+    assert!(scan(&mut b).recorded.iter().any(|e| e.path == "later.txt"));
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinks_are_skipped() {

@@ -20,6 +20,12 @@ pub enum SkipReason {
     Symlink,
     /// Not available locally and the content source could not provide the bytes.
     ContentUnavailable,
+    /// The local path holds something this replica has not recorded (a directory, a
+    /// symlink, or a file it cannot hash within the size cap), so it is left untouched.
+    Occupied,
+    /// A per-path I/O error kept this path from being reconciled; sync continues with
+    /// other paths. The message is the underlying error's `Display`.
+    Io(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

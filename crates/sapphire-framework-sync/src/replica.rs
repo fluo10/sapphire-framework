@@ -99,18 +99,37 @@ fn place(staged: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    if fs::rename(staged, dest).is_ok() {
-        return Ok(());
+    match fs::rename(staged, dest) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::CrossesDevices => {}
+        Err(e) => return Err(e.into()),
     }
     let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = dest.with_file_name(format!(".{name}.sapphire-tmp"));
-    fs::copy(staged, &tmp)?;
-    fs::rename(&tmp, dest)?;
+    if let Err(e) = fs::copy(staged, &tmp).and_then(|_| fs::rename(&tmp, dest)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     fs::remove_file(staged)?;
     Ok(())
+}
+
+/// Turn a per-path `Error::Io` into a `Skipped` entry and let the caller continue;
+/// propagate every other error so callers still abort on store/format/pause failures.
+fn tolerate_io(result: Result<()>, rel: &str, report: &mut Report) -> Result<()> {
+    match result {
+        Err(Error::Io(e)) => {
+            report.skipped.push(Skipped {
+                path: rel.to_owned(),
+                reason: SkipReason::Io(e.to_string()),
+            });
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 impl Replica {
@@ -196,7 +215,8 @@ impl Replica {
             rels.insert(rel);
         }
         for rel in rels {
-            self.reconcile_path(&rel, &filter, None, &mut report)?;
+            let result = self.reconcile_path(&rel, &filter, None, &mut report);
+            tolerate_io(result, &rel, &mut report)?;
         }
         Ok(ScanOutcome::Scanned(report))
     }
@@ -232,8 +252,15 @@ impl Replica {
             for version in &update.versions {
                 self.meta.hlc = self.meta.hlc.observe(version.hlc, now);
             }
-            self.reconcile_path(&update.path, &filter, Some(source), &mut report)?;
-            self.integrate(update.clone(), None, &filter, Some(source), &mut report)?;
+            // Report a per-path I/O error and still integrate the update: the
+            // on-disk check in `settle` is what keeps this from overwriting an
+            // unrecorded local edit, and every delivered update must still be
+            // joined into the store for `commit_session` to be correct.
+            let reconciled = self.reconcile_path(&update.path, &filter, Some(source), &mut report);
+            tolerate_io(reconciled, &update.path, &mut report)?;
+            let integrated =
+                self.integrate(update.clone(), None, &filter, Some(source), &mut report);
+            tolerate_io(integrated, &update.path, &mut report)?;
         }
         Ok(report)
     }
@@ -249,7 +276,8 @@ impl Replica {
         let filter = self.filter()?;
         let mut report = Report::default();
         for (rel, _) in self.store.all()? {
-            self.reconcile_path(&rel, &filter, Some(source), &mut report)?;
+            let result = self.reconcile_path(&rel, &filter, Some(source), &mut report);
+            tolerate_io(result, &rel, &mut report)?;
         }
         Ok(report)
     }
@@ -447,6 +475,13 @@ impl Replica {
             });
             return Ok(());
         }
+        if self.occupied(rel, &state.disk)? {
+            report.skipped.push(Skipped {
+                path: rel.to_owned(),
+                reason: SkipReason::Occupied,
+            });
+            return Ok(());
+        }
         let abs = paths::to_native(&self.config.root, rel);
         match winner.content {
             Content::Tombstone => {
@@ -512,6 +547,33 @@ impl Replica {
             return Ok(Some(SkipReason::CaseCollision { other }));
         }
         Ok(None)
+    }
+
+    /// Whether the path on disk at `rel` holds something this replica has not
+    /// recorded: a symlink, a directory, a file over the size cap, or a file whose
+    /// content differs from `disk.hash`. A missing file, or a file matching
+    /// `disk.hash`, is not occupied.
+    fn occupied(&self, rel: &str, disk: &DiskState) -> Result<bool> {
+        let abs = paths::to_native(&self.config.root, rel);
+        let meta = match fs::symlink_metadata(&abs) {
+            Ok(m) => m,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        if !meta.is_file() {
+            // A symlink or a directory.
+            return Ok(true);
+        }
+        if meta.len() > self.config.max_file_size {
+            return Ok(true);
+        }
+        let stamp = stamp_of(&meta);
+        let hash = if disk.hash.is_some() && stamp == (disk.mtime_ns, disk.len) && !is_racy(disk) {
+            disk.hash
+        } else {
+            Some(ContentHash::of_file(&abs)?)
+        };
+        Ok(hash != disk.hash)
     }
 
     /// Another stored path, differing from `rel` only in case, whose file is on disk.
