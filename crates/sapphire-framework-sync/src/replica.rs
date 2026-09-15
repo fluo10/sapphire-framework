@@ -680,9 +680,10 @@ impl Replica {
             // else at the copy path is an unrelated file, and recording it as the copy
             // (which the reconcile below does) would lose the loser silently.
             let holds_the_loser = match fs::symlink_metadata(&copy_abs) {
-                Ok(m) if m.is_file() => ContentHash::of_file(&copy_abs)? == hash,
-                // A directory or a symlink: not the loser's bytes, and not something to
-                // write over. The loser stays out of `disk.seen`, so it is not lost.
+                Ok(m) if m.is_file() && ContentHash::of_file(&copy_abs)? == hash => true,
+                // A regular file with different bytes, a directory, or a symlink: not
+                // the loser's bytes, and not something to write over. The loser stays
+                // out of `disk.seen`, so it is not lost.
                 Ok(_) => {
                     report.skipped.push(Skipped {
                         path: copy_rel,

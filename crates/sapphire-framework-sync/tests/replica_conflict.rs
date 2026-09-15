@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use common::*;
 use sapphire_framework_sync::testing::MapSource;
-use sapphire_framework_sync::{Conflict, conflict_path};
+use sapphire_framework_sync::{Conflict, SkipReason, conflict_path};
 
 fn based(a: &mut Node, b: &mut Node) {
     write(a, "a.txt", "base");
@@ -242,10 +242,17 @@ fn an_unrelated_file_at_the_copy_path_does_not_become_the_copy() {
 
     // Something unrelated is sitting at the copy path when the bytes arrive.
     write(&b, &copy, "not the loser at all");
-    b.replica.fetch_missing(&a.replica).unwrap();
+    let report = b.replica.fetch_missing(&a.replica).unwrap();
     assert_eq!(
         read(&b, &copy).as_deref(),
-        Some("from a"),
-        "the loser's bytes, not whatever happened to be there"
+        Some("not the loser at all"),
+        "the unrelated file must not be overwritten"
+    );
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.path == copy && s.reason == SkipReason::Occupied),
+        "{report:?}"
     );
 }
