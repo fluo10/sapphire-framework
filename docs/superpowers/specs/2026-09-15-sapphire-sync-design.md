@@ -133,9 +133,9 @@ system-wide install off Linux) is the framework's behaviour.
 
 ```
 server$ sudo sapphire-sync service install              # system unit, User=alice
-server$ sapphire-workgroup create --name home
+server$ sapphire-sync workgroup create --name home
 server$ sapphire-sync device invite --name laptop       # prints a ticket
-laptop$ sapphire-workgroup join <ticket>
+laptop$ sapphire-sync workgroup join <ticket>
 laptop$ sapphire-sync init ~/Documents/notes            # workspace "notes"
 server$ sapphire-sync workspace list                     # notes appears
 server$ sapphire-sync workspace map notes /srv/sync/notes
