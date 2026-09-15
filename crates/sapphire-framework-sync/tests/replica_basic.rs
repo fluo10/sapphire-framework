@@ -267,3 +267,48 @@ fn an_unreadable_directory_does_not_abort_the_scan() {
         "the walk continued past the unreadable directory: {report:?}"
     );
 }
+
+/// `tolerate_io` is what keeps one bad path from wedging a replica: the path is
+/// reported and the rest of the scan still runs.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_is_reported_and_the_scan_continues() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut a = node(1);
+    write(&a, "locked.txt", "secret");
+    write(&a, "sibling.txt", "ok");
+    let locked = a.root.join("locked.txt");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = scan(&mut a);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.path == "locked.txt" && matches!(s.reason, SkipReason::Io(_))),
+        "{report:?}"
+    );
+    assert!(
+        report.recorded.iter().any(|e| e.path == "sibling.txt"),
+        "{report:?}"
+    );
+    assert!(a.replica.state("locked.txt").unwrap().is_none());
+}
+
+#[test]
+fn an_ignored_path_is_reported_when_a_peer_sends_it() {
+    let (mut a, mut b) = (node(1), node(2));
+    write(&a, "build.log", "noise");
+    scan(&mut a);
+    write(&b, ".sapphireignore", "*.log\n");
+    scan(&mut b);
+    let report = push(&a, &mut b);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.path == "build.log" && s.reason == SkipReason::Ignored),
+        "{report:?}"
+    );
+    assert_eq!(read(&b, "build.log"), None);
+}

@@ -3,6 +3,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::*;
+use sapphire_framework_sync::Conflict;
 use sapphire_framework_sync::testing::MapSource;
 
 fn based(a: &mut Node, b: &mut Node) {
@@ -23,8 +24,11 @@ fn concurrent_edits_keep_both_versions() {
     write(&b, "a.txt", "from b");
     scan(&mut a);
     scan(&mut b);
-    sync(&mut a, &mut b);
-    sync(&mut a, &mut b);
+    let mut conflicts = Vec::new();
+    for _ in 0..2 {
+        conflicts.extend(push(&a, &mut b).conflicts);
+        conflicts.extend(push(&b, &mut a).conflicts);
+    }
 
     assert_eq!(tree(&a), tree(&b));
     assert_eq!(tree(&a).len(), 2);
@@ -36,6 +40,13 @@ fn concurrent_edits_keep_both_versions() {
     assert!(
         copy.starts_with("a.conflict-") && copy.ends_with(".txt"),
         "{copy}"
+    );
+    assert!(
+        conflicts.contains(&Conflict {
+            path: "a.txt".to_string(),
+            copy_path: copy.clone(),
+        }),
+        "the copy written to the tree was reported: {conflicts:?}"
     );
 
     // An edit on top of the merged state supersedes both siblings; no new copies.
