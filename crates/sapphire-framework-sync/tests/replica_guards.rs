@@ -252,3 +252,34 @@ fn a_case_only_collision_is_skipped() {
     );
     assert_eq!(read(&b, "A.txt").as_deref(), Some("upper"));
 }
+
+#[test]
+fn a_root_that_disappears_mid_scan_records_no_tombstones() {
+    let mut a = node(1);
+    write(&a, "a.txt", "one");
+    write(&a, "b.txt", "two");
+    scan(&mut a);
+
+    // Unplug the drive after the first path of the scan has been reconciled.
+    let root = a.root.clone();
+    let parked = a.root.with_file_name("parked");
+    let moved = parked.clone();
+    a.replica.inject_after_reconcile(Box::new(move || {
+        std::fs::rename(&root, &moved).unwrap();
+    }));
+    assert!(matches!(
+        a.replica.scan(),
+        Err(Error::Paused(PauseReason::RootMissing))
+    ));
+
+    std::fs::rename(&parked, &a.root).unwrap();
+    for rel in ["a.txt", "b.txt"] {
+        let state = a.replica.state(rel).unwrap().unwrap();
+        assert!(
+            !state.winner().content.is_tombstone(),
+            "{rel} was tombstoned by a vanishing root"
+        );
+        assert_eq!(state.versions.len(), 1, "{rel} gained a version");
+    }
+    assert!(scan(&mut a).recorded.is_empty(), "nothing to re-record");
+}

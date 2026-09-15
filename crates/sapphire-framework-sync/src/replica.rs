@@ -72,6 +72,10 @@ pub struct Replica {
     clock: Arc<dyn Clock>,
     #[cfg(any(test, feature = "test-util"))]
     fault: Option<crate::testing::FaultPoint>,
+    /// Fires once after the next path a scan reconciles. Lets a test change the
+    /// filesystem in the middle of a scan.
+    #[cfg(any(test, feature = "test-util"))]
+    reconcile_hook: Option<Box<dyn FnOnce()>>,
 }
 
 fn now_ns() -> i64 {
@@ -155,6 +159,8 @@ impl Replica {
             clock,
             #[cfg(any(test, feature = "test-util"))]
             fault: None,
+            #[cfg(any(test, feature = "test-util"))]
+            reconcile_hook: None,
         })
     }
 
@@ -217,6 +223,16 @@ impl Replica {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    fn run_reconcile_hook(&mut self) {
+        if let Some(hook) = self.reconcile_hook.take() {
+            hook();
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-util")))]
+    fn run_reconcile_hook(&mut self) {}
+
     /// Record every unrecorded edit under the root and finish pending writes.
     pub fn scan(&mut self) -> Result<ScanOutcome> {
         if let Some(reason) = self.pause_reason()? {
@@ -259,6 +275,7 @@ impl Replica {
         for rel in rels {
             let result = self.reconcile_path(&rel, &filter, None, &mut report);
             tolerate_io(result, &rel, &mut report)?;
+            self.run_reconcile_hook();
         }
         Ok(ScanOutcome::Scanned(report))
     }
@@ -444,6 +461,17 @@ impl Replica {
         };
         if state.is_none() && content.is_tombstone() {
             return Ok(());
+        }
+        // A root that disappears *during* a scan looks exactly like a bulk delete: the
+        // entry guard already passed, so every remaining path would be tombstoned and
+        // the next push would delete them everywhere. Re-check before recording a
+        // delete for a file this replica had materialized. `Error::Paused` is not
+        // `Error::Io`, so `tolerate_io` propagates it and the scan stops here.
+        if content.is_tombstone()
+            && disk.hash.is_some()
+            && let Some(reason) = self.pause_reason()?
+        {
+            return Err(Error::Paused(reason));
         }
         let entry = self.next_entry(rel, content, disk.seen.clone());
         report.recorded.push(entry.clone());
@@ -795,6 +823,11 @@ impl Replica {
     /// Fire `point` the next time it is reached, then clear it.
     pub fn inject_fault(&mut self, point: crate::testing::FaultPoint) {
         self.fault = Some(point);
+    }
+
+    /// Run `hook` once after the next path a scan reconciles, then clear it.
+    pub fn inject_after_reconcile(&mut self, hook: Box<dyn FnOnce()>) {
+        self.reconcile_hook = Some(hook);
     }
 
     /// Everything that must agree across converged replicas, without timestamps of
