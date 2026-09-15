@@ -49,8 +49,10 @@ impl SyncFilter {
         // A conflict copy of the ignore file is a hidden name, which the built-in rule
         // below would reject — so no replica could ever write it, and a concurrent edit
         // to the ignore file would be silently superseded everywhere. The file the
-        // filter can never exclude cannot have its copy excluded either.
-        if rel.starts_with(IGNORE_FILE_CONFLICT_PREFIX) {
+        // filter can never exclude cannot have its copy excluded either. Require a
+        // single path segment so a directory that merely starts with this prefix does
+        // not carve out its entire subtree.
+        if rel.starts_with(IGNORE_FILE_CONFLICT_PREFIX) && !rel.contains('/') {
             return true;
         }
         if !rel
@@ -126,5 +128,8 @@ mod tests {
         assert!(!f.allows(".sapphireignored", false));
         assert!(!f.allows(".other.conflict-123abc-4", false));
         assert!(!f.allows("dir/.sapphireignore.conflict-123abc-4", false));
+        // A directory that merely starts with the conflict-copy prefix must not carve
+        // out its whole subtree.
+        assert!(!f.allows(".sapphireignore.conflict-1/inner.txt", false));
     }
 }
