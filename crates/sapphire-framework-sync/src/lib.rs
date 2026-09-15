@@ -7,6 +7,7 @@ mod error;
 mod hash;
 mod hlc;
 mod id;
+mod merge;
 mod report;
 mod vv;
 
@@ -15,5 +16,6 @@ pub use error::{Error, Result};
 pub use hash::{ContentHash, ParseHashError};
 pub use hlc::{Clock, Hlc, MAX_DRIFT_MS, SystemClock};
 pub use id::ReplicaId;
+pub use merge::{conflict_path, join, needs_copy, winner};
 pub use report::{Conflict, PauseReason, Report, ScanOutcome, SkipReason, Skipped};
 pub use vv::{Dot, VersionVector};
