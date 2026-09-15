@@ -75,7 +75,11 @@ fn run(n: usize, ops: &[Op]) -> Result<(), TestCaseError> {
         match *op {
             Op::Write { node, path, body } => {
                 let i = node % n;
-                write(&nodes[i], PATHS[path], BODIES[body]);
+                write(
+                    &nodes[i],
+                    PATHS[path],
+                    &format!("{}:{}", PATHS[path], BODIES[body]),
+                );
                 recorded.extend(scan(&mut nodes[i]).recorded);
             }
             Op::Delete { node, path } => {
@@ -97,7 +101,8 @@ fn run(n: usize, ops: &[Op]) -> Result<(), TestCaseError> {
         }
     }
 
-    // Everyone syncs with everyone until nothing moves.
+    // Everyone syncs with everyone for a fixed number of rounds (the loop does
+    // not detect a fixpoint, so 6 rounds is just "enough" for these op counts).
     for _ in 0..6 {
         for i in 0..n {
             for j in 0..n {
