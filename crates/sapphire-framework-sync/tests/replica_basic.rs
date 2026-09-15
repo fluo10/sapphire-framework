@@ -253,6 +253,12 @@ fn an_unreadable_directory_does_not_abort_the_scan() {
     write(&a, "sibling.txt", "ok");
     let locked = a.root.join("locked");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Mode 000 denies root nothing, so under a root-run suite the directory would
+    // still be readable and the test's premise would not hold: skip instead of failing.
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
     let report = scan(&mut a);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
@@ -279,6 +285,12 @@ fn an_unreadable_file_is_reported_and_the_scan_continues() {
     write(&a, "sibling.txt", "ok");
     let locked = a.root.join("locked.txt");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Mode 000 denies root nothing, so under a root-run suite the file would still be
+    // readable and the test's premise would not hold: skip instead of failing.
+    if std::fs::read(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
     let report = scan(&mut a);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(
