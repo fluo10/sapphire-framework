@@ -68,7 +68,7 @@ In: spec §2 entirely (types, store, join, conflict copies, local and external e
 
 Deliberately **not** in this plan (later implementation steps of spec §5.6):
 
-- `group_id` / `workspace_id` on `ReplicaConfig`, `.<app>/sync-id`, share/map/unmap registration, the shared node directory, lock and roles (step 3). The replica here takes a root, a device id and a state directory; step 3 wraps it.
+- `workgroup_id` / `workspace_id` on `ReplicaConfig`, `.<app>/sync-id`, share/map/unmap registration, the shared node directory, lock and roles (step 3). The replica here takes a root, a device id and a state directory; step 3 wraps it.
 - iroh, sessions over the network, inline small-file content, `status.json`, the file watcher (step 4). `delta_for` / `apply` / `commit_session` / `ContentSource` are the seams step 4 plugs into.
 - Tombstone GC, moves/renames, per-file-type merge, chunked transfer (spec §2.8).
 
