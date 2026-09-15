@@ -1,6 +1,6 @@
 //! A replica: one workspace root kept in sync with peers by joining path states.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -123,6 +123,73 @@ fn place(staged: &Path, dest: &Path) -> Result<()> {
     // turn a completed placement into an error and leave the state uncommitted.
     let _ = fs::remove_file(staged);
     Ok(())
+}
+
+/// Lookups over the stored path states that would otherwise be a full store read per
+/// path: `case_twin` on a case-insensitive filesystem runs for every path of a first
+/// scan, and `read_content` runs for every file materialized from a peer. Built once
+/// per `scan`/`apply`/`fetch_missing` and kept current as states are committed, so it
+/// never goes stale within a call.
+#[derive(Debug, Default)]
+struct StoreIndex {
+    /// `disk.hash` of each stored path that has a file on disk.
+    hash_of: HashMap<String, ContentHash>,
+    /// `disk.hash` -> the stored paths whose file on disk has that hash, in path order.
+    by_hash: HashMap<ContentHash, BTreeSet<String>>,
+    /// Lowercased path -> the stored paths with that lowercase form. Left empty on a
+    /// case-sensitive filesystem, where no path can have a case twin.
+    by_lower: HashMap<String, BTreeSet<String>>,
+}
+
+impl StoreIndex {
+    fn build(states: &[(String, PathState)]) -> Self {
+        let mut index = Self::default();
+        for (rel, state) in states {
+            index.record(rel, state.disk.hash);
+        }
+        index
+    }
+
+    /// Note that `rel` now has `hash` on disk, replacing whatever it had before.
+    fn record(&mut self, rel: &str, hash: Option<ContentHash>) {
+        if paths::CASE_INSENSITIVE_FS {
+            self.by_lower
+                .entry(rel.to_lowercase())
+                .or_default()
+                .insert(rel.to_owned());
+        }
+        let previous = match hash {
+            Some(hash) => self.hash_of.insert(rel.to_owned(), hash),
+            None => self.hash_of.remove(rel),
+        };
+        if let Some(previous) = previous
+            && Some(previous) != hash
+            && let Some(paths) = self.by_hash.get_mut(&previous)
+        {
+            paths.remove(rel);
+            if paths.is_empty() {
+                self.by_hash.remove(&previous);
+            }
+        }
+        if let Some(hash) = hash {
+            self.by_hash.entry(hash).or_default().insert(rel.to_owned());
+        }
+    }
+
+    /// Another stored path, differing from `rel` only in case, whose file is on disk.
+    /// Always `None` on a case-sensitive filesystem.
+    fn case_twin(&self, rel: &str) -> Option<String> {
+        self.by_lower
+            .get(&rel.to_lowercase())?
+            .iter()
+            .find(|other| other.as_str() != rel && self.hash_of.contains_key(*other))
+            .cloned()
+    }
+
+    /// Stored paths whose file on disk has `hash`, in path order.
+    fn paths_with(&self, hash: &ContentHash) -> impl Iterator<Item = &String> {
+        self.by_hash.get(hash).into_iter().flatten()
+    }
 }
 
 /// Turn a per-path `Error::Io` into a `Skipped` entry and let the caller continue;
@@ -287,11 +354,13 @@ impl Replica {
                 rels.insert(rel);
             }
         }
-        for (rel, _) in self.store.all()? {
+        let states = self.store.all()?;
+        let mut index = StoreIndex::build(&states);
+        for (rel, _) in states {
             rels.insert(rel);
         }
         for rel in rels {
-            let result = self.reconcile_path(&rel, &filter, None, &mut report);
+            let result = self.reconcile_path(&rel, &filter, None, &mut index, &mut report);
             tolerate_io(result, &rel, &mut report)?;
             self.run_reconcile_hook();
         }
@@ -320,6 +389,7 @@ impl Replica {
         }
         let filter = self.filter()?;
         let mut report = Report::default();
+        let mut index = StoreIndex::build(&self.store.all()?);
         let now = self.clock.now_ms();
         for update in updates {
             // A counter of 0 is not a dot any replica assigns (`next_entry` increments
@@ -341,10 +411,17 @@ impl Replica {
             // on-disk check in `settle` is what keeps this from overwriting an
             // unrecorded local edit, and every delivered update must still be
             // joined into the store for `commit_session` to be correct.
-            let reconciled = self.reconcile_path(&update.path, &filter, Some(source), &mut report);
+            let reconciled =
+                self.reconcile_path(&update.path, &filter, Some(source), &mut index, &mut report);
             tolerate_io(reconciled, &update.path, &mut report)?;
-            let integrated =
-                self.integrate(update.clone(), None, &filter, Some(source), &mut report);
+            let integrated = self.integrate(
+                update.clone(),
+                None,
+                &filter,
+                Some(source),
+                &mut index,
+                &mut report,
+            );
             tolerate_io(integrated, &update.path, &mut report)?;
         }
         Ok(report)
@@ -363,8 +440,10 @@ impl Replica {
         }
         let filter = self.filter()?;
         let mut report = Report::default();
-        for (rel, _) in self.store.all()? {
-            let result = self.reconcile_path(&rel, &filter, Some(source), &mut report);
+        let states = self.store.all()?;
+        let mut index = StoreIndex::build(&states);
+        for (rel, _) in states {
+            let result = self.reconcile_path(&rel, &filter, Some(source), &mut index, &mut report);
             tolerate_io(result, &rel, &mut report)?;
         }
         Ok(report)
@@ -372,11 +451,13 @@ impl Replica {
 
     /// Bytes with `hash` from a file on disk or the staging directory.
     pub fn read_content(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
-        for (rel, state) in self.store.all()? {
-            if state.disk.hash.as_ref() != Some(hash) {
-                continue;
-            }
-            if let Ok(bytes) = fs::read(paths::to_native(&self.config.root, &rel))
+        self.content_with(hash, &StoreIndex::build(&self.store.all()?))
+    }
+
+    /// [`Self::read_content`] against an index the caller already holds.
+    fn content_with(&self, hash: &ContentHash, index: &StoreIndex) -> Result<Option<Vec<u8>>> {
+        for rel in index.paths_with(hash) {
+            if let Ok(bytes) = fs::read(paths::to_native(&self.config.root, rel))
                 && ContentHash::of_bytes(&bytes) == *hash
             {
                 return Ok(Some(bytes));
@@ -414,6 +495,7 @@ impl Replica {
         rel: &str,
         filter: &SyncFilter,
         source: Option<&dyn ContentSource>,
+        index: &mut StoreIndex,
         report: &mut Report,
     ) -> Result<()> {
         if !filter.allows(rel, false) || !paths::representable(rel) {
@@ -423,9 +505,9 @@ impl Replica {
         let state = self.store.get(rel)?;
         let disk = state.as_ref().map(|s| s.disk.clone()).unwrap_or_default();
         // On a case-insensitive filesystem, `a.txt` would find the file of `A.txt`.
-        if disk.hash.is_none() && self.case_twin(rel)?.is_some() {
+        if disk.hash.is_none() && index.case_twin(rel).is_some() {
             if let Some(state) = state {
-                self.settle(rel, state, filter, source, report)?;
+                self.settle(rel, state, filter, source, index, report)?;
             }
             return Ok(());
         }
@@ -469,11 +551,10 @@ impl Replica {
                     state.disk.mtime_ns = stamp.0;
                     state.disk.len = stamp.1;
                     state.disk.checked_ns = now_ns();
-                    self.store
-                        .commit(&self.meta, &[(rel.to_owned(), state.clone())])?;
+                    self.commit_state(rel, &state, index)?;
                 }
-                self.ensure_conflict_copies(rel, &state, filter, source, report)?;
-                self.settle(rel, state, filter, source, report)?;
+                self.ensure_conflict_copies(rel, &state, filter, source, index, report)?;
+                self.settle(rel, state, filter, source, index, report)?;
             }
             return Ok(());
         }
@@ -512,7 +593,7 @@ impl Replica {
             versions: vec![entry],
             seen,
         };
-        self.integrate(update, Some(new_disk), filter, source, report)
+        self.integrate(update, Some(new_disk), filter, source, index, report)
     }
 
     /// Join `update` into the stored state, commit, then settle the file.
@@ -523,6 +604,7 @@ impl Replica {
         local_disk: Option<DiskState>,
         filter: &SyncFilter,
         source: Option<&dyn ContentSource>,
+        index: &mut StoreIndex,
         report: &mut Report,
     ) -> Result<()> {
         let rel = update.path.clone();
@@ -544,12 +626,11 @@ impl Replica {
             seen,
             disk,
         };
-        self.store
-            .commit(&self.meta, &[(rel.clone(), state.clone())])?;
+        self.commit_state(&rel, &state, index)?;
         report.changed += 1;
         // Copies first: settling may overwrite the loser's bytes on disk.
-        self.ensure_conflict_copies(&rel, &state, filter, source, report)?;
-        self.settle(&rel, state, filter, source, report)
+        self.ensure_conflict_copies(&rel, &state, filter, source, index, report)?;
+        self.settle(&rel, state, filter, source, index, report)
     }
 
     /// Write a conflict copy for every loser that needs one and has never had one.
@@ -559,6 +640,7 @@ impl Replica {
         state: &PathState,
         filter: &SyncFilter,
         source: Option<&dyn ContentSource>,
+        index: &mut StoreIndex,
         report: &mut Report,
     ) -> Result<()> {
         if state.versions.len() < 2 {
@@ -623,7 +705,7 @@ impl Replica {
                 };
                 let bytes = match on_disk {
                     Some(bytes) => Some(bytes),
-                    None => match self.read_content(&hash)? {
+                    None => match self.content_with(&hash, index)? {
                         Some(bytes) => Some(bytes),
                         None => source.and_then(|s| s.fetch(&hash)),
                     },
@@ -647,7 +729,7 @@ impl Replica {
                 });
             }
             // Record the copy (or a file someone already put there) as a local write.
-            self.reconcile_path(&copy_rel, filter, source, report)?;
+            self.reconcile_path(&copy_rel, filter, source, index, report)?;
         }
         Ok(())
     }
@@ -659,6 +741,7 @@ impl Replica {
         mut state: PathState,
         filter: &SyncFilter,
         source: Option<&dyn ContentSource>,
+        index: &mut StoreIndex,
         report: &mut Report,
     ) -> Result<()> {
         let winner = state.winner().clone();
@@ -666,11 +749,11 @@ impl Replica {
             let seen = self.disk_seen(&state, filter)?;
             if seen != state.disk.seen {
                 state.disk.seen = seen;
-                self.store.commit(&self.meta, &[(rel.to_owned(), state)])?;
+                self.commit_state(rel, &state, index)?;
             }
             return Ok(());
         }
-        if let Some(reason) = self.skip_reason(rel, &winner, filter)? {
+        if let Some(reason) = self.skip_reason(rel, &winner, filter, index)? {
             report.skipped.push(Skipped {
                 path: rel.to_owned(),
                 reason,
@@ -696,7 +779,7 @@ impl Replica {
                 state.disk = DiskState::default();
             }
             Content::File { hash, .. } => {
-                let Some(staged) = self.stage(&hash, source)? else {
+                let Some(staged) = self.stage(&hash, source, index)? else {
                     report.skipped.push(Skipped {
                         path: rel.to_owned(),
                         reason: SkipReason::ContentUnavailable,
@@ -716,7 +799,15 @@ impl Replica {
             }
         }
         state.disk.seen = self.disk_seen(&state, filter)?;
-        self.store.commit(&self.meta, &[(rel.to_owned(), state)])
+        self.commit_state(rel, &state, index)
+    }
+
+    /// Commit one path state and keep `index` in step with it.
+    fn commit_state(&self, rel: &str, state: &PathState, index: &mut StoreIndex) -> Result<()> {
+        self.store
+            .commit(&self.meta, &[(rel.to_owned(), state.clone())])?;
+        index.record(rel, state.disk.hash);
+        Ok(())
     }
 
     /// Versions the file on disk reflects once the winner is written: everything
@@ -750,6 +841,7 @@ impl Replica {
         rel: &str,
         winner: &Entry,
         filter: &SyncFilter,
+        index: &StoreIndex,
     ) -> Result<Option<SkipReason>> {
         if !filter.allows(rel, false) {
             return Ok(Some(SkipReason::Ignored));
@@ -766,7 +858,7 @@ impl Replica {
             }));
         }
         if !winner.content.is_tombstone()
-            && let Some(other) = self.case_twin(rel)?
+            && let Some(other) = index.case_twin(rel)
         {
             return Ok(Some(SkipReason::CaseCollision { other }));
         }
@@ -800,34 +892,18 @@ impl Replica {
         Ok(hash != disk.hash)
     }
 
-    /// Another stored path, differing from `rel` only in case, whose file is on disk.
-    /// Always `None` on case-sensitive filesystems.
-    fn case_twin(&self, rel: &str) -> Result<Option<String>> {
-        if !paths::CASE_INSENSITIVE_FS {
-            return Ok(None);
-        }
-        let lower = rel.to_lowercase();
-        Ok(self
-            .store
-            .all()?
-            .into_iter()
-            .find(|(other, s)| {
-                other != rel && other.to_lowercase() == lower && s.disk.hash.is_some()
-            })
-            .map(|(other, _)| other))
-    }
-
     /// A verified copy of `hash` in the staging directory, if one can be had.
     fn stage(
         &self,
         hash: &ContentHash,
         source: Option<&dyn ContentSource>,
+        index: &StoreIndex,
     ) -> Result<Option<PathBuf>> {
         let staged = self.config.staging_dir.join(hash.to_hex());
         if staged.is_file() && ContentHash::of_file(&staged)? == *hash {
             return Ok(Some(staged));
         }
-        let bytes = match self.read_content(hash)? {
+        let bytes = match self.content_with(hash, index)? {
             Some(bytes) => Some(bytes),
             None => source.and_then(|s| s.fetch(hash)),
         };
@@ -903,5 +979,55 @@ impl Replica {
             "paths": path_states,
             "files": files,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(body: &str) -> ContentHash {
+        ContentHash::of_bytes(body.as_bytes())
+    }
+
+    #[test]
+    fn the_index_follows_a_path_from_one_hash_to_another() {
+        let mut index = StoreIndex::default();
+        index.record("a.txt", Some(hash("one")));
+        index.record("b.txt", Some(hash("one")));
+        assert_eq!(
+            index.paths_with(&hash("one")).collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+
+        index.record("a.txt", Some(hash("two")));
+        assert_eq!(
+            index.paths_with(&hash("one")).collect::<Vec<_>>(),
+            vec!["b.txt"],
+            "the stale hash no longer points at a.txt"
+        );
+        assert_eq!(
+            index.paths_with(&hash("two")).collect::<Vec<_>>(),
+            vec!["a.txt"]
+        );
+
+        // A deleted file has no bytes on disk any more.
+        index.record("a.txt", None);
+        assert_eq!(index.paths_with(&hash("two")).count(), 0);
+    }
+
+    #[test]
+    fn the_index_finds_a_materialized_case_twin() {
+        let mut index = StoreIndex::default();
+        index.record("A.txt", Some(hash("upper")));
+        index.record("a.txt", None);
+        let twin = index.case_twin("a.txt");
+        if paths::CASE_INSENSITIVE_FS {
+            assert_eq!(twin.as_deref(), Some("A.txt"));
+            assert_eq!(index.case_twin("A.txt"), None, "a.txt is not on disk");
+            assert_eq!(index.case_twin("other.txt"), None);
+        } else {
+            assert_eq!(twin, None, "no case twins on a case-sensitive filesystem");
+        }
     }
 }
