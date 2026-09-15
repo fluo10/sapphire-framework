@@ -11,6 +11,8 @@ mod id;
 mod merge;
 pub mod paths;
 mod report;
+mod state;
+mod store;
 mod vv;
 
 pub use entry::{Content, Entry, PathUpdate};
@@ -21,4 +23,6 @@ pub use hlc::{Clock, Hlc, MAX_DRIFT_MS, SystemClock};
 pub use id::ReplicaId;
 pub use merge::{conflict_path, join, needs_copy, winner};
 pub use report::{Conflict, PauseReason, Report, ScanOutcome, SkipReason, Skipped};
+pub use state::{DiskState, PathState};
+pub use store::{FORMAT_VERSION, Meta, ReplicaStore};
 pub use vv::{Dot, VersionVector};

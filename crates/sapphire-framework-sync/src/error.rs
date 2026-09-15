@@ -30,7 +30,6 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Converts redb's per-operation error types into [`Error::Store`].
-#[allow(dead_code)] // Unused until Task 4 wires up the redb store.
 pub(crate) trait RedbExt<T> {
     fn db(self) -> Result<T>;
 }
