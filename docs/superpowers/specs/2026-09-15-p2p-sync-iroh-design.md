@@ -1,7 +1,7 @@
 # Peer-to-peer workspace sync over iroh
 
-- Date: 2026-09-15 (revised the same day: shared host node, device mesh, single-user)
-- Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-net`, `-keys`;
+- Date: 2026-09-15 (revised the same day: shared host node, device meshes, single user, grain-id identifiers, service installation)
+- Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-net`, `-keys`, `-service`;
   changes to `-registry`, `-backend`, the facade; removal of `-rpc`, `-remote-client`,
   `-remote-server`, `-blob`
 - Follow-ups (separate specs): `sapphire-sync` (new sync app, first consumer; lives in
@@ -80,12 +80,20 @@ Agreed during brainstorming on 2026-09-15:
    processes only touch files and take over when the lock frees. No handoff protocol, no
    daemon requirement. Where a shared directory is impossible (mobile sandboxes), each app
    keeps its own directory and becomes its own device — same mechanism, different location.
-9. **Devices form one cross-app mesh.** A device pairs once and can then host any of the
-   mesh's workspaces; each device chooses which workspaces it keeps a copy of.
-10. **Any file type is synced, with a size cap.** Content is addressed by hash for all
+9. **Devices form cross-app meshes.** A device pairs into a mesh once and can then host any
+   of that mesh's workspaces; each device chooses which workspaces it keeps a copy of
+   (`workspace map`). Layout, wire format and authorization support a host in several meshes
+   (e.g. work and personal); the first release's CLI limits a host to one.
+10. **User-visible identifiers are grain-ids** (`mesh_id`, `workspace_id`, `device_id`, ids
+    in file names); only the internal `ReplicaId` stays a UUID (§2.1). Workspaces and meshes
+    can also be selected by name.
+11. **`sapphire-framework-service`** provides `service install` for any app: user-level
+    units by default, a system-wide systemd unit when run as root on Linux, with a per-app
+    default run-as user (§5.5).
+12. **Any file type is synced, with a size cap.** Content is addressed by hash for all
     files; whole-file transfer only (default cap 64 MiB); chunked/resumable transfer is
     deferred.
-11. **A sync-only app, `sapphire-sync` (Syncthing-like), is built before migrating the
+13. **A sync-only app, `sapphire-sync` (Syncthing-like), is built before migrating the
     existing apps.** It is the reference implementation, the headless node for servers
     (it can serve as the production always-on peer), and the dedicated background sync
     service for hosts that prefer one — the role iCloud's background daemon plays, which
@@ -93,7 +101,7 @@ Agreed during brainstorming on 2026-09-15:
     a redesign. Because it is a core component, it **lives in the `sapphire-framework`
     repository** and is versioned in lockstep with the framework crates. Its directory
     layout and packaging are decided in its own spec.
-12. **Guardrails for embedding the node in apps**: a compatibility policy tied to the format
+14. **Guardrails for embedding the node in apps**: a compatibility policy tied to the format
     version, fault isolation so a node failure never takes the app down, and a per-host
     switch that leaves the node to a dedicated service (§3.3, §4.1, §5.4).
 
@@ -106,6 +114,7 @@ Agreed during brainstorming on 2026-09-15:
 | `sapphire-framework-sync` | Replication core, **transport-agnostic**: wire types, `ReplicaStore` (redb), merge rules, HLC, conflict copies, declarative filtering, external-edit detection via `TrackStore` | serde, redb, sha2, ignore, `-track` |
 | `sapphire-framework-net` | Shared node directory and lock, iroh `Endpoint`, protocol handlers (`sync`, `blob`, `pair`), authorization against the mesh, discovery and relay configuration, `SyncNode` runtime, file watcher, workspace registration API, `NodeCommand` CLI subcommands (feature `cli`), embedded relay (feature `embedded-relay`) | iroh 1.x, `-sync`, `-registry` |
 | `sapphire-framework-keys` | `KeyStore` / `KeyEntry` / `protect`, moved out of `-remote-server` (#103). For non-sync HTTP endpoints | serde, toml, axum (feature) |
+| `sapphire-framework-service` | `ServiceCommand` (`service install` / `uninstall` / `status`) and `ServiceSpec`: registers an app's long-running command with the OS service manager (§5.5). Not sync-specific; reused by `sapphire-sync`, `sapphire-agent`, … | clap, `-workspace` (`AppContext`) |
 
 `-sync` and `-net` must **not** depend on `-workspace` or `-retrieve`. `sapphire-sync`
 (which has no search index) verifies this.
@@ -172,7 +181,15 @@ File metadata (mtime, permissions) is not synced. Adding it later as a
 `#[serde(default)]` field does not break the wire format.
 
 A replica is opened from its registration (§3.2):
-`ReplicaConfig { app_name, workspace_id: Uuid, root: PathBuf, max_file_size: u64 /* default 64 MiB */ }`.
+`ReplicaConfig { mesh_id: GrainId, app_name, workspace_id: GrainId, root: PathBuf, max_file_size: u64 /* default 64 MiB */ }`.
+
+**Identifier policy.** Identifiers a user can see or type (`mesh_id`, `workspace_id`,
+`device_id`, and ids embedded in file names) are grain-ids. `ReplicaId` stays a UUID: it is
+never typed, and a collision would reuse dots, which is unrecoverable, so it gets the wider
+id space. Where a replica must appear in a file name, it is shown as a grain-id derived from
+the UUID's bytes with grain-id's byte-slice constructor — from the **suffix** for UUIDv7 (the
+prefix is a timestamp, so prefixes of ids created close together collide) and from the
+**prefix** for UUIDv4. `ReplicaId` is UUIDv7, so its suffix is used.
 
 ### 2.2 Store (redb)
 
@@ -215,8 +232,9 @@ Merging an incoming entry `e` into a path's `(cur, seen)`:
    - `seen = seen ∪ e.context ∪ {e.dot}`; `cur = winner`.
    - If the loser is not a tombstone and its content differs from the winner's, create a
      **conflict copy** as an ordinary local write at
-     `<stem>.conflict-<first 8 hex of loser replica id>-<loser counter>.<ext>`
-     (`<name>.conflict-…` when there is no extension).
+     `<stem>.conflict-<loser replica as grain-id>-<loser counter>.<ext>`
+     (`<name>.conflict-…` when there is no extension), e.g. `note.conflict-123abcd-42.md`.
+     The grain-id is derived from the replica UUID's suffix (§2.1).
      - The path is deterministic and identical content never produces a copy, so several
        nodes creating the same copy concurrently converge on one file.
      - If the loser is local, the local file is moved to the copy path before the winner is
@@ -240,6 +258,15 @@ Detection compares the file's hash with `materialized`:
   (the store commits before the file is written); write `cur` out again.
 
 Recording the same content as `cur` is a no-op and assigns no dot.
+
+**Missing root guard.** A root that is temporarily absent (unplugged drive, unmounted
+network share) would otherwise look like every file was deleted, and the tombstones would
+delete the files on every other device. Before any scan, the node checks that the root and
+its marker directory (`.<app_name>/`) exist. If the store holds materialized files but the
+root or marker is missing, the replica is **paused** — nothing is recorded, the pause is
+reported in `status.json`, and scanning resumes when both reappear. A newly mapped
+workspace (§3.2) has its root and marker created at mapping time, so it is never paused
+for being empty.
 
 ### 2.6 Filtering and limits
 
@@ -281,13 +308,15 @@ tombstone), first-class moves/renames, per-file-type merge, chunked/resumable tr
     node.key                               # iroh secret key -> this device's NodeId
     node.lock                              # OS file lock, held by the process running the node
     net.toml                               # host-local network config (discovery, relays, embedded relay)
-    workspaces.toml                        # workspaces this host keeps: {id, app_name, root, max_file_size}
+    workspaces.toml                        # workspaces this host keeps: {mesh_id, id, app_name, root, max_file_size}
     invites.toml                           # pending pairing invites
     status.json                            # written by the running node, including who runs it
     logs/node.log                          # sync log, written by whichever process runs the node
     staging/
     replicas/<workspace-id>/sync.redb
-    mesh/                                  # the device mesh, itself a synced workspace (§3.5)
+    meshes/<mesh-id>/                      # one directory per mesh this host belongs to (§3.5)
+        replica/sync.redb                  #   replica store of the mesh workspace itself
+        root/                              #   the mesh workspace's files, synced among its devices
 ```
 
 It is framework-wide: it carries no app name and no kind. This sits outside the per-app,
@@ -309,14 +338,25 @@ newer app. A process that finds an older format migrates it (idempotently) befor
 
 ### 3.2 Registering workspaces
 
-- `net::register_workspace(app_name, workspace_id, root)` adds an entry to
-  `workspaces.toml` and publishes `{app_name, display name}` to
-  `mesh/workspaces/<workspace-id>.toml`. Apps call it when the user enables sync for a
-  workspace.
+- **Sync id.** `Workspace::uuid` is derived from the workspace path, so it differs between
+  hosts and cannot identify a workspace across devices. The sync identity is a separate
+  grain-id stored in the marker directory as `.<app_name>/sync-id`. The file is synced, and
+  its content is the same on every device, so it never conflicts. Re-registering a
+  workspace (e.g. after losing the node directory) reads the existing id. Cache keys keep
+  using the path-derived UUID.
+- **Share** (a new workspace): `net::share_workspace(mesh, app_name, root, name)` reads or
+  creates `sync-id` (a fresh grain-id that is not already listed in the mesh), adds an entry
+  to `workspaces.toml`, and publishes `{app_name, name}` to the mesh's
+  `workspaces/<workspace-id>.toml`. `name` defaults to the root directory's name. Apps call
+  it when the user enables sync for a workspace.
+- **Map** (an existing workspace onto a local directory): `workspace map <name|id> <dir>`
+  looks the workspace up in the mesh, creates `<dir>` and its marker `.<app_name>/` with
+  `sync-id`, and adds the `workspaces.toml` entry. **Unmap** (`workspace unmap <name|id>`)
+  removes the entry; local files stay, and the workspace stays listed in the mesh.
+- **Selectors** follow the registry's rule: a selector matches a name first, then parses as a
+  grain-id; a name shared by several workspaces cannot be used as a selector.
 - The running node watches `workspaces.toml` and opens or closes replicas as entries
   appear or disappear.
-- Another device picks a workspace from the mesh list and places it locally with
-  `workspace add <workspace-id> --dir <dir>`.
 
 ### 3.3 Lock and roles
 
@@ -365,29 +405,47 @@ ALPNs are common to every app:
 |---|---|
 | `sapphire/sync/1` | replication (§3.7) |
 | `sapphire/blob/1` | `{workspace_id, hash}` → bytes; requester verifies SHA-256 |
-| `sapphire/pair/1` | joining the mesh (§3.6) |
+| `sapphire/pair/1` | joining a mesh (§3.6) |
 
 Messages are length-delimited postcard frames.
 
-### 3.5 The mesh and authorization
+### 3.5 Meshes and authorization
 
-- The mesh is identified by a `mesh_id` (UUIDv7), created by the first device.
-- `mesh/` is synced like any workspace, among all devices, always. It holds:
+A mesh is a group of devices that share workspaces. **The data model, on-disk layout and
+wire format support a host belonging to several meshes** (e.g. a laptop in both a "work"
+and a "personal" mesh, while a work-only machine sees only the work mesh). In the first
+release the CLI allows **one** mesh per host: `mesh create` / `mesh join` refuse when the
+host already belongs to a mesh. Lifting that limit is a CLI change, not a format change.
+
+- A mesh is identified by a `mesh_id` (grain-id) and has a `name`, both chosen by the device
+  that creates it.
+- Each mesh's workspace (`meshes/<mesh-id>/root/`) is synced among that mesh's devices,
+  always. It holds:
+  - `mesh.toml` — `{name}`;
   - `devices/<grain-id>.toml` — `{name, node_id, retired_at?}`, one file per device, so
     concurrent pairings on different devices never collide in one file;
-  - `workspaces/<workspace-id>.toml` — `{app_name, name}`.
-- **Founding device**: creating the mesh writes the device's own record, so it has a
+  - `workspaces/<workspace-id>.toml` — `{app_name, name}`;
+  - `net.toml` — optional relay URLs published to the mesh (§3.8).
+- **Every workspace belongs to exactly one mesh** (`workspaces.toml` records `mesh_id`).
+- **Device ids are per mesh.** One host has one `NodeId` but a separate device record, and
+  so a separate `device_id`, in each mesh it belongs to. `Entry.author` is the device id in
+  the workspace's mesh.
+- **Founding device**: creating a mesh writes the device's own record, so it has a
   `device_id` to use as `Entry.author` before its first sync.
 - **Authorization**: a connection is accepted if the remote `NodeId` belongs to a
-  non-retired device of the mesh. There is no per-workspace permission (single user); a
-  device syncs whatever workspaces both sides host.
-- **Revocation**: retiring a device is a mesh change; as it replicates, every node drops and
-  refuses that device's connections.
+  non-retired device of **at least one mesh this host also belongs to**. Only workspaces of
+  meshes both sides share are exchanged. There is no per-workspace permission inside a mesh
+  (single user).
+- **Revocation**: retiring a device is a change to that mesh; as it replicates, every node
+  stops exchanging that mesh's workspaces with the device, and drops the connection once
+  no shared mesh remains.
 - Attribution of mesh changes comes from the sync `Entry` (`author`, `hlc`).
+- **Mesh selectors** (`--mesh <name|id>`) use the same name-first rule as workspaces. The
+  flag may be omitted while the host belongs to a single mesh.
 
 ### 3.6 Pairing
 
-1. **Invite** (on any device): `device invite --name phone` creates a ticket encoding
+1. **Invite** (on any device): `device invite --name phone [--mesh <name|id>]` creates a ticket encoding
    `{mesh_id, inviter NodeAddr, secret: 32 random bytes, expires_at}` (postcard, base32,
    prefixed `sapphire:`). The invite goes to `invites.toml`: single use, default TTL
    10 minutes. The holder re-reads the file on each pairing attempt, so any process can
@@ -398,7 +456,8 @@ Messages are length-delimited postcard frames.
 3. **Admit** (holder on the inviter's host): verify the secret in constant time, check
    expiry and unused status, write the device record (with `node_id`) as a local write,
    mark the invite used, reply `{mesh_id, device_id}`.
-4. **Sync**: the joiner syncs `mesh/` and can then `workspace add` any listed workspace.
+4. **Sync**: the joiner syncs the mesh workspace and can then `workspace map` any listed
+   workspace.
    At first only the inviter knows the new device; other devices accept it once the mesh
    change reaches them.
 
@@ -406,9 +465,13 @@ Messages are length-delimited postcard frames.
 
 Per connection (bidirectional control stream):
 
-1. Both sides send `Hello { mesh_id, device_id, hosted: [(workspace_id, app_name)] }`. A
-   mismatched mesh closes the connection with a reason (logged, not retried).
-2. For each workspace both sides host, a dedicated stream runs a session:
+1. Both sides send
+   `Hello { meshes: [{ mesh_id, device_id, hosted: [(workspace_id, app_name)] }] }`, listing
+   only meshes the peer's `NodeId` is authorized for (a node does not reveal meshes the
+   peer is not in). No shared mesh closes the connection with a reason (logged, not
+   retried).
+2. For each workspace both sides host in a shared mesh — including each shared mesh's own
+   workspace — a dedicated stream runs a session:
    1. Both sides send `SessionHello { workspace_id, replica_id, vv }`.
    2. Each side sends, in pages, every `cur` entry whose dot is not covered by the peer's
       `vv`. Content of files ≤ 64 KiB is sent inline in the same stream, avoiding a round
@@ -418,15 +481,16 @@ Per connection (bidirectional control stream):
       simply resent next time.
    4. Missing larger content is fetched over `blob/1`.
    5. The stream stays open for live propagation (§4.2).
-3. Workspaces registered later on either side are announced on the control stream and get
-   a session.
+3. Workspaces registered later on either side, and changes in shared meshes, are announced
+   on the control stream; sessions start or stop accordingly.
 
 ### 3.8 Endpoint configuration (`net.toml`, host-local)
 
 - **Discovery**: n0 DNS (pkarr) and local-network mDNS, both on by default; static
   addresses may be added.
 - **Relays**: n0 default, custom URLs, or disabled. Custom relay URLs may also be published
-  in `mesh/net.toml` (synced), so installing one server makes every device use its relay.
+  in a mesh's `net.toml` (synced), so installing one server makes every device of that mesh
+  use its relay. A host in several meshes uses the union.
 - **Embedded relay** (`[relay.embedded]`): runs iroh-relay in-process, TLS via ACME or
   supplied certificates. Honoured only by binaries built with feature `embedded-relay`
   (in practice `sapphire-sync` on a server); a holder built without it logs a warning.
@@ -437,7 +501,7 @@ Per connection (bidirectional control stream):
 
 Run by the lock holder. It:
 
-- owns the iroh `Endpoint` and one replica per registered workspace, plus `mesh/`;
+- owns the iroh `Endpoint` and one replica per registered workspace, plus one per mesh;
 - tracks, per session, the peer's last known version vector;
 - watches every registered root (`notify`, debounced) plus a periodic full scan
   (default 5 min). Its own materializations match `materialized` and are not mistaken for
@@ -451,8 +515,9 @@ an error state. The app keeps running in follower mode.
 
 ### 4.2 Dialing and live propagation
 
-- **Dial**: every non-retired device of the mesh, plus mDNS-discovered mesh devices. Full
-  mesh — device counts are small. Exponential backoff, max 5 min.
+- **Dial**: every non-retired device of every mesh this host belongs to (one connection per
+  remote `NodeId`, however many meshes are shared), plus mDNS-discovered devices of those
+  meshes. Full mesh — device counts are small. Exponential backoff, max 5 min.
 - **Live**: after the initial exchange, sessions stay open. Local commits are pushed to all
   connected peers hosting that workspace. Entries received from one peer that changed state
   are forwarded to other connected peers whose known version vector does not cover them, so
@@ -495,6 +560,7 @@ Whether a cli syncs automatically after write commands is the app's choice.
   are not retried.
 - A replica that fails to open (format too new, root path mismatch, I/O) is reported in
   `status.json` and skipped; other workspaces keep syncing.
+- A replica whose root or marker is missing is paused, not scanned (§2.5).
 - Clock skew: §2.7.
 
 ## 5. App fix-ups, CLI, app migration, rollout
@@ -516,12 +582,22 @@ through sync.
 
 ### 5.2 CLI subcommands
 
-`NodeCommand` (clap `Subcommand`, feature `cli` of `-net`): `sync`, `node status`,
-`node log [--follow]`,
-`mesh create`, `mesh join <ticket>`, `device invite`, `device list`, `device retire`,
-`workspace list`, `workspace share <path>`, `workspace add <id> --dir <dir>`,
-`workspace remove <id>`. Apps embed it with `#[command(flatten)]`, like `WorkspaceArgs`
-(#128). Because the node is shared, running these from any app acts on the same mesh.
+`NodeCommand` (clap `Subcommand`, feature `cli` of `-net`):
+
+| command | effect |
+|---|---|
+| `sync` | one-shot sync (§4.3) |
+| `node status`, `node log [--follow]` | holder, peers, per-workspace state; shared sync log |
+| `mesh create --name <name>`, `mesh join <ticket>`, `mesh list` | create or join a mesh (one per host in the first release) |
+| `device invite --name <name>`, `device list`, `device retire <name\|id>` | pairing and revocation, in the selected mesh |
+| `workspace list` | name, grain-id, app, mesh, local directory (`-` if unmapped) |
+| `workspace share <path> [--name <name>]` | publish a local workspace to the mesh |
+| `workspace map <name\|id> <dir>` | place an existing mesh workspace in a local directory |
+| `workspace unmap <name\|id>` | stop keeping it locally (files and mesh listing stay) |
+
+Commands acting on a mesh take `--mesh <name|id>`, optional while the host is in one mesh.
+Apps embed `NodeCommand` with `#[command(flatten)]`, like `WorkspaceArgs` (#128). Because the
+node is shared, running these from any app acts on the same meshes.
 
 This reverses the earlier "the framework ships no subcommands" stance: pairing written four
 times would drift between apps.
@@ -565,18 +641,63 @@ Each gets its own spec.
   `users.toml` and `user_id` fields are ignored on load and dropped on the next write.
   Moving an app's existing device table into the mesh is decided per app.
 
-### 5.5 Implementation order (framework)
+### 5.5 Service installation (`sapphire-framework-service`)
+
+`ServiceCommand` (`service install` / `uninstall` / `status`) registers an app's
+long-running command with the OS service manager. Apps describe themselves with:
+
+```rust
+pub struct ServiceSpec {
+    pub args: Vec<String>,          // e.g. ["run"]
+    pub system_run_as: RunAs,       // Root | InvokingUser — default `User=` for system units
+    pub post_install: Option<Box<dyn Fn(&InstallContext) -> Result<()>>>,
+}
+```
+
+**Scope selection on Linux** (overridable with `--user` / `--system`):
+
+| invoked as | unit | activation |
+|---|---|---|
+| a regular user | `~/.config/systemd/user/<app>.service` | `systemctl --user enable --now`; prints a hint to `loginctl enable-linger` for servers |
+| root (including `sudo`) | `/etc/systemd/system/<app>.service`, `After=network-online.target` | `systemctl enable --now` |
+
+**Run-as user for system units** (`--run-as <user>` overrides):
+
+- `RunAs::Root` — no `User=`. For apps that start as root and drop privileges themselves
+  (`sapphire-agent`, agent issue #257).
+- `RunAs::InvokingUser` — `User=$SUDO_USER`. Without `SUDO_USER` and without `--run-as`,
+  install fails with an explanation. For `sapphire-sync`: running it as root would put
+  the node directory under `/root` and create synced files owned by root.
+
+`ExecStart` is the absolute path of the running executable plus `args`;
+`Restart=on-failure`.
+
+**Other platforms**: user-level only — macOS LaunchAgent, Windows Task Scheduler task at
+logon. Invoked with administrator/root rights there, install fails with "system-wide
+installation is supported on Linux only". LaunchDaemons and Windows services can be added
+when needed.
+
+`post_install` runs with the resolved target user; files it writes into another user's
+directories are chowned to that user. `sapphire-sync` uses it to write
+`embedded_node = false` into the target user's `net.toml` (skipped with `--keep-embedded`).
+
+An agent running as root with an embedded node uses root's node directory and therefore
+joins meshes as its own device; agent's spec records this.
+
+### 5.6 Implementation order (framework)
 
 1. **Sync core**: types, redb store, merge rules, external-edit detection, conflict copies,
    declarative filtering. Tested with several in-memory replicas, no network.
 2. **Registry**: users removed, one file per record + migration, `node_id`.
-3. **Node directory**: layout, format versioning, lock and roles, `workspaces.toml`
-   registration, `status.json` with holder info, shared sync log.
-4. **Net basics**: `Endpoint`, control stream + `sync/1`, `blob/1`, mesh authorization,
+3. **Node directory**: layout (per-mesh directories), format versioning, lock and roles,
+   `sync-id`, share/map/unmap registration, missing root guard, `status.json` with holder
+   info, shared sync log.
+4. **Net basics**: `Endpoint`, control stream + `sync/1`, `blob/1`, per-mesh authorization,
    `SyncNode`, live propagation, watcher.
 5. **Pairing**: mesh creation, `pair/1`, invites, `NodeCommand`.
-6. **Server features**: `embedded-relay`, relay URLs from `mesh/net.toml`.
-7. **Cleanup**: extract `keys`; remove `rpc`, `remote-*`, `blob`; `SyncedBackend`; facade;
+6. **Server features**: `embedded-relay`, relay URLs from mesh `net.toml`.
+7. **Service**: `sapphire-framework-service`.
+8. **Cleanup**: extract `keys`; remove `rpc`, `remote-*`, `blob`; `SyncedBackend`; facade;
    rewrite the sync sections of `ARCHITECTURE.md`, mark WASM out of scope, remove users.
 
 `sapphire-sync` can start as an E2E harness from step 4. App order afterwards:
@@ -611,6 +732,11 @@ sapphire-sync → timer → ledger → journal → agent.
   that is killed); format too new → follower; older format → migrated.
 - registration: adding/removing `workspaces.toml` entries opens/closes replicas.
 - root path mismatch refuses to open a replica.
+- missing root guard: removing (then restoring) a root or its marker pauses (then resumes)
+  the replica and records no tombstones; a freshly mapped empty workspace is not paused.
+- `sync-id`: share creates it; re-registering after deleting the node directory reuses it;
+  map writes the mesh's id; selectors resolve names first, reject ambiguous names.
+- the first release refuses a second `mesh create` / `mesh join`.
 - dedicated service mode: with `embedded_node = false`, an embedding process never takes
   the lock; a dedicated node does.
 - fault isolation: a panic injected into a node task stops the node, releases the lock and
@@ -630,7 +756,10 @@ addresses — no external network.
 - **A–S–B topology** (A and B not connected): live propagation through S
 - rejection: unknown `NodeId`, mesh mismatch, retired device (connection dropped once the
   retirement arrives)
-- pairing: success, expired, reused, wrong secret; the joiner sees `mesh/workspaces/`
+- pairing: success, expired, reused, wrong secret; the joiner sees the mesh's workspaces
+- multiple meshes (constructed directly, bypassing the first-release CLI limit): with A–B in
+  mesh C and B–D in mesh E, A and D never receive each other's workspaces, and `Hello` does
+  not list a mesh the peer is not in
 - blob fallback: content changed on one peer, fetched from another
 - follower writes reach peers through the holder
 
@@ -639,6 +768,10 @@ A real-relay test exists as `#[ignore]`, run manually.
 ### 6.4 Registry and CI
 
 - Registry migration: idempotent, retryable after partial failure; users dropped.
+- Service: unit/LaunchAgent/task file generation per scope and run-as (golden files);
+  scope detection from effective uid and `SUDO_USER`; refusal without `SUDO_USER` for
+  `InvokingUser`; refusal of system-wide install off Linux. Calls to `systemctl` /
+  `launchctl` / `schtasks` go through a trait so tests do not touch the host.
 - CI on Linux and Windows (path rules, rename semantics, file-lock semantics). proptest
   case counts are reduced in CI.
 - E2E tests belong to the `sapphire-sync` spec.
