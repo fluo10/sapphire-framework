@@ -62,6 +62,27 @@ pub fn reopen(node: Node) -> Node {
     }
 }
 
+/// Close the replica, delete its store and staging directory, and open a fresh one.
+pub fn reset_store(node: Node) -> Node {
+    let Node {
+        replica,
+        root,
+        clock,
+        _dir,
+    } = node;
+    let config = replica.config().clone();
+    drop(replica);
+    std::fs::remove_file(&config.store_path).unwrap();
+    let _ = std::fs::remove_dir_all(&config.staging_dir);
+    let replica = Replica::open(config, clock.clone()).unwrap();
+    Node {
+        replica,
+        root,
+        clock,
+        _dir,
+    }
+}
+
 pub fn write(node: &Node, rel: &str, body: &str) {
     let path = node.root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

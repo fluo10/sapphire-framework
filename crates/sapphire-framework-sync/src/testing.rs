@@ -48,3 +48,10 @@ impl ContentSource for MapSource {
         self.0.get(hash).cloned()
     }
 }
+
+/// Where an injected fault fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultPoint {
+    /// After a path state is committed, before its file is written or removed.
+    AfterCommitBeforeWrite,
+}

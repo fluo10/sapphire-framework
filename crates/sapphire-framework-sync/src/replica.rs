@@ -17,7 +17,7 @@ use crate::hlc::Clock;
 use crate::id::ReplicaId;
 use crate::merge;
 use crate::paths;
-use crate::report::{Conflict, Report, ScanOutcome, SkipReason, Skipped};
+use crate::report::{Conflict, PauseReason, Report, ScanOutcome, SkipReason, Skipped};
 use crate::state::{DiskState, PathState};
 use crate::store::{Meta, ReplicaStore};
 use crate::vv::{Dot, VersionVector};
@@ -70,6 +70,8 @@ pub struct Replica {
     store: ReplicaStore,
     meta: Meta,
     clock: Arc<dyn Clock>,
+    #[cfg(any(test, feature = "test-util"))]
+    fault: Option<crate::testing::FaultPoint>,
 }
 
 fn now_ns() -> i64 {
@@ -151,6 +153,8 @@ impl Replica {
             store,
             meta,
             clock,
+            #[cfg(any(test, feature = "test-util"))]
+            fault: None,
         })
     }
 
@@ -178,8 +182,46 @@ impl Replica {
         SyncFilter::load(&self.config.root, &self.config.app_name)
     }
 
+    /// Why this replica must not scan or apply right now. A root or marker that is
+    /// missing while files were written would otherwise read as "everything deleted".
+    pub fn pause_reason(&self) -> Result<Option<PauseReason>> {
+        let root_ok = self.config.root.is_dir();
+        let marker_ok = self
+            .config
+            .root
+            .join(format!(".{}", self.config.app_name))
+            .is_dir();
+        if root_ok && marker_ok {
+            return Ok(None);
+        }
+        if !self.store.any_materialized()? {
+            return Ok(None);
+        }
+        Ok(Some(if root_ok {
+            PauseReason::MarkerMissing
+        } else {
+            PauseReason::RootMissing
+        }))
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    fn fault_check(&mut self) -> Result<()> {
+        match self.fault.take() {
+            Some(crate::testing::FaultPoint::AfterCommitBeforeWrite) => Err(Error::InjectedFault),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-util")))]
+    fn fault_check(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Record every unrecorded edit under the root and finish pending writes.
     pub fn scan(&mut self) -> Result<ScanOutcome> {
+        if let Some(reason) = self.pause_reason()? {
+            return Ok(ScanOutcome::Paused(reason));
+        }
         let filter = self.filter()?;
         let mut report = Report::default();
         let mut rels = BTreeSet::new();
@@ -238,6 +280,9 @@ impl Replica {
 
     /// Join updates received from a peer, fetching content from `source`.
     pub fn apply(&mut self, updates: &[PathUpdate], source: &dyn ContentSource) -> Result<Report> {
+        if let Some(reason) = self.pause_reason()? {
+            return Err(Error::Paused(reason));
+        }
         let filter = self.filter()?;
         let mut report = Report::default();
         let now = self.clock.now_ms();
@@ -273,6 +318,9 @@ impl Replica {
 
     /// Retry writes that were waiting for content.
     pub fn fetch_missing(&mut self, source: &dyn ContentSource) -> Result<Report> {
+        if let Some(reason) = self.pause_reason()? {
+            return Err(Error::Paused(reason));
+        }
         let filter = self.filter()?;
         let mut report = Report::default();
         for (rel, _) in self.store.all()? {
@@ -571,6 +619,7 @@ impl Replica {
         let abs = paths::to_native(&self.config.root, rel);
         match winner.content {
             Content::Tombstone => {
+                self.fault_check()?;
                 match fs::remove_file(&abs) {
                     Ok(()) => {}
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -586,6 +635,7 @@ impl Replica {
                     });
                     return Ok(());
                 };
+                self.fault_check()?;
                 place(&staged, &abs)?;
                 let (mtime_ns, len) = stamp_of(&fs::metadata(&abs)?);
                 state.disk = DiskState {
@@ -740,6 +790,11 @@ impl Replica {
         id: ReplicaId,
     ) -> Result<Self> {
         Self::open_inner(config, clock, Some(id))
+    }
+
+    /// Fire `point` the next time it is reached, then clear it.
+    pub fn inject_fault(&mut self, point: crate::testing::FaultPoint) {
+        self.fault = Some(point);
     }
 
     /// Everything that must agree across converged replicas, without timestamps of
