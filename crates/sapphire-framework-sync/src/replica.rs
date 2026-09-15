@@ -17,7 +17,7 @@ use crate::hlc::Clock;
 use crate::id::ReplicaId;
 use crate::merge;
 use crate::paths;
-use crate::report::{Report, ScanOutcome, SkipReason, Skipped};
+use crate::report::{Conflict, Report, ScanOutcome, SkipReason, Skipped};
 use crate::state::{DiskState, PathState};
 use crate::store::{Meta, ReplicaStore};
 use crate::vv::{Dot, VersionVector};
@@ -384,6 +384,7 @@ impl Replica {
                     self.store
                         .commit(&self.meta, &[(rel.to_owned(), state.clone())])?;
                 }
+                self.ensure_conflict_copies(rel, &state, filter, source, report)?;
                 self.settle(rel, state, filter, source, report)?;
             }
             return Ok(());
@@ -447,7 +448,75 @@ impl Replica {
         self.store
             .commit(&self.meta, &[(rel.clone(), state.clone())])?;
         report.changed += 1;
+        // Copies first: settling may overwrite the loser's bytes on disk.
+        self.ensure_conflict_copies(&rel, &state, filter, source, report)?;
         self.settle(&rel, state, filter, source, report)
+    }
+
+    /// Write a conflict copy for every loser that needs one and has never had one.
+    fn ensure_conflict_copies(
+        &mut self,
+        rel: &str,
+        state: &PathState,
+        filter: &SyncFilter,
+        source: Option<&dyn ContentSource>,
+        report: &mut Report,
+    ) -> Result<()> {
+        if state.versions.len() < 2 {
+            return Ok(());
+        }
+        let winner = state.winner().clone();
+        let losers: Vec<Entry> = state
+            .versions
+            .iter()
+            .filter(|v| v.dot != winner.dot && merge::needs_copy(v, &winner))
+            .cloned()
+            .collect();
+        for loser in losers {
+            let Content::File { hash, .. } = loser.content else {
+                continue;
+            };
+            let copy_rel = merge::conflict_path(rel, &loser.dot);
+            if self.store.get(&copy_rel)?.is_some() {
+                continue;
+            }
+            let copy_abs = paths::to_native(&self.config.root, &copy_rel);
+            if !copy_abs.exists() {
+                // The loser may be exactly what is on disk at `rel` right now.
+                let on_disk = if state.disk.hash == Some(hash) {
+                    fs::read(paths::to_native(&self.config.root, rel)).ok()
+                } else {
+                    None
+                };
+                let bytes = match on_disk {
+                    Some(bytes) => Some(bytes),
+                    None => match self.read_content(&hash)? {
+                        Some(bytes) => Some(bytes),
+                        None => source.and_then(|s| s.fetch(&hash)),
+                    },
+                };
+                let Some(bytes) = bytes.filter(|b| ContentHash::of_bytes(b) == hash) else {
+                    report.skipped.push(Skipped {
+                        path: copy_rel,
+                        reason: SkipReason::ContentUnavailable,
+                    });
+                    continue;
+                };
+                let staged = self
+                    .config
+                    .staging_dir
+                    .join(format!("{}.copy", hash.to_hex()));
+                fs::write(&staged, &bytes)?;
+                place(&staged, &copy_abs)?;
+                report.conflicts.push(Conflict {
+                    path: rel.to_owned(),
+                    copy_path: copy_rel.clone(),
+                });
+            }
+            // Record the copy (or a file someone already put there) as a local write.
+            self.reconcile_path(&copy_rel, filter, source, report)?;
+        }
+        Ok(())
     }
 
     /// Make the file on disk hold the winner, then record what it reflects.
@@ -515,10 +584,27 @@ impl Replica {
         self.store.commit(&self.meta, &[(rel.to_owned(), state)])
     }
 
-    /// Versions the file on disk reflects once the winner is written.
-    /// (Task 6 excludes losers whose conflict copy could not be made.)
+    /// Versions the file on disk reflects once the winner is written: everything
+    /// merged, except losers still waiting for a conflict copy — a local edit must
+    /// not supersede a version whose bytes were never preserved.
     fn disk_seen(&self, state: &PathState) -> Result<VersionVector> {
-        Ok(state.seen.clone())
+        let winner = state.winner();
+        let mut seen = state.seen.clone();
+        for loser in state
+            .versions
+            .iter()
+            .filter(|v| v.dot != winner.dot && merge::needs_copy(v, winner))
+        {
+            if self
+                .store
+                .get(&merge::conflict_path(&loser.path, &loser.dot))?
+                .is_none()
+            {
+                let slot = seen.0.entry(loser.dot.replica).or_insert(0);
+                *slot = (*slot).min(loser.dot.counter - 1);
+            }
+        }
+        Ok(seen)
     }
 
     fn skip_reason(
