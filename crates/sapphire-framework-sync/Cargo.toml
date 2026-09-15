@@ -1,0 +1,30 @@
+[package]
+name = "sapphire-framework-sync"
+version.workspace = true
+edition.workspace = true
+description = "Transport-agnostic peer-to-peer replication core for sapphire-framework workspaces"
+license.workspace = true
+repository.workspace = true
+keywords = ["sync", "replication", "local-first", "p2p"]
+categories = ["filesystem"]
+
+[features]
+# Deterministic clocks, fault injection and logical dumps for tests.
+test-util = []
+
+[dependencies]
+grain-id.workspace = true
+ignore = "0.4"
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+sapphire-framework-sync = { path = ".", features = ["test-util"] }
+tempfile = "3"
