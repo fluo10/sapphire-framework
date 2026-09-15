@@ -111,7 +111,7 @@ Agreed during brainstorming on 2026-09-15:
 
 | crate | role | depends on |
 |---|---|---|
-| `sapphire-framework-sync` | Replication core, **transport-agnostic**: wire types, `ReplicaStore` (redb), merge rules, HLC, conflict copies, declarative filtering, external-edit detection via `TrackStore` | serde, redb, sha2, ignore, `-track` |
+| `sapphire-framework-sync` | Replication core, **transport-agnostic**: wire types, `ReplicaStore` (redb), merge rules, HLC, conflict copies, declarative filtering, external-edit detection (mtime + size pre-filter in its own store) | serde, redb, sha2, ignore, walkdir |
 | `sapphire-framework-net` | Shared node directory and lock, iroh `Endpoint`, protocol handlers (`sync`, `blob`, `pair`), authorization against the group, discovery and relay configuration, `SyncNode` runtime, file watcher, workspace registration API, `NodeCommand` CLI subcommands (feature `cli`), embedded relay (feature `embedded-relay`) | iroh 1.x, `-sync`, `-registry` |
 | `sapphire-framework-keys` | `KeyStore` / `KeyEntry` / `protect`, moved out of `-remote-server` (#103). For non-sync HTTP endpoints | serde, toml, axum (feature) |
 | `sapphire-framework-service` | `ServiceCommand` (`service install` / `uninstall` / `status`) and `ServiceSpec`: registers an app's long-running command with the OS service manager (§5.5). Not sync-specific; reused by `sapphire-sync`, `sapphire-agent`, … | clap, `-workspace` (`AppContext`) |
@@ -195,69 +195,101 @@ prefix is a timestamp, so prefixes of ids created close together collide) and fr
 
 Per replica:
 
-- per path: `PathState { cur: Entry, seen: VersionVector, materialized: Option<[u8; 32]> }`
-  - `cur` — the adopted version (tombstones are kept in the store; they have no file)
-  - `seen` — every version of this path merged so far
-  - `materialized` — hash of what was last written to (or read from) the file on disk
+- per path: `PathState { versions: Vec<Entry>, seen: VersionVector, disk: DiskState }`
+  - `versions` — the **sibling set**: every version of the path not superseded by another
+    known version (usually one; several after concurrent edits). Tombstones are versions
+    too; they have no file.
+  - `seen` — every version of this path merged so far (always covers `versions`)
+  - `disk: DiskState { hash: Option<[u8; 32]>, seen: VersionVector, mtime_ns, len }` —
+    what is on disk (`hash = None` means no file), which versions that file reflects, and
+    the file's mtime and size at that moment (the change-detection pre-filter; kept here,
+    in the same transaction as the state, rather than in a separate `TrackStore`)
 - node-wide version vector `vv`
 - own `ReplicaId`, `counter`, last `Hlc`
 - `format_version` (§3.1)
 
+The **winner** of a path is the sibling with the maximum
+`(is_not_tombstone, hlc, replica_id, counter)`. It is what the file on disk should hold.
+
 Losing the store is recoverable: a new replica id is created, every file is recorded as a
 local write, and syncing with peers converges without conflict copies because identical
-content never produces one (rule 3).
+content never produces one (§2.4).
 
 ### 2.3 File content lives in the origin
 
 There is no second copy in a blob store.
 
-- **Serving**: a `blob` request reads the origin file, hashes it, and sends it only if the
-  hash matches; otherwise it answers "not available" and the requester tries another peer.
-- **Receiving**: write to `<node dir>/staging/`, verify the hash, then move into place
-  (`rename`, which replaces atomically on the same volume on Linux and Windows).
-- **Change detection** uses `TrackStore` mtime + size as a pre-filter; only changed files
-  are re-hashed.
+- **Serving**: a `blob` request looks for a file whose recorded disk hash matches (or a staged
+  file), re-hashes it, and sends it only if the hash still matches; otherwise it answers
+  "not available" and the requester tries another peer.
+- **Receiving**: write to the replica's staging directory under the content hash, verify
+  the hash, then move into place with `rename` (atomic replace on one volume on Linux and
+  Windows). When the staging directory is on another volume than the workspace, the file is
+  copied to a hidden temporary name beside the target and renamed from there.
+- **Change detection** compares a file's mtime and size with `disk`; only changed files are
+  re-hashed.
 
 ### 2.4 Merge rules
 
-Merging an incoming entry `e` into a path's `(cur, seen)`:
+The unit of replication is a path's state, `PathUpdate { path, versions, seen }` — not a
+single entry. Joining an incoming update into a local state (the DVV-set join):
 
-1. **`seen` covers `e.dot`** → already merged; ignore.
-2. **`e.context` covers `seen ∪ {cur.dot}`** → `e` was written on top of what we have;
-   `cur = e`, `seen = e.context ∪ {e.dot}`.
-3. **Otherwise the edits are concurrent.**
-   - Winner = maximum of `(is_not_tombstone, hlc, replica_id)`. It is a total order, so every
-     node picks the same winner regardless of arrival order, and an edit always beats a
-     concurrent delete.
-   - `seen = seen ∪ e.context ∪ {e.dot}`; `cur = winner`.
-   - If the loser is not a tombstone and its content differs from the winner's, create a
-     **conflict copy** as an ordinary local write at
-     `<stem>.conflict-<loser replica as grain-id>-<loser counter>.<ext>`
-     (`<name>.conflict-…` when there is no extension), e.g. `note.conflict-123abcd-42.md`.
-     The grain-id is derived from the replica UUID's suffix (§2.1).
-     - The path is deterministic and identical content never produces a copy, so several
-       nodes creating the same copy concurrently converge on one file.
-     - If the loser is local, the local file is moved to the copy path before the winner is
-       written. If the loser is remote, its bytes are fetched from a peer; if no peer can
-       serve them anymore, the copy is skipped here — the replica that wrote the loser will
-       create the same copy from its own file once it receives the winner.
+1. Keep a local sibling if the incoming `seen` does not cover its dot, or the incoming
+   `versions` contain it.
+2. Keep an incoming sibling if the local `seen` does not cover its dot, or the local
+   `versions` contain it.
+3. `seen = local.seen ∪ incoming.seen`.
 
-Before merging into a path, the node checks that path's file for an unrecorded external
-edit (§2.5) and records it first, so a pending local edit is never overwritten unseen.
+The join is commutative, associative and idempotent, so every replica reaches the same
+sibling set whatever order updates arrive in. (Keeping only a single winner per path is not
+associative: a delete that supersedes an edit can lose to that edit in one merge order and
+win in another, because "edits beat deletes" makes the winner key non-monotonic along
+causality.)
+
+A **local write** is joined the same way, as an update with
+`versions = [e]`, `seen = e.context ∪ {e.dot}`.
+
+**Conflict copies.** Whenever a state has more than one sibling, every *loser* (sibling
+other than the winner) that is not a tombstone and whose content differs from the
+winner's gets a **conflict copy**, written as an ordinary local write at
+`<stem>.conflict-<loser replica as grain-id>-<loser counter>.<ext>`
+(`<name>.conflict-…` when there is no extension), e.g. `note.conflict-123abcd-42.md`.
+The grain-id is derived from the replica UUID's suffix (§2.1).
+
+- The path is deterministic and identical content never produces a copy, so several
+  nodes creating the same copy concurrently converge on one file.
+- Copies are created **before** the winner is written over the loser's file, reading the
+  loser's bytes from the local file when it is on disk, otherwise from local content or a
+  peer.
+- A copy is created only if the copy path has never had a state on this replica, so a copy
+  the user deleted is not resurrected.
+- If the loser's bytes are unavailable, no copy is made here, and the file's `disk.seen`
+  excludes that loser (§2.5) so a later local edit does not supersede it; a replica that has
+  the bytes will create the copy.
+
+Before joining an update into a path, the node checks that path's file for an unrecorded
+external edit (§2.5) and records it first, so a pending local edit is never overwritten
+unseen.
 
 ### 2.5 Local writes and external edits
 
 Apps write files; the node records them. Every write — by the node's own process or by any
 other process, including editors — is detected on disk and produces an entry with
-`dot = (self, counter + 1)`, `context = seen ∪ {cur.dot}`, `hlc = tick()`.
+`dot = (self, counter + 1)`, `context = disk.seen`, `hlc = tick()`. Using `disk.seen`
+(what the edited file was based on) rather than `seen` matters when a remote version has
+been merged but not yet written to disk: the edit is then correctly concurrent with it.
 
-Detection compares the file's hash with `materialized`:
+Detection compares the file's hash (`None` for a missing file) with `disk.hash`:
 
-- file hash ≠ `materialized` → an external edit; record it.
-- file hash = `materialized` but ≠ `cur` → a materialization was interrupted
-  (the store commits before the file is written); write `cur` out again.
+- file hash ≠ `disk.hash` → an external edit; record it.
+- file hash = `disk.hash` but ≠ the winner's → a materialization is pending or was
+  interrupted (the store commits before the file is written); write the winner out again.
 
-Recording the same content as `cur` is a no-op and assigns no dot.
+After the winner is on disk, `disk.seen = seen`, except that for each loser still needing
+a conflict copy that could not be made, the loser's replica entry is lowered to
+`counter - 1`.
+
+Recording the same content as `disk.hash` is a no-op and assigns no dot.
 
 **Missing root guard.** A root that is temporarily absent (unplugged drive, unmounted
 network share) would otherwise look like every file was deleted, and the tombstones would
@@ -473,10 +505,10 @@ Per connection (bidirectional control stream):
 2. For each workspace both sides host in a shared group — including each shared group's own
    workspace — a dedicated stream runs a session:
    1. Both sides send `SessionHello { workspace_id, replica_id, vv }`.
-   2. Each side sends, in pages, every `cur` entry whose dot is not covered by the peer's
+   2. Each side sends, in pages, every path state (`PathUpdate`) whose `seen` is not covered by the peer's
       `vv`. Content of files ≤ 64 KiB is sent inline in the same stream, avoiding a round
       trip per small file. Then `Done`.
-   3. Received entries are merged as they arrive (rule 1 makes redelivery harmless). The
+   3. Received updates are joined as they arrive (the join is idempotent, so redelivery is harmless). The
       replica's `vv` is updated only after the peer's `Done`; an interrupted session is
       simply resent next time.
    4. Missing larger content is fetched over `blob/1`.
@@ -504,7 +536,7 @@ Run by the lock holder. It:
 - owns the iroh `Endpoint` and one replica per registered workspace, plus one per group;
 - tracks, per session, the peer's last known version vector;
 - watches every registered root (`notify`, debounced) plus a periodic full scan
-  (default 5 min). Its own materializations match `materialized` and are not mistaken for
+  (default 5 min). Its own materializations match `disk` and are not mistaken for
   external edits;
 - writes `status.json`.
 
@@ -715,10 +747,10 @@ sapphire-sync → timer → ledger → journal → agent.
   reordering. Properties:
   - **Convergence**: after everyone has synced with everyone, all stores and file trees
     are identical.
-  - **No silent loss**: any content that was ever `cur` on some replica is, unless
+  - **No silent loss**: any content a replica ever recorded is, unless
     causally overwritten, present at the end either as the final version or as a conflict
     copy.
-  - **Idempotence**: merging the same entries again changes nothing.
+  - **Idempotence**: joining the same updates again changes nothing.
 - **Golden behaviour tests** per format version (§5.4): fixed scenarios whose resulting store
   state and file tree are checked in; a change requires a format bump.
 - **Crash recovery**: a fault-injection point between store commit and file write; after
