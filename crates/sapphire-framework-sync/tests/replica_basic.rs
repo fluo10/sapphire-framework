@@ -234,3 +234,27 @@ fn symlinks_are_skipped() {
     );
     assert!(report.recorded.iter().all(|e| e.path != "link.txt"));
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_directory_does_not_abort_the_scan() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut a = node(1);
+    write(&a, "locked/inner.txt", "hidden");
+    write(&a, "sibling.txt", "ok");
+    let locked = a.root.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = scan(&mut a);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| matches!(s.reason, SkipReason::Io(_))),
+        "{report:?}"
+    );
+    assert!(
+        report.recorded.iter().any(|e| e.path == "sibling.txt"),
+        "the walk continued past the unreadable directory: {report:?}"
+    );
+}

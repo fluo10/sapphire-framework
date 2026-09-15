@@ -252,7 +252,23 @@ impl Replica {
                             .is_some_and(|rel| filter.allows(&rel, e.file_type().is_dir()))
                 });
             for item in walker {
-                let item = item.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+                // One unreadable directory or Windows-locked file must not abort the
+                // whole scan: report it like any other per-path I/O error and keep
+                // walking, which `walkdir` does for the entry's siblings.
+                let item = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        let path = e
+                            .path()
+                            .and_then(|p| paths::rel_from_native(&root, p))
+                            .unwrap_or_default();
+                        report.skipped.push(Skipped {
+                            path,
+                            reason: SkipReason::Io(e.to_string()),
+                        });
+                        continue;
+                    }
+                };
                 if item.depth() == 0 || item.file_type().is_dir() {
                     continue;
                 }
