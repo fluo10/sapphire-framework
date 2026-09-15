@@ -594,7 +594,24 @@ impl Replica {
                 continue;
             }
             let copy_abs = paths::to_native(&self.config.root, &copy_rel);
-            if !copy_abs.exists() {
+            // Only the loser's own bytes count as the copy already being there. Anything
+            // else at the copy path is an unrelated file, and recording it as the copy
+            // (which the reconcile below does) would lose the loser silently.
+            let holds_the_loser = match fs::symlink_metadata(&copy_abs) {
+                Ok(m) if m.is_file() => ContentHash::of_file(&copy_abs)? == hash,
+                // A directory or a symlink: not the loser's bytes, and not something to
+                // write over. The loser stays out of `disk.seen`, so it is not lost.
+                Ok(_) => {
+                    report.skipped.push(Skipped {
+                        path: copy_rel,
+                        reason: SkipReason::Occupied,
+                    });
+                    continue;
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => false,
+                Err(e) => return Err(e.into()),
+            };
+            if !holds_the_loser {
                 // The loser may be exactly what is on disk at `rel` right now. A read
                 // error here must propagate rather than be swallowed as unavailable
                 // content: `settle` would otherwise overwrite the only local copy of

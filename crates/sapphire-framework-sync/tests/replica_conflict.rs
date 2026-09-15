@@ -3,8 +3,8 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::*;
-use sapphire_framework_sync::Conflict;
 use sapphire_framework_sync::testing::MapSource;
+use sapphire_framework_sync::{Conflict, conflict_path};
 
 fn based(a: &mut Node, b: &mut Node) {
     write(a, "a.txt", "base");
@@ -217,4 +217,35 @@ fn concurrent_ignore_file_edits_keep_both_versions() {
         .find(|p| p != ".sapphireignore")
         .unwrap();
     assert!(copy.starts_with(".sapphireignore.conflict-"), "{copy}");
+}
+
+#[test]
+fn an_unrelated_file_at_the_copy_path_does_not_become_the_copy() {
+    let (mut a, mut b) = (node(1), node(2));
+    based(&mut a, &mut b);
+    write(&a, "a.txt", "from a");
+    scan(&mut a);
+    b.clock.set(9_000_000);
+    write(&b, "a.txt", "from b");
+    scan(&mut b);
+
+    // b merges a's version without its bytes, so no copy is written yet.
+    let a_vv = a.replica.vv().clone();
+    let updates = a.replica.delta_for(b.replica.vv()).unwrap();
+    b.replica.apply(&updates, &MapSource::default()).unwrap();
+    b.replica.commit_session(&a_vv).unwrap();
+
+    let state = b.replica.state("a.txt").unwrap().unwrap();
+    let winner = state.winner().dot;
+    let loser = state.versions.iter().find(|v| v.dot != winner).unwrap();
+    let copy = conflict_path("a.txt", &loser.dot);
+
+    // Something unrelated is sitting at the copy path when the bytes arrive.
+    write(&b, &copy, "not the loser at all");
+    b.replica.fetch_missing(&a.replica).unwrap();
+    assert_eq!(
+        read(&b, &copy).as_deref(),
+        Some("from a"),
+        "the loser's bytes, not whatever happened to be there"
+    );
 }
