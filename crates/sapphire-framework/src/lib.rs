@@ -25,6 +25,7 @@
 //! | `workspace` | [`workspace`] | `sapphire-framework-workspace` |
 //! | `retrieve` | [`retrieve`] | `sapphire-framework-retrieve` |
 //! | `track` | [`track`] | `sapphire-framework-track` |
+//! | `sync` | [`sync`] | `sapphire-framework-sync` |
 //! | `rpc` | [`rpc`] | `sapphire-framework-rpc` |
 //! | `registry` | [`registry`] | `sapphire-framework-registry` |
 //! | `blob` | [`blob`] | `sapphire-framework-blob` |
@@ -47,6 +48,9 @@ pub use sapphire_framework_retrieve as retrieve;
 
 #[cfg(feature = "track")]
 pub use sapphire_framework_track as track;
+
+#[cfg(feature = "sync")]
+pub use sapphire_framework_sync as sync;
 
 #[cfg(feature = "rpc")]
 pub use sapphire_framework_rpc as rpc;

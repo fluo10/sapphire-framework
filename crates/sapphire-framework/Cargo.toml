@@ -19,6 +19,7 @@ default = ["workspace", "redb-store"]
 workspace = ["dep:sapphire-framework-workspace"]
 retrieve = ["dep:sapphire-framework-retrieve"]
 track = ["dep:sapphire-framework-track"]
+sync = ["dep:sapphire-framework-sync"]
 rpc = ["dep:sapphire-framework-rpc"]
 registry = ["dep:sapphire-framework-registry"]
 blob = ["dep:sapphire-framework-blob"]
@@ -41,6 +42,7 @@ fastembed-embed = ["sapphire-framework-workspace?/fastembed-embed"]
 sapphire-framework-workspace = { version = "0.14.0", path = "../sapphire-framework-workspace", optional = true, default-features = false }
 sapphire-framework-retrieve = { version = "0.14.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
 sapphire-framework-track = { version = "0.14.0", path = "../sapphire-framework-track", optional = true }
+sapphire-framework-sync = { version = "0.14.0", path = "../sapphire-framework-sync", optional = true }
 sapphire-framework-rpc = { version = "0.14.0", path = "../sapphire-framework-rpc", optional = true }
 sapphire-framework-registry = { version = "0.14.0", path = "../sapphire-framework-registry", optional = true }
 sapphire-framework-blob = { version = "0.14.0", path = "../sapphire-framework-blob", optional = true }
