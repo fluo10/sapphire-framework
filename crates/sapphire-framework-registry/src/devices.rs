@@ -1,13 +1,14 @@
-//! The device ledger (`.<app_name>/devices.toml`).
+//! The device ledger: one directory, one record file per device.
 //!
 //! A device's `id` is **persisted into content** — a journal entry's frontmatter
-//! `updated_by` points at it. So removing a device from the ledger is a tombstone
-//! (`retired_at`) by default; only an explicit `purge` deletes it physically.
+//! `updated_by` points at it, and the record's file is named after it. So
+//! removing a device from the ledger is a tombstone (`retired_at`) by default;
+//! only an explicit `purge` deletes a record physically.
 //!
-//! Ids mean nothing outside this app. The same physical device may sit in another
-//! app's ledger under a different id.
+//! One file per record is what lets two hosts mutate the ledger at the same
+//! moment without colliding: each writes its own file, and every mutation here
+//! rewrites exactly one record.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -17,47 +18,25 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::store::write_atomic;
 
-/// The format description written out on every save.
+/// Written at the top of every record file.
 const HEADER: &str = "\
-# sapphire devices.
+# A sapphire device record. The file name is the device's id.
 #
-# One `[[device]]` table per client device. Hand-editing is fine: a table
-# with just a `name` is a valid entry — the remaining fields are filled in
-# and written back the next time this file is loaded.
-#
-# id          optional. A grain-id. Filled in on load when blank. This is
-#             the id that gets written into content (a journal entry's
-#             `updated_by`, say). Normalized to canonical form on load —
-#             grain-id's decode table aliases i/l to 1, o to 0, u to v, and
-#             accepts uppercase, so a hand-written id of DESKTOP loads fine
-#             but is written back in its canonical spelling. The id it
-#             decodes to stays stable; the exact string you typed might not.
-#             Ids must be unique within this file.
-# name        required. Unique within this file. Accepted in place of the
-#             id anywhere a command asks for a device. A selector is matched
-#             against this name first; if no name matches, the selector is
-#             parsed as a grain-id and matched against ids. Consequently, if
-#             a device's name is literally another device's id string, the
-#             name takes precedence.
+# name        required. Unique within the ledger. Accepted in place of the id
+#             anywhere a command asks for a device.
 # node_id     optional. The device's iroh node id: 64 lowercase hex digits.
-#             Filled in when the device pairs. Unique within this ledger.
-# description optional. A note for you.
-# created_at  optional. RFC 3339. Filled in on load when blank.
-# retired_at  optional. RFC 3339. Set when the device is retired. The entry
-#             stays so historical references still resolve; only an explicit
-#             purge removes it. Revoking access is a separate job, done in
-#             the server's own key file.
-#
-# This file is rewritten in full on every change; comments you add are lost.
-# File permissions are reset on every save too (the file is recreated and
-# renamed into place), so a hand-set chmod does not survive a save. Harmless
-# here — this file holds no secrets — but worth knowing.
+#             Filled in when the device pairs. Unique within the ledger.
+# description optional. A note for you; the system never reads it.
+# created_at  optional. Filled in when the record is written.
+# retired_at  optional. Set by `device forget`. The record stays, because
+#             synced content refers to this device's id forever.
 ";
 
 /// One device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
-    /// Stable id, written into synced content as `Entry.author`.
+    /// Stable id, written into synced content as `Entry.author`. It is also the
+    /// record's file name, and is not repeated inside the file.
     pub id: GrainId,
     /// Human-chosen name, unique within the ledger.
     pub name: String,
@@ -80,14 +59,18 @@ impl Device {
     pub fn is_retired(&self) -> bool {
         self.retired_at.is_some()
     }
+
+    /// The record's file name inside the ledger directory.
+    pub fn file_name(&self) -> String {
+        format!("{}.toml", self.id)
+    }
 }
 
-/// The on-file representation. `id` / `created_at` are optional so that a record
-/// can be hand-written.
+/// The on-file representation of one record. The id is the file name, so it is
+/// not a field here; every field is optional so that a record can be
+/// hand-written.
 #[derive(Debug, Serialize, Deserialize)]
 struct RawDevice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    id: Option<GrainId>,
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     node_id: Option<String>,
@@ -99,86 +82,76 @@ struct RawDevice {
     retired_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct RawFile {
-    #[serde(default)]
-    device: Vec<RawDevice>,
-}
-
-/// The device ledger file and its contents.
+/// A ledger directory and the snapshot of it taken when it was opened.
 ///
-/// Holds the snapshot taken when it was loaded. Every later `add` / `retire` /
-/// `purge` appends to that snapshot and rewrites the whole file, so a change that
-/// reached the file after the load (a hand edit, as the HEADER invites, or a sync
-/// from another host) is invisible to this instance and is silently overwritten by
-/// the next mutation. Where the file may have changed — anything but a
-/// just-started process, a long-lived one especially — load it again before
-/// mutating.
+/// Every mutation rewrites exactly one record file, so a change that reached a
+/// *different* record after the open (a sync from another host, a hand edit) is
+/// never touched — but it is still invisible to this instance. Where the
+/// directory may have changed — anything but a just-started process, a
+/// long-lived one especially — open it again before mutating.
 #[derive(Debug)]
 pub struct Devices {
-    path: PathBuf,
+    dir: PathBuf,
     entries: Vec<Device>,
 }
 
 impl Devices {
-    /// Read the file, filling in a missing `id` / `created_at`. Writes back if
-    /// anything was filled in. A missing file is an empty ledger; it is not
-    /// created here.
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw: RawFile = match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text)
-                .map_err(|e| Error::File(format!("{}: {e}", path.display())))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => RawFile::default(),
+    /// Read every record in `dir`.
+    ///
+    /// A missing directory is an empty ledger; it is created by the first write,
+    /// not here. Files that do not end in `.toml` are ignored, so a README or a
+    /// sync layer's own bookkeeping can sit alongside the records.
+    pub fn open(dir: &Path) -> Result<Devices> {
+        let mut entries = Vec::new();
+        match std::fs::read_dir(dir) {
+            Ok(rd) => {
+                for entry in rd {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    let Some(stem) = name.strip_suffix(".toml") else {
+                        continue;
+                    };
+                    let id: GrainId = stem.parse().map_err(|_| {
+                        Error::File(format!(
+                            "{}: the file name is not a grain-id",
+                            entry.path().display()
+                        ))
+                    })?;
+                    let text = std::fs::read_to_string(entry.path())?;
+                    let raw: RawDevice = toml::from_str(&text)
+                        .map_err(|e| Error::File(format!("{}: {e}", entry.path().display())))?;
+                    entries.push(Device {
+                        id,
+                        name: raw.name,
+                        node_id: raw.node_id,
+                        description: raw.description,
+                        created_at: raw.created_at.unwrap_or_else(Utc::now),
+                        retired_at: raw.retired_at,
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(Error::Io(e)),
-        };
-
-        // Loading a duplicate would leave `resolve` unable to pick one. Copying
-        // entries one by one and duplicating an entry does happen in practice.
-        let mut seen_ids: HashSet<GrainId> = HashSet::new();
-        let mut seen_names: HashSet<&str> = HashSet::new();
-        for d in &raw.device {
-            if let Some(id) = d.id
-                && !seen_ids.insert(id)
-            {
-                return Err(Error::File(format!(
-                    "{}: two devices share the id {id}",
-                    path.display()
-                )));
-            }
-            if !seen_names.insert(d.name.as_str()) {
-                return Err(Error::File(format!(
-                    "{}: two devices share the name {:?}",
-                    path.display(),
-                    d.name
-                )));
-            }
         }
+        // A stable order, so listings and tests do not depend on directory iteration.
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let mut filled = false;
-        let now = Utc::now();
-        let mut entries: Vec<Device> = Vec::with_capacity(raw.device.len());
-        for d in raw.device {
-            if d.id.is_none() || d.created_at.is_none() {
-                filled = true;
-            }
-            entries.push(Device {
-                id: d.id.unwrap_or_else(GrainId::random),
-                name: d.name,
-                node_id: d.node_id,
-                description: d.description,
-                created_at: d.created_at.unwrap_or(now),
-                retired_at: d.retired_at,
-            });
+        if let Some(dup) = first_duplicate_name(&entries) {
+            return Err(Error::File(format!(
+                "{}: two devices are named {dup:?}",
+                dir.display()
+            )));
         }
-
-        let store = Self {
-            path: path.to_path_buf(),
+        Ok(Devices {
+            dir: dir.to_owned(),
             entries,
-        };
-        if filled {
-            store.save()?;
-        }
-        Ok(store)
+        })
+    }
+
+    /// The directory holding the records.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn entries(&self) -> &[Device] {
@@ -207,10 +180,10 @@ impl Devices {
         }
         let id = GrainId::random();
         if self.entries.iter().any(|d| d.id == id) {
-            // Astronomically unlikely, but writing it anyway would make `load`
-            // detect a duplicate id and refuse to read the whole file — a bricked
-            // ledger. Ask the caller to `add` again rather than hunting for a free
-            // id.
+            // Astronomically unlikely, but writing it anyway would put two
+            // records under one id, and `open` refuses a ledger it cannot
+            // address. Ask the caller to `add` again rather than hunting for a
+            // free id.
             return Err(Error::File(format!(
                 "generated id {id} collides with an existing device; try again"
             )));
@@ -223,10 +196,9 @@ impl Devices {
             created_at: Utc::now(),
             retired_at: None,
         };
-        let mut candidate = self.entries.clone();
-        candidate.push(entry.clone());
-        self.save_entries(&candidate)?;
-        self.entries = candidate;
+        self.save_one(&entry)?;
+        self.entries.push(entry.clone());
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entry)
     }
 
@@ -236,8 +208,9 @@ impl Devices {
 
     /// The device with this node id, retired or not.
     ///
-    /// Retired devices are included deliberately: a retired device and an unknown one are
-    /// different things to the bridge, and only the caller can decide what to do with each.
+    /// Retired devices are included deliberately: a retired device and an
+    /// unknown one are different things to the bridge, and only the caller can
+    /// decide what to do with each.
     pub fn by_node_id(&self, node_id: &str) -> Option<&Device> {
         self.entries
             .iter()
@@ -258,27 +231,25 @@ impl Devices {
         if self.entries[i].node_id.as_deref() == Some(node_id.as_str()) {
             return Ok(self.entries[i].clone());
         }
-        let mut candidate = self.entries.clone();
-        candidate[i].node_id = Some(node_id);
-        let updated = candidate[i].clone();
-        self.save_entries(&candidate)?;
-        self.entries = candidate;
+        let mut updated = self.entries[i].clone();
+        updated.node_id = Some(node_id);
+        self.save_one(&updated)?;
+        self.entries[i] = updated.clone();
         Ok(updated)
     }
 
     /// Resolve `selector` to the position of one entry.
     ///
-    /// Device names are usually 7-8 characters and often drawn from a subset of the
-    /// Crockford base32 alphabet ("pendant", "speaker", "desktop"), so a name has a
-    /// good chance of parsing as a grain-id. That is why a name wins: if an entry's
-    /// name matches, return it; otherwise try to read the selector as a grain-id and
-    /// look up by id.
+    /// Device names are usually 7-8 characters and often drawn from a subset of
+    /// the Crockford base32 alphabet ("pendant", "speaker", "desktop"), so a
+    /// name has a good chance of parsing as a grain-id. That is why a name wins:
+    /// if an entry's name matches, return it; otherwise try to read the selector
+    /// as a grain-id and look up by id — which here is the file name.
     ///
-    /// Names and ids are each unique in the file, so more than one match cannot
-    /// happen. When a name happens to parse as a grain-id, the name wins — this
-    /// never hits the wrong device, but there is no escape hatch to force an id.
-    /// `KeyStore::resolve` has a similar limitation with UUIDs, though a UUID's 32
-    /// characters make a collision far less likely.
+    /// Names and ids are each unique in the ledger, so more than one match
+    /// cannot happen. When a name happens to parse as a grain-id, the name wins
+    /// — this never hits the wrong device, but there is no escape hatch to force
+    /// an id.
     fn index_of(&self, selector: &str) -> Result<usize> {
         // Try the name first (a 7-8 character name very often reads as a grain-id).
         if let Some(pos) = self.entries.iter().position(|d| d.name == selector) {
@@ -297,129 +268,118 @@ impl Devices {
         Ok(&self.entries[self.index_of(selector)?])
     }
 
-    /// Retire a device. The entry stays, so a `device_id` baked into content keeps
-    /// resolving. An already-retired entry keeps its `retired_at` and is not saved:
-    /// this instance is the snapshot from `load`, so saving unconditionally here
-    /// would trample changes that arrived from another host or a hand edit, all for
-    /// an entry that did not change.
+    /// Retire a device. The record stays, so a `device_id` baked into content
+    /// keeps resolving. An already-retired device keeps its `retired_at` and is
+    /// not rewritten: this instance is the snapshot from `open`, so writing
+    /// unconditionally here would trample an edit that arrived after the open,
+    /// all for a record that did not change.
     pub fn retire(&mut self, selector: &str) -> Result<Device> {
         let i = self.index_of(selector)?;
         if self.entries[i].retired_at.is_some() {
             return Ok(self.entries[i].clone());
         }
-        let mut candidate = self.entries.clone();
-        candidate[i].retired_at = Some(Utc::now());
-        let retired = candidate[i].clone();
-        self.save_entries(&candidate)?;
-        self.entries = candidate;
-        Ok(retired)
+        let mut updated = self.entries[i].clone();
+        updated.retired_at = Some(Utc::now());
+        self.save_one(&updated)?;
+        self.entries[i] = updated.clone();
+        Ok(updated)
     }
 
     /// Really delete a device. Past `updated_by` references stop resolving.
     pub fn purge(&mut self, selector: &str) -> Result<Device> {
         let i = self.index_of(selector)?;
-        let mut candidate = self.entries.clone();
-        let removed = candidate.remove(i);
-        self.save_entries(&candidate)?;
-        self.entries = candidate;
+        let removed = self.entries[i].clone();
+        self.remove_one(&removed)?;
+        self.entries.remove(i);
         Ok(removed)
     }
 
-    fn save(&self) -> Result<()> {
-        self.save_entries(&self.entries)
-    }
-
-    /// Overwrite the whole file with `entries`, header first. Does not touch
-    /// `self.entries` — the caller assigns only after the save succeeds.
-    fn save_entries(&self, entries: &[Device]) -> Result<()> {
-        let raw = RawFile {
-            device: entries
-                .iter()
-                .map(|d| RawDevice {
-                    id: Some(d.id),
-                    name: d.name.clone(),
-                    node_id: d.node_id.clone(),
-                    description: d.description.clone(),
-                    created_at: Some(d.created_at),
-                    retired_at: d.retired_at,
-                })
-                .collect(),
+    /// Write one record. Never touches any other file.
+    fn save_one(&self, device: &Device) -> Result<()> {
+        let raw = RawDevice {
+            name: device.name.clone(),
+            node_id: device.node_id.clone(),
+            description: device.description.clone(),
+            created_at: Some(device.created_at),
+            retired_at: device.retired_at,
         };
         let body = toml::to_string_pretty(&raw)
-            .map_err(|e| Error::File(format!("serializing devices: {e}")))?;
-        write_atomic(&self.path, HEADER, &body)
+            .map_err(|e| Error::File(format!("{}: {e}", device.file_name())))?;
+        write_atomic(&self.dir.join(device.file_name()), HEADER, &body)
     }
+
+    /// Remove one record's file.
+    fn remove_one(&self, device: &Device) -> Result<()> {
+        match std::fs::remove_file(self.dir.join(device.file_name())) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+}
+
+fn first_duplicate_name(entries: &[Device]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .find(|d| !seen.insert(d.name.as_str()))
+        .map(|d| d.name.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
+    pub(super) fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("devices.toml");
+        let path = dir.path().join("devices");
+        (dir, path)
+    }
+
+    /// A ledger directory holding one hand-written record named by `id`.
+    pub(super) fn hand_written(
+        id: &str,
+        contents: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let (dir, path) = tmp();
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(format!("{id}.toml")), contents).unwrap();
         (dir, path)
     }
 
     #[test]
     fn add_then_reload_round_trips() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         let added = devices
             .add("pendant", None, Some("worn around the neck".into()))
             .unwrap();
 
-        let reloaded = Devices::load(&path).unwrap();
+        let reloaded = Devices::open(&path).unwrap();
 
         assert_eq!(reloaded.entries(), &[added]);
     }
 
     #[test]
-    fn a_missing_file_loads_as_empty_and_is_not_created() {
-        let (_d, path) = tmp();
-        let devices = Devices::load(&path).unwrap();
-        assert!(devices.entries().is_empty());
-        assert!(!path.exists(), "load must not create the file");
-    }
+    fn a_hand_written_record_loads_and_fills_in_created_at() {
+        let (_d, path) = hand_written("abcdefg", "name = \"pendant\"\n");
 
-    #[test]
-    fn load_fills_in_a_hand_written_entry_and_writes_it_back() {
-        let (_d, path) = tmp();
-        std::fs::write(&path, "[[device]]\nname = \"pendant\"\n").unwrap();
-
-        let devices = Devices::load(&path).unwrap();
+        let devices = Devices::open(&path).unwrap();
 
         assert_eq!(devices.entries().len(), 1);
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("id = "), "{text}");
-        assert!(text.contains("created_at = "), "{text}");
+        assert_eq!(devices.entries()[0].name, "pendant");
+        // created_at was not in the file; the ledger fills it in.
+        assert!(devices.entries()[0].created_at.timestamp() > 0);
     }
 
     #[test]
-    fn load_rejects_two_devices_sharing_an_id() {
+    fn open_rejects_two_devices_sharing_a_name() {
         let (_d, path) = tmp();
-        std::fs::write(
-            &path,
-            "[[device]]\nid = \"a3f9k2p\"\nname = \"a\"\n\n\
-             [[device]]\nid = \"a3f9k2p\"\nname = \"b\"\n",
-        )
-        .unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("abcdefg.toml"), "name = \"dup\"\n").unwrap();
+        std::fs::write(path.join("hijkmno.toml"), "name = \"dup\"\n").unwrap();
 
-        let err = Devices::load(&path).unwrap_err();
-
-        assert!(err.to_string().contains("a3f9k2p"), "{err}");
-    }
-
-    #[test]
-    fn load_rejects_two_devices_sharing_a_name() {
-        let (_d, path) = tmp();
-        std::fs::write(
-            &path,
-            "[[device]]\nname = \"dup\"\n\n[[device]]\nname = \"dup\"\n",
-        )
-        .unwrap();
-
-        let err = Devices::load(&path).unwrap_err();
+        let err = Devices::open(&path).unwrap_err();
 
         assert!(err.to_string().contains("dup"), "{err}");
     }
@@ -427,7 +387,7 @@ mod tests {
     #[test]
     fn add_rejects_a_duplicate_name() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         devices.add("pendant", None, None).unwrap();
 
         let err = devices.add("pendant", None, None).unwrap_err();
@@ -438,7 +398,7 @@ mod tests {
     #[test]
     fn resolve_finds_by_id_and_by_name() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         let added = devices.add("pendant", None, None).unwrap();
 
         assert_eq!(devices.resolve("pendant").unwrap(), &added);
@@ -448,14 +408,14 @@ mod tests {
     #[test]
     fn resolve_errors_on_no_match() {
         let (_d, path) = tmp();
-        let devices = Devices::load(&path).unwrap();
+        let devices = Devices::open(&path).unwrap();
         assert!(devices.resolve("nothing").is_err());
     }
 
     #[test]
-    fn retire_keeps_the_entry_resolvable() {
+    fn retire_keeps_the_record_resolvable() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         let added = devices.add("gone", None, None).unwrap();
 
         let retired = devices.retire("gone").unwrap();
@@ -464,66 +424,50 @@ mod tests {
         // device_id is baked into a journal entry's frontmatter, so retiring must
         // leave it resolvable.
         assert!(devices.get(added.id).is_some());
-        let reloaded = Devices::load(&path).unwrap();
+        let reloaded = Devices::open(&path).unwrap();
         assert!(reloaded.entries()[0].retired_at.is_some());
     }
 
     #[test]
-    fn retire_does_not_resave_when_already_retired() {
+    fn retire_does_not_rewrite_when_already_retired() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None, None).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
+        let device = devices.add("gone", None, None).unwrap();
         let first = devices.retire("gone").unwrap();
 
-        // Mimic a change that reached the file after the load (a sync or a hand
+        // Mimic a change that reached the file after the open (a sync or a hand
         // edit; this `devices` instance knows nothing about it).
-        let mut synced = std::fs::read_to_string(&path).unwrap();
-        synced.push_str("\n# synced by another host\n");
-        std::fs::write(&path, &synced).unwrap();
+        let mut synced = std::fs::read_to_string(path.join(device.file_name())).unwrap();
+        synced.push_str("# synced by another host\n");
+        std::fs::write(path.join(device.file_name()), &synced).unwrap();
 
         let second = devices.retire("gone").unwrap();
 
         assert_eq!(second.retired_at, first.retired_at, "must not overwrite");
-        // The early return must not re-save, or the synced line would be gone.
-        let text = std::fs::read_to_string(&path).unwrap();
+        // The early return must not re-write, or the synced line would be gone.
+        let text = std::fs::read_to_string(path.join(device.file_name())).unwrap();
         assert!(
-            text.contains("synced by another host"),
-            "retiring an already-retired device rewrote the file: {text}"
+            text.contains("# synced by another host"),
+            "retiring an already-retired device rewrote the record: {text}"
         );
-    }
-
-    #[test]
-    fn purge_removes_the_entry() {
-        let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None, None).unwrap();
-
-        devices.purge("gone").unwrap();
-
-        assert!(Devices::load(&path).unwrap().entries().is_empty());
     }
 
     #[test]
     fn the_header_documents_every_field() {
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
-        devices.add("pendant", None, None).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
+        let added = devices.add("pendant", None, None).unwrap();
 
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(path.join(added.file_name())).unwrap();
 
-        for field in [
-            "id",
-            "name",
-            "node_id",
-            "description",
-            "created_at",
-            "retired_at",
-        ] {
+        for field in ["name", "node_id", "description", "created_at", "retired_at"] {
             assert!(
                 text.contains(&format!("# {field}")),
                 "the header does not document {field}: {text}"
             );
         }
+        // The id is not a field any more — the header says what it is instead.
+        assert!(text.contains("file name is the device's id"), "{text}");
     }
 
     #[test]
@@ -532,7 +476,7 @@ mod tests {
         // accepts, so it can read as a grain-id: "pendant", "speaker", "desktop".
         // The name-first rule makes the name match before the id.
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         let name = "pendant";
         // The premise of this test: if `name` does not actually parse as a
         // grain-id, both rules (id first / name first) take the same branch and
@@ -545,7 +489,7 @@ mod tests {
 
         // Thanks to the name-first rule, resolve(name) must match by name.
         assert_eq!(devices.resolve(name).unwrap(), &added);
-        // The id resolves too.
+        // The id resolves too — here it is the file name.
         assert_eq!(devices.resolve(&added.id.to_string()).unwrap(), &added);
     }
 
@@ -553,7 +497,7 @@ mod tests {
     fn a_device_name_matching_another_device_id_resolves_by_name() {
         // When a device's name equals another device's id string, the name wins.
         let (_d, path) = tmp();
-        let mut devices = Devices::load(&path).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
         let first = devices.add("device1", None, None).unwrap();
         // Give the second device the first one's id as its name.
         let second = devices.add(&first.id.to_string(), None, None).unwrap();
@@ -568,32 +512,27 @@ mod tests {
 
 #[cfg(test)]
 mod user_removal_tests {
-    use super::*;
+    use super::Devices;
+    use super::tests::{hand_written, tmp};
 
     #[test]
     fn a_device_record_has_no_user_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("devices.toml");
-        std::fs::write(&path, "[[device]]\nname = \"laptop\"\n").unwrap();
+        let (_d, path) = tmp();
 
-        let mut devices = Devices::load(&path).unwrap();
-        devices.add("desktop", None, None).unwrap();
+        let mut devices = Devices::open(&path).unwrap();
+        let device = devices.add("desktop", None, None).unwrap();
 
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(path.join(device.file_name())).unwrap();
+        // The record was hand-written without a node_name either: a hand-written
+        // record with only a name is valid.
         assert!(!text.contains("user_id"), "a user_id survived:\n{text}");
     }
 
     #[test]
     fn a_hand_written_user_id_is_ignored_rather_than_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("devices.toml");
-        std::fs::write(
-            &path,
-            "[[device]]\nname = \"laptop\"\nuser_id = \"abcdef\"\n",
-        )
-        .unwrap();
+        let (_d, path) = hand_written("abcdefg", "name = \"laptop\"\nuser_id = \"abcdef\"\n");
 
-        let devices = Devices::load(&path).unwrap();
+        let devices = Devices::open(&path).unwrap();
         assert_eq!(devices.entries().len(), 1);
         assert_eq!(devices.entries()[0].name, "laptop");
     }
@@ -601,32 +540,29 @@ mod user_removal_tests {
 
 #[cfg(test)]
 mod node_id_tests {
-    use super::*;
+    use super::Devices;
+    use super::tests::tmp;
 
     const NODE_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
     const NODE_B: &str = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
-    fn ledger(dir: &std::path::Path) -> Devices {
-        Devices::load(&dir.join("devices.toml")).unwrap()
-    }
-
     #[test]
     fn a_node_id_round_trips_through_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut devices = ledger(dir.path());
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
         let added = devices
             .add("laptop", Some(NODE_A.to_owned()), None)
             .unwrap();
         assert_eq!(added.node_id.as_deref(), Some(NODE_A));
 
-        let reloaded = ledger(dir.path());
+        let reloaded = Devices::open(&path).unwrap();
         assert_eq!(reloaded.entries()[0].node_id.as_deref(), Some(NODE_A));
     }
 
     #[test]
     fn a_device_can_be_found_by_its_node_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut devices = ledger(dir.path());
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
         devices
             .add("laptop", Some(NODE_A.to_owned()), None)
             .unwrap();
@@ -639,32 +575,34 @@ mod node_id_tests {
 
     #[test]
     fn a_record_without_a_node_id_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("devices.toml");
-        std::fs::write(&path, "[[device]]\nname = \"laptop\"\n").unwrap();
+        let (_d, path) = super::tests::hand_written("abcdefg", "name = \"laptop\"\n");
 
-        let devices = Devices::load(&path).unwrap();
+        let devices = Devices::open(&path).unwrap();
         assert!(devices.entries()[0].node_id.is_none());
     }
 
     #[test]
     fn a_node_id_can_be_set_later() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut devices = ledger(dir.path());
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
         devices.add("laptop", None, None).unwrap();
 
         let updated = devices.set_node_id("laptop", NODE_A.to_owned()).unwrap();
         assert_eq!(updated.node_id.as_deref(), Some(NODE_A));
         assert_eq!(
-            ledger(dir.path()).by_node_id(NODE_A).unwrap().name,
+            Devices::open(&path)
+                .unwrap()
+                .by_node_id(NODE_A)
+                .unwrap()
+                .name,
             "laptop"
         );
     }
 
     #[test]
     fn two_devices_cannot_share_a_node_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut devices = ledger(dir.path());
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
         devices
             .add("laptop", Some(NODE_A.to_owned()), None)
             .unwrap();
@@ -677,8 +615,8 @@ mod node_id_tests {
 
     #[test]
     fn a_retired_device_keeps_its_node_id_and_is_still_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut devices = ledger(dir.path());
+        let (_d, path) = tmp();
+        let mut devices = Devices::open(&path).unwrap();
         devices
             .add("laptop", Some(NODE_A.to_owned()), None)
             .unwrap();
@@ -690,6 +628,159 @@ mod node_id_tests {
         assert!(
             found.is_retired(),
             "retirement is what authorization checks"
+        );
+    }
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::Devices;
+
+    const NODE_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn file_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_missing_directory_is_an_empty_ledger_and_is_not_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let devices = Devices::open(&dir).unwrap();
+        assert!(devices.entries().is_empty());
+        assert!(!dir.exists(), "opening must not create the directory");
+    }
+
+    #[test]
+    fn each_device_gets_its_own_file_named_by_its_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let mut devices = Devices::open(&dir).unwrap();
+
+        let laptop = devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+        let phone = devices.add("phone", None, None).unwrap();
+
+        assert_eq!(file_names(&dir), {
+            let mut want = vec![format!("{}.toml", laptop.id), format!("{}.toml", phone.id)];
+            want.sort();
+            want
+        });
+    }
+
+    #[test]
+    fn the_id_is_the_file_name_and_is_not_repeated_inside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let mut devices = Devices::open(&dir).unwrap();
+        let laptop = devices.add("laptop", None, None).unwrap();
+
+        let text = std::fs::read_to_string(dir.join(laptop.file_name())).unwrap();
+        assert!(text.contains("name = \"laptop\""), "{text}");
+        assert!(
+            !text.contains(&laptop.id.to_string()),
+            "the id is the file name:\n{text}"
+        );
+    }
+
+    #[test]
+    fn records_reload_from_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let mut devices = Devices::open(&dir).unwrap();
+        devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+        devices.add("phone", None, None).unwrap();
+
+        let reloaded = Devices::open(&dir).unwrap();
+        let mut names: Vec<&str> = reloaded.entries().iter().map(|d| d.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["laptop", "phone"]);
+    }
+
+    #[test]
+    fn retiring_one_device_rewrites_only_that_devices_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let mut devices = Devices::open(&dir).unwrap();
+        let laptop = devices.add("laptop", None, None).unwrap();
+        let phone = devices.add("phone", None, None).unwrap();
+
+        // Put something unknown in the phone's file, as a newer build would.
+        let phone_file = dir.join(phone.file_name());
+        let mut text = std::fs::read_to_string(&phone_file).unwrap();
+        text.push_str("from_the_future = true\n");
+        std::fs::write(&phone_file, &text).unwrap();
+
+        devices.retire("laptop").unwrap();
+
+        assert!(
+            std::fs::read_to_string(&phone_file)
+                .unwrap()
+                .contains("from_the_future"),
+            "an untouched record must not be rewritten"
+        );
+        let laptop_text = std::fs::read_to_string(dir.join(laptop.file_name())).unwrap();
+        assert!(laptop_text.contains("retired_at"), "{laptop_text}");
+    }
+
+    #[test]
+    fn purging_removes_exactly_one_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        let mut devices = Devices::open(&dir).unwrap();
+        let laptop = devices.add("laptop", None, None).unwrap();
+        let phone = devices.add("phone", None, None).unwrap();
+
+        devices.purge("laptop").unwrap();
+
+        assert!(!dir.join(laptop.file_name()).exists());
+        assert!(dir.join(phone.file_name()).exists());
+        assert_eq!(devices.entries().len(), 1);
+    }
+
+    #[test]
+    fn a_file_whose_name_is_not_a_grain_id_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("not-an-id!.toml"), "name = \"x\"\n").unwrap();
+
+        let err = Devices::open(&dir).unwrap_err();
+        assert!(err.to_string().contains("not-an-id!"), "{err}");
+    }
+
+    #[test]
+    fn a_non_toml_file_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "notes\n").unwrap();
+
+        assert!(Devices::open(&dir).unwrap().entries().is_empty());
+    }
+
+    #[test]
+    fn a_hand_written_record_is_loaded_with_a_generated_id_as_file_name() {
+        let (_d, path) = super::tests::hand_written("abcdefg", "name = \"laptop\"\n");
+        let devices = Devices::open(&path).unwrap();
+        assert_eq!(devices.entries().len(), 1);
+        assert_eq!(devices.entries()[0].id.to_string(), "abcdefg");
+        // The id (the file name) is not repeated inside the record.
+        let text = std::fs::read_to_string(path.join(devices.entries()[0].file_name())).unwrap();
+        assert!(
+            !text.contains("id = "),
+            "the id must not be a field:\n{text}"
         );
     }
 }
