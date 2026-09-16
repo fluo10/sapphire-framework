@@ -104,7 +104,7 @@ pub mod prelude {
     };
 
     #[cfg(feature = "registry")]
-    pub use crate::registry::{Device, Devices, GrainId};
+    pub use crate::registry::{Device, Devices, GrainId, MigrationReport, migrate_single_file};
 
     // `registry` and `remote-server` both expose the same `GrainId`. Re-exporting
     // both would collide, so take it from `registry` when that feature is on, and
