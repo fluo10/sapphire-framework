@@ -594,13 +594,40 @@ impl BridgeClient {
 > ///
 > /// The bridge's data plane speaks one JSON line and then raw bytes, so it cannot use
 > /// [`Connection`](crate::Connection).
-> pub async fn connect_raw(endpoint: &Endpoint) -> Result<RawStream> { … }
+> pub async fn connect_raw(endpoint: &Endpoint) -> Result<RawStream> {
+>     #[cfg(unix)]
+>     {
+>         let stream = tokio::net::UnixStream::connect(endpoint.socket_path()).await?;
+>         Ok(Box::new(stream))
+>     }
+>     #[cfg(windows)]
+>     {
+>         // Same busy-retry as `crate::windows::connect`; factor that loop out rather than
+>         // writing it twice.
+>         let client = crate::windows::open_pipe(&endpoint.pipe_name()).await?;
+>         Ok(Box::new(client))
+>     }
+> }
 > ```
 >
-> where `RawStream` is `tokio::net::UnixStream` on Unix and `NamedPipeClient` on Windows,
-> exposed as `Box<dyn AsyncRead + AsyncWrite + Send + Unpin>`. Add `pub type RawStream` and
-> the matching `accept_raw` on the listener types. Do this in Task 1 and note it in the
-> commit: it is a small, clearly motivated addition to the previous plan's crate.
+> with
+>
+> ```rust
+> /// A byte stream with no framing on top.
+> ///
+> /// The bridge's data plane speaks one line and then raw bytes, so it cannot use
+> /// [`Connection`](crate::Connection), which frames everything.
+> pub type RawStream = Box<dyn RawIo>;
+>
+> /// Anything that reads and writes bytes.
+> pub trait RawIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+> impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> RawIo for T {}
+> ```
+>
+> and a matching `accept_raw` on each listener type, returning a `RawStream` instead of a
+> `Connection`. Do this in Task 1 and say so in the commit message: it is a small, clearly
+> motivated addition to the previous plan's crate, and a reviewer should not have to guess
+> why `-ipc` grew a second accept path.
 
 And the shared line handshake, in `bridge-api/src/lib.rs`:
 
@@ -2229,11 +2256,28 @@ pub(crate) struct Owners {
 }
 
 impl Owners {
-    pub(crate) fn connect(&self, app_name: &str, peer: PeerHandle) { … }
-    pub(crate) fn peer(&self, app_name: &str) -> Option<PeerHandle> { … }
-    pub(crate) fn is_online(&self, app_name: &str) -> bool { … }
+    /// Remember how to reach this app server. A second registration replaces the first.
+    pub(crate) fn connect(&self, app_name: &str, peer: PeerHandle) {
+        self.by_app.lock().expect("owners").insert(app_name.to_owned(), peer);
+    }
+
+    /// How to announce an incoming stream to this app, if it is connected.
+    pub(crate) fn peer(&self, app_name: &str) -> Option<PeerHandle> {
+        self.by_app.lock().expect("owners").get(app_name).cloned()
+    }
+
+    /// Is this app's server connected right now?
+    pub(crate) fn is_online(&self, app_name: &str) -> bool {
+        self.by_app.lock().expect("owners").contains_key(app_name)
+    }
+
     /// Drop an app's registration when its control connection closes.
-    pub(crate) fn disconnect(&self, app_name: &str) { … }
+    ///
+    /// Its **routes stay** in `routes.toml`: that is how the bridge knows where a workspace
+    /// lives when its server is merely stopped, and how `wake_on_sync` finds it again.
+    pub(crate) fn disconnect(&self, app_name: &str) {
+        self.by_app.lock().expect("owners").remove(app_name);
+    }
 }
 ```
 
@@ -2581,7 +2625,40 @@ loop cannot fork-bomb the host. Add it now, with a test:
 
 ```rust
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_is_not_started_twice_in_quick_succession() { … }
+async fn an_owner_is_not_started_twice_in_quick_succession() {
+    let marker = tempfile::tempdir().unwrap();
+    let counter = marker.path().join("starts");
+
+    let net = LoopbackNetwork::new();
+    let a = common::start(&net, common::NODE_A, "host-a").await;
+    // Each start appends a line, so the file's length counts them.
+    let b = common::start_with_exe(
+        &net,
+        common::NODE_B,
+        "host-b",
+        "/bin/sh",
+        &["-c", &format!("echo started >> {}", counter.display())],
+        ManagedBy::Spawned,
+    )
+    .await;
+
+    let (client_a, ws, device_b) = common::register_both(&a, &b).await;
+    common::disconnect_owner(&b).await;
+
+    // Ten attempts in a row, as a peer reconnecting in a loop would produce.
+    for _ in 0..10 {
+        let _ = client_a.open_stream(ws, device_b).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let starts = std::fs::read_to_string(&counter).unwrap_or_default().lines().count();
+    assert!(
+        starts <= 2,
+        "the owner was started {starts} times; a peer reconnecting in a loop must not be \
+         able to fork-bomb the host"
+    );
+}
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -2736,7 +2813,40 @@ impl IrohTransport {
 }
 
 /// Read the secret key, or create one at `0600`.
-fn load_or_create_key(path: &Path) -> Result<iroh::SecretKey> { … }
+///
+/// This file **is** the device's identity: losing it means rejoining every workgroup as a new
+/// device, so it is created once and never regenerated on a parse failure.
+fn load_or_create_key(path: &Path) -> Result<iroh::SecretKey> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                Error::Config(format!(
+                    "{}: a node key is 32 bytes, found {}; move it aside rather than \
+                     letting a new identity be minted",
+                    path.display(),
+                    bytes.len()
+                ))
+            })?;
+            Ok(iroh::SecretKey::from_bytes(&bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0u8; 32];
+            getrandom::fill(&mut bytes)
+                .map_err(|e| Error::Config(format!("no system random source: {e}")))?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(iroh::SecretKey::from_bytes(&bytes))
+        }
+        Err(e) => Err(Error::Io(e)),
+    }
+}
 ```
 
 `open` parses the node id, connects with the ALPN, opens a bidirectional stream, writes the
