@@ -39,6 +39,8 @@ const HEADER: &str = "\
 #             parsed as a grain-id and matched against ids. Consequently, if
 #             a device's name is literally another device's id string, the
 #             name takes precedence.
+# node_id     optional. The device's iroh node id: 64 lowercase hex digits.
+#             Filled in when the device pairs. Unique within this ledger.
 # description optional. A note for you.
 # created_at  optional. RFC 3339. Filled in on load when blank.
 # retired_at  optional. RFC 3339. Set when the device is retired. The entry
@@ -55,10 +57,20 @@ const HEADER: &str = "\
 /// One device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
+    /// Stable id, written into synced content as `Entry.author`.
     pub id: GrainId,
+    /// Human-chosen name, unique within the ledger.
     pub name: String,
+    /// The device's iroh node id, 64 lowercase hex characters, once it has one.
+    ///
+    /// `None` for a record written before the device announced itself: the founding device
+    /// of a workgroup, or a record a user added by hand.
+    pub node_id: Option<String>,
+    /// A note for the user; the system never reads it.
     pub description: Option<String>,
+    /// When the record was created.
     pub created_at: DateTime<Utc>,
+    /// When the device was retired, if it was.
     pub retired_at: Option<DateTime<Utc>>,
 }
 
@@ -77,6 +89,8 @@ struct RawDevice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<GrainId>,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +164,7 @@ impl Devices {
             entries.push(Device {
                 id: d.id.unwrap_or_else(GrainId::random),
                 name: d.name,
+                node_id: d.node_id,
                 description: d.description,
                 created_at: d.created_at.unwrap_or(now),
                 retired_at: d.retired_at,
@@ -170,11 +185,24 @@ impl Devices {
         &self.entries
     }
 
-    /// Add a new device and save it. Rejects a duplicate `name`.
-    pub fn add(&mut self, name: &str, description: Option<String>) -> Result<Device> {
+    /// Add a device. Rejects a duplicate `name` or `node_id`.
+    pub fn add(
+        &mut self,
+        name: &str,
+        node_id: Option<String>,
+        description: Option<String>,
+    ) -> Result<Device> {
         if self.entries.iter().any(|d| d.name == name) {
             return Err(Error::File(format!(
                 "a device named {name:?} already exists"
+            )));
+        }
+        if let Some(node) = node_id.as_deref()
+            && let Some(existing) = self.by_node_id(node)
+        {
+            return Err(Error::File(format!(
+                "node id {node} already belongs to the device {:?}",
+                existing.name
             )));
         }
         let id = GrainId::random();
@@ -190,6 +218,7 @@ impl Devices {
         let entry = Device {
             id,
             name: name.to_owned(),
+            node_id,
             description,
             created_at: Utc::now(),
             retired_at: None,
@@ -203,6 +232,38 @@ impl Devices {
 
     pub fn get(&self, id: GrainId) -> Option<&Device> {
         self.entries.iter().find(|d| d.id == id)
+    }
+
+    /// The device with this node id, retired or not.
+    ///
+    /// Retired devices are included deliberately: a retired device and an unknown one are
+    /// different things to the bridge, and only the caller can decide what to do with each.
+    pub fn by_node_id(&self, node_id: &str) -> Option<&Device> {
+        self.entries
+            .iter()
+            .find(|d| d.node_id.as_deref() == Some(node_id))
+    }
+
+    /// Give an existing device its node id.
+    pub fn set_node_id(&mut self, selector: &str, node_id: String) -> Result<Device> {
+        let i = self.index_of(selector)?;
+        if let Some(existing) = self.by_node_id(&node_id)
+            && existing.id != self.entries[i].id
+        {
+            return Err(Error::File(format!(
+                "node id {node_id} already belongs to the device {:?}",
+                existing.name
+            )));
+        }
+        if self.entries[i].node_id.as_deref() == Some(node_id.as_str()) {
+            return Ok(self.entries[i].clone());
+        }
+        let mut candidate = self.entries.clone();
+        candidate[i].node_id = Some(node_id);
+        let updated = candidate[i].clone();
+        self.save_entries(&candidate)?;
+        self.entries = candidate;
+        Ok(updated)
     }
 
     /// Resolve `selector` to the position of one entry.
@@ -277,6 +338,7 @@ impl Devices {
                 .map(|d| RawDevice {
                     id: Some(d.id),
                     name: d.name.clone(),
+                    node_id: d.node_id.clone(),
                     description: d.description.clone(),
                     created_at: Some(d.created_at),
                     retired_at: d.retired_at,
@@ -304,7 +366,7 @@ mod tests {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
         let added = devices
-            .add("pendant", Some("worn around the neck".into()))
+            .add("pendant", None, Some("worn around the neck".into()))
             .unwrap();
 
         let reloaded = Devices::load(&path).unwrap();
@@ -366,9 +428,9 @@ mod tests {
     fn add_rejects_a_duplicate_name() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("pendant", None).unwrap();
+        devices.add("pendant", None, None).unwrap();
 
-        let err = devices.add("pendant", None).unwrap_err();
+        let err = devices.add("pendant", None, None).unwrap_err();
 
         assert!(err.to_string().contains("pendant"), "{err}");
     }
@@ -377,7 +439,7 @@ mod tests {
     fn resolve_finds_by_id_and_by_name() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let added = devices.add("pendant", None).unwrap();
+        let added = devices.add("pendant", None, None).unwrap();
 
         assert_eq!(devices.resolve("pendant").unwrap(), &added);
         assert_eq!(devices.resolve(&added.id.to_string()).unwrap(), &added);
@@ -394,7 +456,7 @@ mod tests {
     fn retire_keeps_the_entry_resolvable() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let added = devices.add("gone", None).unwrap();
+        let added = devices.add("gone", None, None).unwrap();
 
         let retired = devices.retire("gone").unwrap();
 
@@ -410,7 +472,7 @@ mod tests {
     fn retire_does_not_resave_when_already_retired() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None).unwrap();
+        devices.add("gone", None, None).unwrap();
         let first = devices.retire("gone").unwrap();
 
         // Mimic a change that reached the file after the load (a sync or a hand
@@ -434,7 +496,7 @@ mod tests {
     fn purge_removes_the_entry() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None).unwrap();
+        devices.add("gone", None, None).unwrap();
 
         devices.purge("gone").unwrap();
 
@@ -445,11 +507,18 @@ mod tests {
     fn the_header_documents_every_field() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("pendant", None).unwrap();
+        devices.add("pendant", None, None).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
 
-        for field in ["id", "name", "description", "created_at", "retired_at"] {
+        for field in [
+            "id",
+            "name",
+            "node_id",
+            "description",
+            "created_at",
+            "retired_at",
+        ] {
             assert!(
                 text.contains(&format!("# {field}")),
                 "the header does not document {field}: {text}"
@@ -472,7 +541,7 @@ mod tests {
             name.parse::<GrainId>().is_ok(),
             "the premise that {name:?} parses as a grain-id no longer holds"
         );
-        let added = devices.add(name, None).unwrap();
+        let added = devices.add(name, None, None).unwrap();
 
         // Thanks to the name-first rule, resolve(name) must match by name.
         assert_eq!(devices.resolve(name).unwrap(), &added);
@@ -485,9 +554,9 @@ mod tests {
         // When a device's name equals another device's id string, the name wins.
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let first = devices.add("device1", None).unwrap();
+        let first = devices.add("device1", None, None).unwrap();
         // Give the second device the first one's id as its name.
-        let second = devices.add(&first.id.to_string(), None).unwrap();
+        let second = devices.add(&first.id.to_string(), None, None).unwrap();
 
         // resolve(first.id) returns the second device (whose name equals that id).
         assert_eq!(devices.resolve(&first.id.to_string()).unwrap(), &second);
@@ -508,7 +577,7 @@ mod user_removal_tests {
         std::fs::write(&path, "[[device]]\nname = \"laptop\"\n").unwrap();
 
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("desktop", None).unwrap();
+        devices.add("desktop", None, None).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("user_id"), "a user_id survived:\n{text}");
@@ -527,5 +596,100 @@ mod user_removal_tests {
         let devices = Devices::load(&path).unwrap();
         assert_eq!(devices.entries().len(), 1);
         assert_eq!(devices.entries()[0].name, "laptop");
+    }
+}
+
+#[cfg(test)]
+mod node_id_tests {
+    use super::*;
+
+    const NODE_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const NODE_B: &str = "b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn ledger(dir: &std::path::Path) -> Devices {
+        Devices::load(&dir.join("devices.toml")).unwrap()
+    }
+
+    #[test]
+    fn a_node_id_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devices = ledger(dir.path());
+        let added = devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+        assert_eq!(added.node_id.as_deref(), Some(NODE_A));
+
+        let reloaded = ledger(dir.path());
+        assert_eq!(reloaded.entries()[0].node_id.as_deref(), Some(NODE_A));
+    }
+
+    #[test]
+    fn a_device_can_be_found_by_its_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devices = ledger(dir.path());
+        devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+        devices.add("phone", Some(NODE_B.to_owned()), None).unwrap();
+
+        assert_eq!(devices.by_node_id(NODE_A).unwrap().name, "laptop");
+        assert_eq!(devices.by_node_id(NODE_B).unwrap().name, "phone");
+        assert!(devices.by_node_id("deadbeef").is_none());
+    }
+
+    #[test]
+    fn a_record_without_a_node_id_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.toml");
+        std::fs::write(&path, "[[device]]\nname = \"laptop\"\n").unwrap();
+
+        let devices = Devices::load(&path).unwrap();
+        assert!(devices.entries()[0].node_id.is_none());
+    }
+
+    #[test]
+    fn a_node_id_can_be_set_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devices = ledger(dir.path());
+        devices.add("laptop", None, None).unwrap();
+
+        let updated = devices.set_node_id("laptop", NODE_A.to_owned()).unwrap();
+        assert_eq!(updated.node_id.as_deref(), Some(NODE_A));
+        assert_eq!(
+            ledger(dir.path()).by_node_id(NODE_A).unwrap().name,
+            "laptop"
+        );
+    }
+
+    #[test]
+    fn two_devices_cannot_share_a_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devices = ledger(dir.path());
+        devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+
+        let err = devices
+            .add("phone", Some(NODE_A.to_owned()), None)
+            .unwrap_err();
+        assert!(err.to_string().contains("node id"), "{err}");
+    }
+
+    #[test]
+    fn a_retired_device_keeps_its_node_id_and_is_still_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devices = ledger(dir.path());
+        devices
+            .add("laptop", Some(NODE_A.to_owned()), None)
+            .unwrap();
+        devices.retire("laptop").unwrap();
+
+        let found = devices
+            .by_node_id(NODE_A)
+            .expect("a retired device is still a record");
+        assert!(
+            found.is_retired(),
+            "retirement is what authorization checks"
+        );
     }
 }
