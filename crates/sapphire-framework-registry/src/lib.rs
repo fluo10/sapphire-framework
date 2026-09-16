@@ -8,9 +8,11 @@
 
 mod devices;
 mod error;
+mod migrate;
 mod store;
 
 pub use devices::{Device, Devices};
 pub use error::{Error, Result};
+pub use migrate::{MigrationReport, migrate_single_file};
 // Re-exported so an application can name `Device::id` without depending on grain-id itself.
 pub use grain_id::GrainId;

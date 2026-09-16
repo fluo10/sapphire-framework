@@ -294,6 +294,17 @@ impl Devices {
         Ok(removed)
     }
 
+    /// Write one record into `dir` without opening the whole ledger.
+    ///
+    /// Used by the migration, which already knows the id each record must keep.
+    pub(crate) fn write_record(dir: &Path, device: &Device) -> Result<()> {
+        Devices {
+            dir: dir.to_owned(),
+            entries: Vec::new(),
+        }
+        .save_one(device)
+    }
+
     /// Write one record. Never touches any other file.
     fn save_one(&self, device: &Device) -> Result<()> {
         let raw = RawDevice {
