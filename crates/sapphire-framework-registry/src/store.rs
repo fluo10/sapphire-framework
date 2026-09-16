@@ -1,29 +1,29 @@
-//! 台帳ファイル共通の書き出し。
+//! The write path shared by every ledger.
 //!
-//! 内容は `users.rs` / `devices.rs` がそれぞれ組み立てる。ここが受け持つのは
-//! 「ヘッダ + 本文を、途中で壊れない形で置く」ことだけ。
+//! Each ledger module (`devices.rs`) assembles its own content; this module only
+//! guarantees the write itself lands without corruption.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
-/// `header` + 空行 + `body` を **一時ファイル → rename** で書き出す。
+/// Write `header` + a blank line + `body` via **a temp file, then rename**.
 ///
-/// その場で truncate すると、書き込み中にクラッシュした瞬間に台帳が消える。
-/// `device_id` はジャーナルのフロントマターに焼かれていて、台帳を失うと過去の
-/// 参照が解決できなくなるので、`KeyStore::save_entries` と同じ手口を取る。
+/// Truncating in place would destroy the ledger if we crashed mid-write. A
+/// device id is baked into journal frontmatter, so losing the ledger leaves past
+/// references unresolvable — hence the same trick `KeyStore::save_entries` uses.
 ///
-/// `keys.rs` と違って 0600 では作らない。この台帳に秘密は無く（トークンは
-/// 鍵ファイル側にある）、ワークスペースごと同期される前提のファイルなので、
-/// 所有者限定のパーミッションは意味を持たない。
+/// Unlike `keys.rs`, the file is not created 0600: this ledger holds no secrets
+/// (tokens live in the key file) and the whole workspace is meant to sync, so
+/// an owner-only permission would be pointless.
 ///
-/// 一時ファイル名にはプロセス ID とプロセス内カウンタを足す。同じ台帳へ同時に
-/// 書く 2 プロセス（あるいは同一プロセスの 2 スレッド）が固定名の `*.tmp` を
-/// それぞれ `File::create`（truncate）してしまうと、互いの書き込みが同じ
-/// inode に交錯し、先に rename した方の中身が中途半端なまま公開されうる。
-/// これはその衝突の窓を狭めるだけで、なくしはしない — ロックは無いので、
-/// 最後に rename した方が勝つ。
+/// The temp file name carries the process id and a per-process counter. Two
+/// processes writing the same ledger at once (or two threads in one process)
+/// would each `File::create` (truncate) a fixed `*.tmp` name, interleaving both
+/// writes into one inode and publishing a half-written file on the first
+/// rename. This only narrows that window, never closes it — there is no lock,
+/// so whoever renames last wins.
 pub(crate) fn write_atomic(path: &Path, header: &str, body: &str) -> Result<()> {
     use std::io::Write as _;
 
