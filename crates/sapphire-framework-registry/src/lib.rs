@@ -1,21 +1,16 @@
-//! アプリごとのデバイス／ユーザー台帳。
+//! The device ledger for a sapphire workgroup.
 //!
-//! `.{app_name}/devices.toml` と `.{app_name}/users.toml` を読み書きする。
-//! ID はアプリの中だけで意味を持ち、アプリ間で共有しない — 各アプリは互いに
-//! MCP などの API 越しに 1 つのクライアントデバイスとして映る。
+//! One TOML file per device, named by the device's grain-id. One file per record is what
+//! lets two hosts pair at the same moment without colliding: each writes its own file, and
+//! the sync layer sees two independent additions rather than one contested file.
 //!
-//! パスの規約は `sapphire-framework-workspace` の `Workspace::devices_path` /
-//! `users_path` が持つ。このクレートは `&Path` を受け取るだけで、ワークスペースの
-//! 解決には関わらない。
+//! Path conventions belong to the caller. This crate takes a directory and works inside it.
 
 mod devices;
 mod error;
 mod store;
-mod users;
 
 pub use devices::{Device, Devices};
 pub use error::{Error, Result};
-pub use users::{User, Users};
-// `Device::id` / `Device::user_id` / `Devices::add` などの型。アプリが
-// grain-id を自前で依存に足さなくても名指しできるように出しておく。
+// Re-exported so an application can name `Device::id` without depending on grain-id itself.
 pub use grain_id::GrainId;

@@ -1,12 +1,11 @@
-//! デバイス台帳（`.{app_name}/devices.toml`）。
+//! The device ledger (`.<app_name>/devices.toml`).
 //!
-//! `id` は**コンテンツに永続化される** — ジャーナルのフロントマターの
-//! `updated_by` がこれを指し、表示時に `user_id` 経由で人間の名前へ逆引き
-//! される。だから台帳からの削除は既定でトゥームストーン（`retired_at`）で、
-//! 物理削除は `purge` を明示したときだけ。
+//! A device's `id` is **persisted into content** — a journal entry's frontmatter
+//! `updated_by` points at it. So removing a device from the ledger is a tombstone
+//! (`retired_at`) by default; only an explicit `purge` deletes it physically.
 //!
-//! ID はこのアプリの中だけで意味を持つ。同じ物理デバイスが別のアプリの台帳に
-//! 別の ID で載っていてよい。
+//! Ids mean nothing outside this app. The same physical device may sit in another
+//! app's ledger under a different id.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::store::write_atomic;
 
-/// 保存時に毎回書き出す書式説明。
+/// The format description written out on every save.
 const HEADER: &str = "\
 # sapphire devices.
 #
@@ -41,7 +40,6 @@ const HEADER: &str = "\
 #             a device's name is literally another device's id string, the
 #             name takes precedence.
 # description optional. A note for you.
-# user_id     optional. A grain-id from users.toml — whose device this is.
 # created_at  optional. RFC 3339. Filled in on load when blank.
 # retired_at  optional. RFC 3339. Set when the device is retired. The entry
 #             stays so historical references still resolve; only an explicit
@@ -54,25 +52,26 @@ const HEADER: &str = "\
 # here — this file holds no secrets — but worth knowing.
 ";
 
-/// 一台のデバイス。
+/// One device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
     pub id: GrainId,
     pub name: String,
     pub description: Option<String>,
-    pub user_id: Option<GrainId>,
     pub created_at: DateTime<Utc>,
     pub retired_at: Option<DateTime<Utc>>,
 }
 
 impl Device {
-    /// 引退済みか。認証の可否には使わない（それは鍵ファイルの仕事）。
+    /// Whether this device is retired. Not an authorization check — that is the
+    /// key file's job.
     pub fn is_retired(&self) -> bool {
         self.retired_at.is_some()
     }
 }
 
-/// ファイル上の表現。手書きを許すため `id` / `created_at` は省略可。
+/// The on-file representation. `id` / `created_at` are optional so that a record
+/// can be hand-written.
 #[derive(Debug, Serialize, Deserialize)]
 struct RawDevice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,8 +79,6 @@ struct RawDevice {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    user_id: Option<GrainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,14 +91,15 @@ struct RawFile {
     device: Vec<RawDevice>,
 }
 
-/// デバイス台帳ファイルとその中身。
+/// The device ledger file and its contents.
 ///
-/// `load` した時点のスナップショットを保持する。以後の `add` / `retire` /
-/// `purge` はすべてこのスナップショットに変更を足して全体を書き直すので、
-/// `load` の後にこのファイルへ届いた変更（HEADER が案内する手編集や、
-/// 他ホストからの同期）はこのインスタンスからは見えず、次の変更で静かに
-/// 上書きされる。ファイルが変わったかもしれない場面（起動直後でない、
-/// 長生きしているプロセスなど）では、変更の前に改めて `load` し直すこと。
+/// Holds the snapshot taken when it was loaded. Every later `add` / `retire` /
+/// `purge` appends to that snapshot and rewrites the whole file, so a change that
+/// reached the file after the load (a hand edit, as the HEADER invites, or a sync
+/// from another host) is invisible to this instance and is silently overwritten by
+/// the next mutation. Where the file may have changed — anything but a
+/// just-started process, a long-lived one especially — load it again before
+/// mutating.
 #[derive(Debug)]
 pub struct Devices {
     path: PathBuf,
@@ -109,8 +107,9 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// 読み込み、欠けた `id` / `created_at` を補完する。補完があれば書き戻す。
-    /// ファイルが無い場合は空の台帳を返す（作成はしない）。
+    /// Read the file, filling in a missing `id` / `created_at`. Writes back if
+    /// anything was filled in. A missing file is an empty ledger; it is not
+    /// created here.
     pub fn load(path: &Path) -> Result<Self> {
         let raw: RawFile = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)
@@ -119,8 +118,8 @@ impl Devices {
             Err(e) => return Err(Error::Io(e)),
         };
 
-        // 重複したまま読み込むと resolve がどちらか決められない。エントリごと
-        // コピーして複製する事故は実際に起きる。
+        // Loading a duplicate would leave `resolve` unable to pick one. Copying
+        // entries one by one and duplicating an entry does happen in practice.
         let mut seen_ids: HashSet<GrainId> = HashSet::new();
         let mut seen_names: HashSet<&str> = HashSet::new();
         for d in &raw.device {
@@ -152,7 +151,6 @@ impl Devices {
                 id: d.id.unwrap_or_else(GrainId::random),
                 name: d.name,
                 description: d.description,
-                user_id: d.user_id,
                 created_at: d.created_at.unwrap_or(now),
                 retired_at: d.retired_at,
             });
@@ -172,13 +170,8 @@ impl Devices {
         &self.entries
     }
 
-    /// 新しいデバイスを追加して保存する。`name` の重複は拒否する。
-    pub fn add(
-        &mut self,
-        name: &str,
-        description: Option<String>,
-        user_id: Option<GrainId>,
-    ) -> Result<Device> {
+    /// Add a new device and save it. Rejects a duplicate `name`.
+    pub fn add(&mut self, name: &str, description: Option<String>) -> Result<Device> {
         if self.entries.iter().any(|d| d.name == name) {
             return Err(Error::File(format!(
                 "a device named {name:?} already exists"
@@ -186,10 +179,10 @@ impl Devices {
         }
         let id = GrainId::random();
         if self.entries.iter().any(|d| d.id == id) {
-            // 天文学的に起こりにくいが、起きたときに黙って書き込むと `load`
-            // が重複 id を検出してファイル全体を読めなくする — 台帳を
-            // ブリックする。空きを探さずエラーにして、呼び出し側にもう一度
-            // `add` させる。
+            // Astronomically unlikely, but writing it anyway would make `load`
+            // detect a duplicate id and refuse to read the whole file — a bricked
+            // ledger. Ask the caller to `add` again rather than hunting for a free
+            // id.
             return Err(Error::File(format!(
                 "generated id {id} collides with an existing device; try again"
             )));
@@ -198,7 +191,6 @@ impl Devices {
             id,
             name: name.to_owned(),
             description,
-            user_id,
             created_at: Utc::now(),
             retired_at: None,
         };
@@ -213,25 +205,25 @@ impl Devices {
         self.entries.iter().find(|d| d.id == id)
     }
 
-    /// `selector` を 1 件のエントリの位置に解決する。
+    /// Resolve `selector` to the position of one entry.
     ///
-    /// device の名前は通常 7-8 文字で、Crockford base32 アルファベットの部分集合に
-    /// よく含まれる（"pendant", "speaker", "desktop" など）。だから名前が
-    /// grain-id として読めてしまう可能性は高い — そこで名前を優先する。
-    /// 名前に一致するエントリがあれば、それを返す。なければ grain-id として
-    /// 読めるか試す — 読めたら id で探す。
+    /// Device names are usually 7-8 characters and often drawn from a subset of the
+    /// Crockford base32 alphabet ("pendant", "speaker", "desktop"), so a name has a
+    /// good chance of parsing as a grain-id. That is why a name wins: if an entry's
+    /// name matches, return it; otherwise try to read the selector as a grain-id and
+    /// look up by id.
     ///
-    /// 名前と id がそれぞれファイル内で一意なので、複数一致は起こらない。
-    /// 名前が偶然 grain-id として読めてしまう場合は名前側が優先される —
-    /// 誤ったデバイスに当たることはないが、id で強制する逃げ道は無い。
-    /// `KeyStore::resolve` は UUID で似た制約を持つが、UUID は 32 文字なので
-    /// 衝突の確率がはるかに低い。
+    /// Names and ids are each unique in the file, so more than one match cannot
+    /// happen. When a name happens to parse as a grain-id, the name wins — this
+    /// never hits the wrong device, but there is no escape hatch to force an id.
+    /// `KeyStore::resolve` has a similar limitation with UUIDs, though a UUID's 32
+    /// characters make a collision far less likely.
     fn index_of(&self, selector: &str) -> Result<usize> {
-        // 名前を先に試す（7-8 文字の名前が grain-id として読める確率は高い）
+        // Try the name first (a 7-8 character name very often reads as a grain-id).
         if let Some(pos) = self.entries.iter().position(|d| d.name == selector) {
             return Ok(pos);
         }
-        // 名前に一致しなければ、grain-id として読めるか試す
+        // If no name matched, try reading the selector as a grain-id.
         if let Ok(id) = selector.parse::<GrainId>()
             && let Some(pos) = self.entries.iter().position(|d| d.id == id)
         {
@@ -244,11 +236,11 @@ impl Devices {
         Ok(&self.entries[self.index_of(selector)?])
     }
 
-    /// 引退させる。エントリは残るので、コンテンツに焼かれた `device_id` は
-    /// 解決し続ける。既に引退済みなら `retired_at` は上書きせず、保存もしない
-    /// — このインスタンスは `load` 時点のスナップショットなので、ここで
-    /// 無条件に保存すると、`load` の後に他ホストから同期された変更やこの
-    /// ファイルへの手編集を、変わっていないエントリのために踏み潰してしまう。
+    /// Retire a device. The entry stays, so a `device_id` baked into content keeps
+    /// resolving. An already-retired entry keeps its `retired_at` and is not saved:
+    /// this instance is the snapshot from `load`, so saving unconditionally here
+    /// would trample changes that arrived from another host or a hand edit, all for
+    /// an entry that did not change.
     pub fn retire(&mut self, selector: &str) -> Result<Device> {
         let i = self.index_of(selector)?;
         if self.entries[i].retired_at.is_some() {
@@ -262,7 +254,7 @@ impl Devices {
         Ok(retired)
     }
 
-    /// 本当に削除する。過去の `updated_by` は解決できなくなる。
+    /// Really delete a device. Past `updated_by` references stop resolving.
     pub fn purge(&mut self, selector: &str) -> Result<Device> {
         let i = self.index_of(selector)?;
         let mut candidate = self.entries.clone();
@@ -276,8 +268,8 @@ impl Devices {
         self.save_entries(&self.entries)
     }
 
-    /// `entries` をヘッダ付きで全上書きする。`self.entries` には触れない —
-    /// 呼び出し側は保存が成功してから代入すること。
+    /// Overwrite the whole file with `entries`, header first. Does not touch
+    /// `self.entries` — the caller assigns only after the save succeeds.
     fn save_entries(&self, entries: &[Device]) -> Result<()> {
         let raw = RawFile {
             device: entries
@@ -286,7 +278,6 @@ impl Devices {
                     id: Some(d.id),
                     name: d.name.clone(),
                     description: d.description.clone(),
-                    user_id: d.user_id,
                     created_at: Some(d.created_at),
                     retired_at: d.retired_at,
                 })
@@ -312,15 +303,13 @@ mod tests {
     fn add_then_reload_round_trips() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let user = GrainId::random();
         let added = devices
-            .add("pendant", Some("首から下げるやつ".into()), Some(user))
+            .add("pendant", Some("worn around the neck".into()))
             .unwrap();
 
         let reloaded = Devices::load(&path).unwrap();
 
         assert_eq!(reloaded.entries(), &[added]);
-        assert_eq!(reloaded.entries()[0].user_id, Some(user));
     }
 
     #[test]
@@ -328,7 +317,7 @@ mod tests {
         let (_d, path) = tmp();
         let devices = Devices::load(&path).unwrap();
         assert!(devices.entries().is_empty());
-        assert!(!path.exists(), "load はファイルを作らない");
+        assert!(!path.exists(), "load must not create the file");
     }
 
     #[test]
@@ -377,9 +366,9 @@ mod tests {
     fn add_rejects_a_duplicate_name() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("pendant", None, None).unwrap();
+        devices.add("pendant", None).unwrap();
 
-        let err = devices.add("pendant", None, None).unwrap_err();
+        let err = devices.add("pendant", None).unwrap_err();
 
         assert!(err.to_string().contains("pendant"), "{err}");
     }
@@ -388,7 +377,7 @@ mod tests {
     fn resolve_finds_by_id_and_by_name() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let added = devices.add("pendant", None, None).unwrap();
+        let added = devices.add("pendant", None).unwrap();
 
         assert_eq!(devices.resolve("pendant").unwrap(), &added);
         assert_eq!(devices.resolve(&added.id.to_string()).unwrap(), &added);
@@ -405,13 +394,13 @@ mod tests {
     fn retire_keeps_the_entry_resolvable() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let added = devices.add("gone", None, None).unwrap();
+        let added = devices.add("gone", None).unwrap();
 
         let retired = devices.retire("gone").unwrap();
 
         assert!(retired.retired_at.is_some());
-        // device_id はジャーナルのフロントマターに焼かれるので、引退しても
-        // 逆引きできなければならない。
+        // device_id is baked into a journal entry's frontmatter, so retiring must
+        // leave it resolvable.
         assert!(devices.get(added.id).is_some());
         let reloaded = Devices::load(&path).unwrap();
         assert!(reloaded.entries()[0].retired_at.is_some());
@@ -421,23 +410,23 @@ mod tests {
     fn retire_does_not_resave_when_already_retired() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None, None).unwrap();
+        devices.add("gone", None).unwrap();
         let first = devices.retire("gone").unwrap();
 
-        // load 後にこのファイルへ届いた変更を模す（同期や手編集。この
-        // `devices` インスタンスはこれを知らない）。
+        // Mimic a change that reached the file after the load (a sync or a hand
+        // edit; this `devices` instance knows nothing about it).
         let mut synced = std::fs::read_to_string(&path).unwrap();
         synced.push_str("\n# synced by another host\n");
         std::fs::write(&path, &synced).unwrap();
 
         let second = devices.retire("gone").unwrap();
 
-        assert_eq!(second.retired_at, first.retired_at, "上書きしない");
-        // 早期リターンで再保存しなければ、同期で届いた行はそのまま残る。
+        assert_eq!(second.retired_at, first.retired_at, "must not overwrite");
+        // The early return must not re-save, or the synced line would be gone.
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.contains("synced by another host"),
-            "既に引退済みの retire がファイルを書き直してしまった: {text}"
+            "retiring an already-retired device rewrote the file: {text}"
         );
     }
 
@@ -445,7 +434,7 @@ mod tests {
     fn purge_removes_the_entry() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("gone", None, None).unwrap();
+        devices.add("gone", None).unwrap();
 
         devices.purge("gone").unwrap();
 
@@ -456,62 +445,87 @@ mod tests {
     fn the_header_documents_every_field() {
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        devices.add("pendant", None, None).unwrap();
+        devices.add("pendant", None).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
 
-        for field in [
-            "id",
-            "name",
-            "description",
-            "user_id",
-            "created_at",
-            "retired_at",
-        ] {
+        for field in ["id", "name", "description", "created_at", "retired_at"] {
             assert!(
                 text.contains(&format!("# {field}")),
-                "ヘッダが {field} を説明していない: {text}"
+                "the header does not document {field}: {text}"
             );
         }
     }
 
     #[test]
     fn a_name_that_parses_as_a_grain_id_still_resolves_as_a_name() {
-        // 7 文字のデバイス名は Crockford base32 に含まれる文字で構成されていることが多く、
-        // grain-id として読めてしまう。例えば "pendant", "speaker", "desktop" など。
-        // 名前優先の規則により、名前の方が id より先に一致する。
+        // A 7-character device name is often made of characters Crockford base32
+        // accepts, so it can read as a grain-id: "pendant", "speaker", "desktop".
+        // The name-first rule makes the name match before the id.
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
         let name = "pendant";
-        // このテストの前提: name が実際に grain-id として読めなければ、
-        // どちらの規則（id 優先／名前優先）でも同じ枝を通ってしまい、この
-        // テストは何も保証しなくなる。
+        // The premise of this test: if `name` does not actually parse as a
+        // grain-id, both rules (id first / name first) take the same branch and
+        // this test guarantees nothing.
         assert!(
             name.parse::<GrainId>().is_ok(),
-            "{name:?} は grain-id として読めるはずのテスト前提が崩れている"
+            "the premise that {name:?} parses as a grain-id no longer holds"
         );
-        let added = devices.add(name, None, None).unwrap();
+        let added = devices.add(name, None).unwrap();
 
-        // 名前優先の規則により resolve(name) は名前で一致すべき。
+        // Thanks to the name-first rule, resolve(name) must match by name.
         assert_eq!(devices.resolve(name).unwrap(), &added);
-        // id でも解決できる
+        // The id resolves too.
         assert_eq!(devices.resolve(&added.id.to_string()).unwrap(), &added);
     }
 
     #[test]
     fn a_device_name_matching_another_device_id_resolves_by_name() {
-        // デバイスの名前が別のデバイスの id 文字列と同じ場合、名前が優先される。
+        // When a device's name equals another device's id string, the name wins.
         let (_d, path) = tmp();
         let mut devices = Devices::load(&path).unwrap();
-        let first = devices.add("device1", None, None).unwrap();
-        // second の名前を first の id にする
-        let second = devices.add(&first.id.to_string(), None, None).unwrap();
+        let first = devices.add("device1", None).unwrap();
+        // Give the second device the first one's id as its name.
+        let second = devices.add(&first.id.to_string(), None).unwrap();
 
-        // resolve(first.id) は second デバイス（名前が id に等しい）を返す
+        // resolve(first.id) returns the second device (whose name equals that id).
         assert_eq!(devices.resolve(&first.id.to_string()).unwrap(), &second);
-        // first を見つけるには id を名前ではなく id として使う...は出来ないが、
-        // 別の方法はない。これは名前優先の trade-off。
-        // けれども first を "device1" で見つけられる
+        // There is no way to reach `first` by id, only by another route — that is
+        // this trade-off. "device1" does find it.
         assert_eq!(devices.resolve("device1").unwrap(), &first);
+    }
+}
+
+#[cfg(test)]
+mod user_removal_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_record_has_no_user_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.toml");
+        std::fs::write(&path, "[[device]]\nname = \"laptop\"\n").unwrap();
+
+        let mut devices = Devices::load(&path).unwrap();
+        devices.add("desktop", None).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("user_id"), "a user_id survived:\n{text}");
+    }
+
+    #[test]
+    fn a_hand_written_user_id_is_ignored_rather_than_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.toml");
+        std::fs::write(
+            &path,
+            "[[device]]\nname = \"laptop\"\nuser_id = \"abcdef\"\n",
+        )
+        .unwrap();
+
+        let devices = Devices::load(&path).unwrap();
+        assert_eq!(devices.entries().len(), 1);
+        assert_eq!(devices.entries()[0].name, "laptop");
     }
 }

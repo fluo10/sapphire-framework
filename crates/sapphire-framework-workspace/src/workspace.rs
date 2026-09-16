@@ -94,16 +94,12 @@ impl Workspace {
 
     /// Path to `{root}/.{app_name}/devices.toml`.
     ///
-    /// 台帳そのものの読み書きは `sapphire-framework-registry` が持つ。ここが
-    /// 決めるのはファイル名の規約だけで、逆方向の依存は張らない — registry は
-    /// `&Path` を受け取るだけなので、このクレートを引かずに使える。
+    /// Reading and writing the ledger itself is `sapphire-framework-registry`'s job.
+    /// All this decides is the file name convention, and it never depends back on
+    /// that crate — the registry takes a `&Path`, so it can be used without pulling
+    /// this crate in.
     pub fn devices_path(&self) -> PathBuf {
         self.marker_dir().join("devices.toml")
-    }
-
-    /// Path to `{root}/.{app_name}/users.toml`.
-    pub fn users_path(&self) -> PathBuf {
-        self.marker_dir().join("users.toml")
     }
 
     /// Path to the marker directory (`{root}/.{app_name}`).
@@ -290,18 +286,16 @@ mod registry_path_tests {
     use super::*;
 
     #[test]
-    fn devices_and_users_sit_next_to_the_workspace_config() {
+    fn the_device_ledger_sits_next_to_the_workspace_config() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".sapphire-agent")).unwrap();
         let ctx: &'static AppContext = Box::leak(Box::new(AppContext::new("sapphire-agent")));
         let ws = Workspace::from_root(ctx, tmp.path()).unwrap();
 
-        // 台帳はワークスペース設定と同じマーカーディレクトリに置く。
-        // ファイル名の規約を 1 箇所に閉じ込めるのがこのメソッドの存在理由。
+        // The ledger sits in the same marker directory as the workspace config.
+        // Keeping the file name convention in one place is why this method exists.
         assert_eq!(ws.devices_path().parent(), ws.config_path().parent());
-        assert_eq!(ws.users_path().parent(), ws.config_path().parent());
         assert_eq!(ws.devices_path().file_name().unwrap(), "devices.toml");
-        assert_eq!(ws.users_path().file_name().unwrap(), "users.toml");
     }
 }
 
