@@ -28,7 +28,7 @@ const HEADER: &str = "\
 #             Filled in when the device pairs. Unique within the ledger.
 # description optional. A note for you; the system never reads it.
 # created_at  optional. Filled in when the record is written.
-# retired_at  optional. Set by `device forget`. The record stays, because
+# retired_at  optional. Set by `device retire`. The record stays, because
 #             synced content refers to this device's id forever.
 ";
 
@@ -47,7 +47,8 @@ pub struct Device {
     pub node_id: Option<String>,
     /// A note for the user; the system never reads it.
     pub description: Option<String>,
-    /// When the record was created.
+    /// When the record was created. A hand-written record without it is stamped
+    /// with the moment it was first loaded.
     pub created_at: DateTime<Utc>,
     /// When the device was retired, if it was.
     pub retired_at: Option<DateTime<Utc>>,
@@ -118,6 +119,16 @@ impl Devices {
                             entry.path().display()
                         ))
                     })?;
+                    // The id decodes aliases and uppercase, so a hand-written record
+                    // can spell its id in a way that differs from the canonical name
+                    // `file_name` would write. Admitting it would let the next
+                    // mutation duplicate the record under the canonical name.
+                    if stem != id.to_string() {
+                        return Err(Error::File(format!(
+                            "{}: the file name is not the canonical spelling of its id {id}",
+                            entry.path().display()
+                        )));
+                    }
                     let text = std::fs::read_to_string(entry.path())?;
                     let raw: RawDevice = toml::from_str(&text)
                         .map_err(|e| Error::File(format!("{}: {e}", entry.path().display())))?;
@@ -388,7 +399,7 @@ mod tests {
         let (_d, path) = tmp();
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("abcdefg.toml"), "name = \"dup\"\n").unwrap();
-        std::fs::write(path.join("hijkmno.toml"), "name = \"dup\"\n").unwrap();
+        std::fs::write(path.join("h1jkmn0.toml"), "name = \"dup\"\n").unwrap();
 
         let err = Devices::open(&path).unwrap_err();
 
@@ -769,6 +780,20 @@ mod directory_tests {
 
         let err = Devices::open(&dir).unwrap_err();
         assert!(err.to_string().contains("not-an-id!"), "{err}");
+    }
+
+    #[test]
+    fn a_file_named_with_a_non_canonical_id_is_refused() {
+        // grain-id's decoder accepts uppercase and the i/l/o/u aliases, so a hand-
+        // written DESKTOP.toml parses — but its canonical spelling differs, and every
+        // later mutation would rewrite the record under a second file name.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("DESKTOP.toml"), "name = \"laptop\"\n").unwrap();
+
+        let err = Devices::open(&dir).unwrap_err();
+        assert!(err.to_string().contains("DESKTOP"), "{err}");
     }
 
     #[test]
