@@ -1,30 +1,42 @@
 # sapphire-framework-registry
 
-アプリごとのデバイス／ユーザー台帳。`.{app_name}/devices.toml` と
-`.{app_name}/users.toml` を読み書きする。
+The per-app device ledger. One directory, one record file per device —
+`<dir>/<grain-id>.toml` — read and written through `Devices`.
 
 ```rust
 use sapphire_framework::registry::Devices;
 
-let mut devices = Devices::load(&workspace.devices_path())?;
-let pendant = devices.add("pendant", Some("首から下げるやつ".into()), None)?;
-println!("{}", pendant.id); // 例: "a3f9k2p"
+let mut devices = Devices::open(&workgroup_dir.join("devices"))?;
+let pendant = devices.add("pendant", None, Some("首から下げるやつ".into()))?;
+println!("{}", pendant.id); // e.g. "a3f9k2p"
 ```
 
-## ID はアプリの中で閉じる
+## Why one file per device
 
-`Device` / `User` の ID はそのアプリの台帳の中だけで意味を持ち、アプリ間で
-共有しない。sapphire-journal / sapphire-ledger / sapphire-agent は互いに MCP
-などの API 越しに **1 つのクライアントデバイス**として映るので、揃える必要が
-無い。
+Each mutation rewrites exactly one record file, so two hosts mutating the
+ledger at the same moment never collide — they write different files. The
+id is the file name and is never repeated inside the file.
 
-`device.id` は**コンテンツに永続化される**（ジャーナルのエントリの
-`updated_by` など）。だから削除は既定でトゥームストーン（`retired_at`）で、
-物理削除は `purge` を明示したときだけ。アクセスの停止は台帳ではなく、
-サーバの鍵ファイル（`KeyStore::revoke`）の仕事。
+## IDs close inside the app
 
-## 鍵との関係
+A `Device` id means something only inside that app's ledger; apps do not
+share ids. sapphire-journal / sapphire-ledger / sapphire-agent each appear
+to one another as a single client device, so there is nothing to align.
 
-`KeyEntry.device_id` が台帳のエントリを指す。向きが逆でないのは、鍵ファイルが
-ホストごと・台帳がワークスペースごとに存在するため — 1 台の物理デバイスが
-2 台のサーバに喋るなら、鍵は 2 本・別々のファイルに入る。
+`device.id` is **persisted into content** (a journal entry's `updated_by`,
+say). So removal is a tombstone (`retired_at`) by default, and a record is
+deleted physically only by an explicit `purge`. Revoking access is not the
+ledger's job — that is the server's key file (`KeyStore::revoke`).
+
+## Relation to keys
+
+`KeyEntry.device_id` points at a ledger entry, not the other way round,
+because the key file exists per host while the ledger exists per workspace —
+if one physical device talks to two servers, it has two keys in two separate
+files.
+
+## Migration
+
+`migrate_single_file` converts a legacy single-file `devices.toml` (with its
+`[[device]]` tables and optional per-record `id` / `user_id` fields) into
+per-device record files, idempotently and without touching the old file.
