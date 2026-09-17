@@ -19,6 +19,8 @@ mod handshake;
 mod message;
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 pub use conn::{Connection, Sender};
 pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
@@ -27,6 +29,8 @@ pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
 #[cfg(unix)]
 pub use unix::{UnixListenerHandle, bind, peer_uid};
+#[cfg(windows)]
+pub use windows::{PipeListener, bind, current_user_sid};
 
 /// The IPC protocol version this build speaks. Bumped on a breaking change to the
 /// envelope or the handshake.
