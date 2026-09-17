@@ -90,6 +90,7 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 | `sapphire-framework-retrieve` | 検索。`RetrieveStore` + `RedbStore`(redb+tantivy) のみ | ✅ 移設+redb実装済 |
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済（#90 で git/自動同期/device を撤去） |
 | `sapphire-framework-rpc` | client/server 共有 JSON-RPC 型/メソッド定義（serde-only・wasm-safe） | ✅ |
+| `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の JSON-RPC、ルータ、自動起動） | ✅ |
 | `sapphire-framework-remote-client` | JSON-RPC 差分同期クライアント（reqwest, `RemoteClient`） | ✅ |
 | `sapphire-framework-remote-server` | axum JSON-RPC 同期/検索サーバ（v1=ファイル原本+redb cache+change_log） | ✅ |
 | `sapphire-framework-blob` | バイナリブロブ抽象 `BlobStore`（`FsBlobStore`／将来 OPFS/S3） | ✅ |
@@ -150,6 +151,12 @@ search.semantic     {ws, q, limit}                           -> 当面 fts フ�
 クライアントは `RemoteClient`（`sapphire-framework-remote-client`）でこれらを直接呼び、`RemoteBackend` が
 ローカルキャッシュへ pull/apply・push する。競合は MVP で LWW(`updated_at`)+tombstone+`conflicts`再pull。CRDT は後続。
 （旧 `ChangeSource`/`SyncBackend` 抽象は #90 で撤去。同期は中央サーバに一本化した。）
+
+> **2026-09-16 以降の方針**: アプリのキャッシュ（redb）を開くプロセスを 1 つに絞るため、
+> サーバを CLI / desktop の依存に格上げする。CLI・stdio MCP・desktop は
+> `sapphire-framework-ipc` 経由でアプリサーバに接続し、ホストごとの常駐 `sapphire-bridge`
+> が同期を仲介する。設計は
+> `docs/superpowers/specs/2026-09-16-process-architecture-design.md`。
 
 ## アプリディレクトリ構成と CLI 規約（#128 / #129）
 
