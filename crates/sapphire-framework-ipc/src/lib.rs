@@ -12,6 +12,7 @@
 
 #![warn(missing_docs)]
 
+mod client;
 mod conn;
 mod endpoint;
 mod error;
@@ -23,6 +24,7 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+pub use client::{Client, NOTIFICATION_CAPACITY};
 pub use conn::{Connection, Sender};
 pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};

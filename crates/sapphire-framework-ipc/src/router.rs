@@ -5,6 +5,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
+
 use serde_json::Value;
 
 use crate::conn::{Connection, Sender};
@@ -101,7 +103,8 @@ impl Router {
 ///
 /// The first request must be [`HANDSHAKE_METHOD`]; anything else is refused. After that,
 /// each request is dispatched on its own task, so a slow handler does not delay the
-/// requests behind it.
+/// requests behind it. Dropping or aborting the `serve` future also drops the handlers
+/// still running for that connection, which is what cancellation means here.
 pub async fn serve(
     mut conn: Connection,
     router: Arc<Router>,
@@ -111,7 +114,13 @@ pub async fn serve(
     let sender = conn.sender();
     let mut peer: Option<PeerHandle> = None;
 
+    // Handlers are tracked, not detached, so a dropped `serve` call takes the
+    // in-flight work down with it (cancellation is disconnection, spec §2.2).
+    let mut handlers = JoinSet::new();
+
     while let Some(incoming) = conn.recv().await {
+        // Reap the handlers that finished, so the set does not grow without bound.
+        while handlers.try_join_next().is_some() {}
         let msg = match incoming {
             Ok(msg) => msg,
             Err(err) => {
@@ -169,7 +178,7 @@ pub async fn serve(
 
         let sender = sender.clone();
         let Request { id, params, .. } = req;
-        tokio::spawn(async move {
+        handlers.spawn(async move {
             let payload = match handler(RequestCtx { params, peer }).await {
                 Ok(value) => ResponsePayload::Ok(value),
                 Err(err) => ResponsePayload::Err(err),
