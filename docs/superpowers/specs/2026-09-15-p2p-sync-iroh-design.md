@@ -1,12 +1,21 @@
 # Peer-to-peer workspace sync over iroh
 
 - Date: 2026-09-15 (revised the same day: shared host node, workgroups, single user, grain-id identifiers, service installation)
-- Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-net`, `-keys`, `-service`;
+- **Partly superseded on 2026-09-16** by
+  [`2026-09-16-process-architecture-design.md`](./2026-09-16-process-architecture-design.md).
+  §2 (the replication core) and §6.1 are implemented and remain authoritative. §3–§5 and
+  §6.2–§6.3 are **revised in place, not discarded**: the host node is no longer embedded in
+  apps and elected by a lock, but a separate daemon, `sapphire-bridge`, with each app's
+  workspaces owned by that app's server. A substitution table at the head of §3 says how to
+  read those sections; §5.6's implementation order is replaced by §9 of the
+  process-architecture spec. Decisions 8, 11, 13 and 14 below carry a note.
+- Scope: `sapphire-framework` — new crates `sapphire-framework-sync`, `-keys`, `-service`;
   changes to `-registry`, `-backend`, the facade; removal of `-rpc`, `-remote-client`,
-  `-remote-server`, `-blob`
-- Follow-ups (separate specs): `sapphire-sync` (new sync app, first consumer; lives in
-  this repository), then `sapphire-timer`, `sapphire-ledger`, `sapphire-journal`,
-  `sapphire-agent` (each in its own repository)
+  `-remote-server`, `-blob`. (`-net` was planned here and is not created; see the
+  process-architecture spec.)
+- Follow-ups (separate specs): the process-architecture spec, then `sapphire-sync` (the
+  sync-only app; lives in this repository), then `sapphire-timer`, `sapphire-ledger`,
+  `sapphire-journal`, `sapphire-agent` (each in its own repository)
 - Related issues: #83, #86, #87, #90, #92, #103, #104, #117
 
 ## Background
@@ -80,6 +89,9 @@ Agreed during brainstorming on 2026-09-15:
    processes only touch files and take over when the lock frees. No handoff protocol, no
    daemon requirement. Where a shared directory is impossible (mobile sandboxes), each app
    keeps its own directory and becomes its own device — same mechanism, different location.
+   **Superseded**: one node per host survives, but it is a separate daemon
+   (`sapphire-bridge`), not an embedded node elected by a lock, and inter-process
+   communication is a real socket rather than files. Process-architecture spec §1, §5.
 9. **Devices form cross-app workgroups.** A device pairs into a workgroup once and can then host any
    of that workgroup's workspaces; each device chooses which workspaces it keeps a copy of
    (`workspace map`). Layout, wire format and authorization support a host in several workgroups
@@ -89,7 +101,8 @@ Agreed during brainstorming on 2026-09-15:
     can also be selected by name.
 11. **`sapphire-framework-service`** provides `service install` for any app: user-level
     units by default, a system-wide systemd unit when run as root on Linux, with a per-app
-    default run-as user (§5.5).
+    default run-as user (§5.5). **Extended**: `ServiceSpec` also carries `run_as` and
+    `helper_as` for privilege separation. Process-architecture spec §3.
 12. **Any file type is synced, with a size cap.** Content is addressed by hash for all
     files; whole-file transfer only (default cap 64 MiB); chunked/resumable transfer is
     deferred.
@@ -101,9 +114,16 @@ Agreed during brainstorming on 2026-09-15:
     a redesign. Because it is a core component, it **lives in the `sapphire-framework`
     repository** and is versioned in lockstep with the framework crates. Its directory
     layout and packaging are decided in its own spec.
+    **Superseded**: the always-on peer and dedicated-service roles moved to
+    `sapphire-bridge`. `sapphire-sync` stays as the reference implementation and a
+    Syncthing-like app, no longer a core component. Process-architecture spec §1 decision 4,
+    §8.
 14. **Guardrails for embedding the node in apps**: a compatibility policy tied to the format
     version, fault isolation so a node failure never takes the app down, and a per-host
     switch that leaves the node to a dedicated service (§3.3, §4.1, §5.4).
+    **Superseded**: nothing embeds the node any more, so fault isolation is structural and
+    the per-host switch is gone. The compatibility policy survives as the bridge's protocol
+    version and directory `format`. Process-architecture spec §2.4, §10.
 
 ## 1. Crate layout
 
@@ -112,12 +132,12 @@ Agreed during brainstorming on 2026-09-15:
 | crate | role | depends on |
 |---|---|---|
 | `sapphire-framework-sync` | Replication core, **transport-agnostic**: wire types, `ReplicaStore` (redb), merge rules, HLC, conflict copies, declarative filtering, external-edit detection (mtime + size pre-filter in its own store) | serde, redb, sha2, ignore, walkdir |
-| `sapphire-framework-net` | Shared node directory and lock, iroh `Endpoint`, protocol handlers (`sync`, `blob`, `pair`), authorization against the workgroup, discovery and relay configuration, `SyncNode` runtime, file watcher, workspace registration API, `NodeCommand` CLI subcommands (feature `cli`), embedded relay (feature `embedded-relay`) | iroh 1.x, `-sync`, `-registry` |
+| ~~`sapphire-framework-net`~~ | **Not created.** Its iroh half (node directory, `Endpoint`, protocol handlers, workgroup authorization, discovery and relay configuration, embedded relay) became `sapphire-framework-bridge`; its runtime half (`SyncNode`, file watcher, workspace registration) became `sapphire-framework-server`. See the process-architecture spec §5, §4. | — |
 | `sapphire-framework-keys` | `KeyStore` / `KeyEntry` / `protect`, moved out of `-remote-server` (#103). For non-sync HTTP endpoints | serde, toml, axum (feature) |
 | `sapphire-framework-service` | `ServiceCommand` (`service install` / `uninstall` / `status`) and `ServiceSpec`: registers an app's long-running command with the OS service manager (§5.5). Not sync-specific; reused by `sapphire-sync`, `sapphire-agent`, … | clap, `-workspace` (`AppContext`) |
 
-`-sync` and `-net` must **not** depend on `-workspace` or `-retrieve`. `sapphire-sync`
-(which has no search index) verifies this.
+`-sync` must **not** depend on `-workspace` or `-retrieve` (the same held for `-net`, and
+now holds for `-bridge`). `sapphire-sync`, which has no search index, verifies this.
 
 ### Changed
 
@@ -125,12 +145,13 @@ Agreed during brainstorming on 2026-09-15:
   file per record (`<dir>/<grain-id>.toml`) instead of one `devices.toml` (see §3.5);
   `Device` gains `node_id`. A migration from the single-file format is provided for any
   directory.
-- **`-backend`**: `RemoteBackend` is replaced by `SyncedBackend` = `LocalBackend` plus a
-  handle to the host node (§4.4). "Local" and "remote" workspaces disappear as distinct
-  things: every workspace is local, with zero or more peers. `WorkspaceLocator` becomes
-  `Path` only; joining happens through `NodeCommand`.
-- **Facade**: features `rpc` / `remote-client` / `remote-server` become `sync` / `net` /
-  `keys`.
+- **`-backend`**: `RemoteBackend` is removed. "Local" and "remote" workspaces disappear as
+  distinct things: every workspace is local, with zero or more peers, and `WorkspaceLocator`
+  becomes `Path` only. *(Superseded in part: the planned `SyncedBackend` is not built.
+  `-backend` gains `IpcBackend` instead, and `LocalBackend` moves inside
+  `sapphire-framework-server`. Process-architecture spec §4.2.)*
+- **Facade**: features `rpc` / `remote-client` / `remote-server` become `sync` / `keys` and,
+  per the process-architecture spec, `ipc` / `server` / `bridge`.
 
 ### Removed
 
@@ -144,7 +165,8 @@ Agreed during brainstorming on 2026-09-15:
 
 ### Unchanged
 
-`-track`, `-retrieve`, `-workspace`.
+`-track`, `-retrieve`. (`-workspace` was unchanged here; the process-architecture spec §7
+removes its per-kind directory layout.)
 
 ## 2. Replication core (`sapphire-framework-sync`)
 
@@ -336,6 +358,28 @@ Skipped paths are reported in `status.json` (§3.1).
 
 Tombstone GC (possible once every active device's reported version vector covers the
 tombstone), first-class moves/renames, per-file-type merge, chunked/resumable transfer.
+
+> **Sections 3–5 are revised, not discarded.** The process-architecture spec
+> ([`2026-09-16-process-architecture-design.md`](./2026-09-16-process-architecture-design.md))
+> moves the host node out of the apps and into a separate daemon, `sapphire-bridge`, and gives
+> each app's workspaces to that app's server. Read everything below with these substitutions:
+>
+> | Written here as | Read as |
+> |---|---|
+> | the node, run by whichever process holds `node.lock` | `sapphire-bridge`, one process per user, `bridge.lock` only preventing a second one |
+> | a follower (files only, retrying the lock) | does not exist; every process is a client of its app server |
+> | the node running `SyncNode` for every workspace of every app | each **app server** running the watcher and `Replica` for its own workspaces (process-architecture spec §4.2) |
+> | inter-process communication through `workspaces.toml` / `status.json` / `invites.toml` | JSON-RPC over a socket; those files remain the bridge's own persisted state, and `workspaces.toml` becomes the bridge's `routes.toml` plus each app server's registration |
+> | `NodeCommand` flattened into every app's CLI | the `sapphire-bridge` CLI for device-level commands; `journal sync …` for workspace-level ones |
+> | `embedded_node = false` (dedicated service mode) | gone: the bridge is always a separate process |
+> | `sapphire-framework-net` | `sapphire-framework-bridge` (iroh side) and `sapphire-framework-server` (runtime side) |
+>
+> Everything else in these sections — the node directory's contents, `sync-id` and workspace
+> registration, selectors, the missing-root guard, workgroups and authorization, pairing,
+> protocols and sessions, `net.toml`, dialing and live propagation, app fix-ups, app migration
+> requirements, the compatibility policy and service installation — stands, attached to the
+> bridge or to the app server as the table implies. Section 5.6's implementation order is
+> replaced by §9 of the process-architecture spec.
 
 ## 3. Host node, workgroup and pairing (`sapphire-framework-net`)
 
@@ -766,6 +810,15 @@ sapphire-sync → timer → ledger → journal → agent.
 - **Filtering**: built-in rule per app name, `.sapphireignore`, size cap, unrepresentable
   paths (entry kept, not materialized, reported).
 
+> **Revised by the process-architecture spec §11**, with the same substitutions as §3–§5.
+> The cases below still apply where they test the node directory, registration, `sync-id`,
+> the missing-root guard, workgroups, pairing and the network topologies — rewritten against
+> the bridge and the app server. Dropped with the model they covered: holder / follower roles,
+> takeover after the holder exits, `embedded_node = false`, holder visibility in `status.json`
+> and the shared log, and "follower writes reach peers through the holder". Added there:
+> the start race, stale sockets, peer-uid rejection, concurrent writes from two CLI processes,
+> and privilege separation.
+
 ### 6.2 Node directory (no network)
 
 - lock: holder/follower roles; takeover after the holder process exits (a child process
@@ -805,6 +858,7 @@ addresses — no external network.
 
 A real-relay test exists as `#[ignore]`, run manually.
 
+
 ### 6.4 Registry and CI
 
 - Registry migration: idempotent, retryable after partial failure; users dropped.
@@ -820,14 +874,13 @@ A real-relay test exists as `#[ignore]`, run manually.
 
 1. **journal's id reassignment** must become content-deterministic; until it does, journal
    cannot migrate safely.
-2. **Framework version skew across apps on one host.** Format versioning and the
-   behavioural compatibility policy keep an old app from corrupting newer state or merging
-   differently, but a host whose newest app is not running does not sync. Dedicated service
-   mode (§3.3) removes the skew where it matters.
-3. **A bug in one app's process can pause sync for all apps** on the host until another
-   process takes over (≤ 10 s); fault isolation (§4.1) keeps the app itself running, and
-   dedicated service mode removes the exposure.
-4. **File locks** behave poorly on network filesystems; the node directory must be local.
+2. ~~**Framework version skew across apps on one host.**~~ *Resolved by the
+   process-architecture spec*: the bridge is a separate binary versioned with the framework,
+   so which app happens to be running no longer decides the sync behaviour of the host.
+3. ~~**A bug in one app's process can pause sync for all apps.**~~ *Resolved*: a crash in one
+   app's server stops only that app's workspaces, and a crash in the bridge takes no app down.
+4. **File locks** behave poorly on network filesystems; the bridge directory must be local.
+   The same applies to the Unix sockets of the process-architecture spec §2.5.
 5. **Mobile devices appear once per app** unless the platform allows a shared container.
 6. **Embedded relay** needs a publicly reachable address and TLS; home servers behind NAT
    may still need n0 relays.

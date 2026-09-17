@@ -1,14 +1,14 @@
 use thiserror::Error;
 
-/// 台帳ファイルの読み書きで起きる失敗。
+/// What can go wrong reading or writing a ledger.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// ファイル操作が失敗した。
+    /// A file operation failed.
     #[error("registry io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// パース・保存に失敗した、id / name が重複していた、または
-    /// セレクタがどのエントリにも解決しなかった。
+    /// Parsing or storing failed, an id / name was duplicated, or a selector
+    /// resolved to no entry.
     #[error("registry file error: {0}")]
     File(String),
 }

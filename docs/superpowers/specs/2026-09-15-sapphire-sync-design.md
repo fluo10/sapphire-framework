@@ -8,6 +8,29 @@
   (called "the framework spec" below). Everything about replication, workgroups, pairing,
   the node directory, `NodeCommand` and `ServiceCommand` is defined there; this spec only
   covers the application.
+- **Partly superseded on 2026-09-16** by
+  [`2026-09-16-process-architecture-design.md`](./2026-09-16-process-architecture-design.md)
+  (the process-architecture spec), which replaces the framework spec's §3–§5. The changes
+  to this application:
+  - **`sapphire-sync` is no longer a core component.** The always-on peer for a workgroup
+    and the dedicated background sync service are now `sapphire-bridge`. What remains here is
+    role 1: the reference implementation and E2E test bed, and a Syncthing-like file sync
+    product — **one app among many**, the smallest possible app server, with no search stack.
+    It still lives in this repository as the framework's own E2E harness, but it no longer
+    has to be versioned in lockstep with the framework crates.
+  - **It builds on `sapphire-framework-server`** like any other app: its own workspaces, its
+    own replica stores, a CLI that talks to its server over a socket. It does **not** host
+    other apps' workspaces (framework-spec decision 4 in the process-architecture spec: a
+    host that wants an opaque copy of files uses rsync or git).
+  - **Node commands move out.** `pair`, `device`, `workgroup` and the host's network
+    configuration belong to the `sapphire-bridge` CLI. What stays here is workspace-level:
+    `init`, `sync enable`, `sync map`, `status`.
+  - `embedded_node = false` and the post-install step that sets it are gone; the bridge is
+    always a separate process.
+
+  Sections 1–7 below are read with those substitutions; they are not rewritten here, because
+  this application is built after the framework work (process-architecture spec §9, step 6)
+  and will get a revision pass then.
 
 ## Background
 
