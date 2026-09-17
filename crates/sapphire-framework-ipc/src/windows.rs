@@ -74,8 +74,11 @@ pub fn current_user_sid() -> Result<String> {
     {
         return Err(last_error());
     }
-    // SAFETY: on success the buffer holds a TOKEN_USER.
-    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    // SAFETY: on success the buffer holds a TOKEN_USER containing a SID that points into
+    // `buf`, which stays alive until the SID has been converted. The buffer is a `Vec<u8>`
+    // and so only byte-aligned, hence the unaligned read: borrowing it as `&TOKEN_USER`
+    // would assert an 8-byte alignment the allocation does not guarantee.
+    let user = unsafe { buf.as_ptr().cast::<TOKEN_USER>().read_unaligned() };
 
     let mut raw: *mut u16 = std::ptr::null_mut();
     // SAFETY: `user.User.Sid` is a valid SID owned by `buf`.
@@ -226,6 +229,9 @@ pub async fn probe(endpoint: &Endpoint) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
     use super::*;
     use crate::message::{Message, Notification};
 
@@ -237,6 +243,53 @@ mod tests {
     fn the_current_user_sid_looks_like_a_sid() {
         let sid = current_user_sid().unwrap();
         assert!(sid.starts_with("S-1-"), "{sid}");
+    }
+
+    /// Reads the descriptor back out as SDDL and pins its contents.
+    ///
+    /// The DACL is the whole point of this carrier, so it gets asserted rather than
+    /// assumed: the string must name this user's own SID and SYSTEM, and must not contain
+    /// the well-known SIDs for Everyone (`WD`), Builtin Users (`BU`) or Authenticated
+    /// Users (`AU`) — any of which would reopen the pipe to other users.
+    ///
+    /// This reads a descriptor built in-process; it does not ask the kernel what it
+    /// granted on a live pipe. Querying the bound pipe with `GetSecurityInfo` would cover
+    /// that too, but it needs a separate `Win32_Security_Authorization` access mask and a
+    /// manual `LocalFree` of a second descriptor for no extra coverage of the DACL's
+    /// *contents*, which is what can regress here.
+    #[test]
+    fn the_security_descriptor_admits_only_this_user_and_system() {
+        let descriptor = Descriptor::for_current_user().unwrap();
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `descriptor.0` is a live descriptor for the duration of the call, and
+        // `raw` is a valid out-pointer.
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &raw mut raw,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(converted, 0, "could not read the descriptor back");
+        // SAFETY: `raw` is a NUL-terminated wide string allocated by the call above.
+        let sddl = unsafe { wide_to_string(raw) };
+        // SAFETY: `raw` was allocated with LocalAlloc by the call above.
+        unsafe { LocalFree(raw.cast::<c_void>()) };
+
+        let sid = current_user_sid().unwrap();
+        assert!(
+            sddl.contains(&sid),
+            "{sddl} should name the user's SID {sid}"
+        );
+        assert!(sddl.contains(";;;SY"), "{sddl} should name SYSTEM");
+        for intruder in [";;;WD", ";;;BU", ";;;AU"] {
+            assert!(
+                !sddl.contains(intruder),
+                "{sddl} should not grant {intruder}"
+            );
+        }
     }
 
     #[tokio::test]
