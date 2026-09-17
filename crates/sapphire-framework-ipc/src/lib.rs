@@ -13,11 +13,13 @@
 #![warn(missing_docs)]
 
 mod conn;
+mod endpoint;
 mod error;
 mod handshake;
 mod message;
 
 pub use conn::{Connection, Sender};
+pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};
 pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
