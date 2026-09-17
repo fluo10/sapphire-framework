@@ -47,6 +47,12 @@ impl Connection {
     /// frame is not cancel-safe — it consumes bytes from the buffer before it has a whole
     /// line — so a `select!` that dropped the read future whenever an outgoing message
     /// arrived would silently lose the partial frame.
+    ///
+    /// Because the writer is detached, it outlives this [`Connection`]: once every handle
+    /// (the connection and any [`Sender`]) is gone, the writer drains the messages still
+    /// queued, then drops its half of the carrier — which is what the peer eventually sees
+    /// as EOF. If the peer has stopped reading and the carrier's buffer is full, that
+    /// final write parks the writer task until the peer goes away.
     pub fn from_io<S>(io: S) -> Connection
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
@@ -59,7 +65,7 @@ impl Connection {
         // queues, so a caller may drop its `Connection` the moment a send returns; if the
         // writer were aborted here, that just-queued message could be lost. Left alone it
         // drains the queue, shuts the write half down and exits on its own.
-        std::mem::drop(tokio::spawn(async move {
+        let _writer = tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
                 let Ok(mut bytes) = msg.encode() else {
                     // Our own message failed to serialise. Nothing useful can be sent, and
@@ -76,7 +82,7 @@ impl Connection {
                 }
             }
             let _ = write_half.shutdown().await;
-        }));
+        });
 
         let reader = tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
@@ -164,8 +170,10 @@ impl Connection {
 
     /// Close the connection.
     ///
-    /// Messages already queued are still flushed, then the carrier's write half is shut
-    /// down and the read half is released.
+    /// Returns immediately. Flushing is asynchronous: the writer task delivers the messages
+    /// still queued, then shuts the carrier's write half down and drops it, while the read
+    /// half is released here. Waiting for the flush would mean awaiting the peer, which is
+    /// what `close` exists to avoid.
     pub fn close(self) {
         drop(self);
     }
@@ -183,6 +191,10 @@ impl Drop for Connection {
 ///
 /// `AsyncBufReadExt::read_until` has no limit, so a peer that never sends a newline would
 /// otherwise make us allocate without bound.
+///
+/// A partial frame at EOF is deliberate, not an oversight: whatever was buffered is
+/// returned and the caller parses it, so a truncated frame surfaces as [`Error::Codec`]
+/// rather than being silently discarded.
 async fn read_limited<R>(reader: &mut R, out: &mut Vec<u8>) -> Result<usize>
 where
     R: AsyncBufRead + Unpin,
@@ -296,6 +308,7 @@ mod tests {
 
         let err = server.recv().await.unwrap().unwrap_err();
         assert!(matches!(err, Error::FrameTooLarge { .. }), "got {err:?}");
+        assert!(server.recv().await.is_none());
     }
 
     #[tokio::test]
