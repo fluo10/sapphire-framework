@@ -8,6 +8,8 @@ use crate::conn::Connection;
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
 use crate::handshake::{ClientInfo, ManagedBy, ServerInfo};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
 /// A lock file older than this is assumed to belong to a process that died before
 /// releasing it.
@@ -100,32 +102,10 @@ pub async fn ensure_server(
     spawn: &SpawnConfig,
 ) -> Result<(Client, ServerInfo)> {
     // 1-2. Something listening? Use it, unless it is the wrong version.
-    if probe(endpoint).await? {
-        match handshake_with(endpoint, app, client.clone()).await {
-            Ok((c, info)) if info.version == client.version => return Ok((c, info)),
-            Ok((c, info)) => match info.managed_by {
-                ManagedBy::Service => {
-                    return Err(Error::ServiceVersionMismatch {
-                        running: info.version,
-                        ours: client.version,
-                    });
-                }
-                ManagedBy::Spawned => {
-                    tracing::info!(
-                        running = %info.version,
-                        ours = %client.version,
-                        "replacing a spawned server of a different version"
-                    );
-                    let _: std::result::Result<serde_json::Value, _> =
-                        c.call(SHUTDOWN_METHOD, serde_json::Value::Null).await;
-                    drop(c);
-                    wait_until_gone(endpoint, spawn.connect_timeout).await?;
-                }
-            },
-            // A half-open socket, or a server shutting down: fall through and start one.
-            Err(Error::Io(_)) | Err(Error::Closed) => {}
-            Err(err) => return Err(err),
-        }
+    if probe(endpoint).await?
+        && let Some(pair) = connect_compatible(endpoint, app, client.clone(), spawn).await?
+    {
+        return Ok(pair);
     }
 
     // 3. Nothing listening. Serialise the start.
@@ -138,8 +118,12 @@ pub async fn ensure_server(
     let _guard = SpawnLock::acquire(endpoint, spawn).await?;
 
     // 3b. Another process may have won the race and started it while we waited.
-    if probe(endpoint).await? {
-        return handshake_with(endpoint, app, client).await;
+    //     The winner may have started a server of the wrong version, so the rejoin is
+    //     gated on the same version handshake as the first attempt.
+    if probe(endpoint).await?
+        && let Some(pair) = connect_compatible(endpoint, app, client.clone(), spawn).await?
+    {
+        return Ok(pair);
     }
 
     // 3c. Start it.
@@ -158,6 +142,11 @@ pub async fn ensure_server(
                 Ok(())
             })
         };
+    }
+    #[cfg(windows)]
+    {
+        // Detach from this console and process group so the server outlives the CLI.
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     let child = command
         .spawn()
@@ -179,6 +168,48 @@ pub async fn ensure_server(
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_millis(250));
+    }
+}
+
+/// Handshake with the server on `endpoint` and apply the version gate (spec §2.6):
+/// a compatible server is connected to; a spawned server of another version is asked
+/// to exit and waited for, after which the caller starts one (replacing it); a
+/// service-managed server of another version is never replaced.
+///
+/// `Ok(Some(..))` — connected to a compatible server.
+/// `Ok(None)` — nothing compatible is listening; the caller starts one. Covers both
+/// "nothing is listening" and "a spawned server of the wrong version was retired".
+/// `Err(..)` — a hard failure (service mismatch, transport error, old server would
+/// not exit).
+async fn connect_compatible(
+    endpoint: &Endpoint,
+    app: &str,
+    client: ClientInfo,
+    spawn: &SpawnConfig,
+) -> Result<Option<(Client, ServerInfo)>> {
+    match handshake_with(endpoint, app, client.clone()).await {
+        Ok((c, info)) if info.version == client.version => Ok(Some((c, info))),
+        Ok((c, info)) => match info.managed_by {
+            ManagedBy::Service => Err(Error::ServiceVersionMismatch {
+                running: info.version,
+                ours: client.version,
+            }),
+            ManagedBy::Spawned => {
+                tracing::info!(
+                    running = %info.version,
+                    ours = %client.version,
+                    "replacing a spawned server of a different version"
+                );
+                let _: std::result::Result<serde_json::Value, _> =
+                    c.call(SHUTDOWN_METHOD, serde_json::Value::Null).await;
+                drop(c);
+                wait_until_gone(endpoint, spawn.connect_timeout).await?;
+                Ok(None)
+            }
+        },
+        // A half-open socket, or a server shutting down: nothing compatible here.
+        Err(Error::Io(_)) | Err(Error::Closed) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
