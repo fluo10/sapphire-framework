@@ -63,7 +63,7 @@ impl WorkspaceLocator {
     /// [`DEFAULT_WS`]). Anything else is a local path.
     ///
     /// ```
-    /// # use sapphire_framework_backend::{WorkspaceLocator, DEFAULT_WS};
+    /// # use sapphire_backend::{WorkspaceLocator, DEFAULT_WS};
     /// assert!(matches!(
     ///     WorkspaceLocator::parse("https://host:8080#notes"),
     ///     WorkspaceLocator::Remote { ws, .. } if ws == "notes"

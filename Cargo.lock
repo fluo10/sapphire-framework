@@ -3701,6 +3701,7 @@ dependencies = [
  "sapphire-framework-remote-client",
  "sapphire-framework-remote-server",
  "sapphire-framework-rpc",
+ "sapphire-framework-server",
  "sapphire-framework-workspace",
  "serde",
  "serde_json",

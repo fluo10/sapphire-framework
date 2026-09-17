@@ -70,7 +70,7 @@ pub use sapphire_framework_registry as registry;
 pub use sapphire_framework_blob as blob;
 
 #[cfg(feature = "backend")]
-pub use sapphire_framework_backend as backend;
+pub use sapphire_backend as backend;
 
 #[cfg(feature = "gui")]
 pub use sapphire_framework_gui as gui;

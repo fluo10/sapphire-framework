@@ -4,14 +4,16 @@
 //! `sapphire_workspace::WorkspaceState` directly — its methods block and its
 //! search takes a `&rusqlite::Connection`-style borrow that leaks storage
 //! details. This crate hides that behind an `async` [`WorkspaceBackend`] with
-//! two implementations:
+//! three implementations:
 //!
 //! - [`LocalBackend`] wraps a local [`WorkspaceState`] and runs its blocking
 //!   operations on the tokio blocking pool.
 //! - [`RemoteBackend`] talks to a `sapphire-framework-remote-server` over
 //!   JSON-RPC (search + differential sync).
+//! - [`IpcBackend`] forwards every call to the application's server, which is
+//!   the only process that may open the cache.
 //!
-//! Both emit [`BackendEvent`]s over a broadcast channel so a UI can refresh
+//! All emit [`BackendEvent`]s over a broadcast channel so a UI can refresh
 //! reactively (see [`WorkspaceBackend::subscribe`]).
 //!
 //! The trait is `Send`/`Sync` and its futures are `Send`, which fits a native
@@ -25,12 +27,14 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 mod error;
+mod ipc;
 mod local;
 pub mod protocol;
 mod remote;
 mod source;
 
 pub use error::{Error, Result};
+pub use ipc::IpcBackend;
 pub use local::LocalBackend;
 pub use remote::RemoteBackend;
 pub use source::{

@@ -11,6 +11,10 @@ pub enum Error {
     #[error(transparent)]
     Remote(#[from] sapphire_remote_client::Error),
 
+    /// The IPC layer failed.
+    #[error(transparent)]
+    Ipc(#[from] sapphire_ipc::Error),
+
     /// A blocking task panicked or was cancelled.
     #[error("backend task failed: {0}")]
     Join(String),

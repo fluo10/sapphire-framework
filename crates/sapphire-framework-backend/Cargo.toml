@@ -23,12 +23,17 @@ thiserror.workspace = true
 tracing.workspace = true
 chrono = { workspace = true }
 serde = { workspace = true }
+serde_json.workspace = true
 indexmap = { workspace = true }
 
 [dev-dependencies]
 sapphire-remote-server = { package = "sapphire-framework-remote-server", version = "0.14.0", path = "../sapphire-framework-remote-server" }
+sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", features = ["test-util"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 tempfile = "3"
 toml.workspace = true
 serde_json.workspace = true
+
+[lib]
+name = "sapphire_backend"
