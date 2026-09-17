@@ -16,16 +16,28 @@ pub const BRIDGE_NAME: &str = "bridge";
 pub const RUNTIME_DIR_ENV: &str = "SAPPHIRE_RUNTIME_DIR";
 
 /// Create `dir` if needed and make it private to the current user.
+///
+/// On Unix the directory is created with mode `0700` directly, so a freshly created
+/// directory is never briefly readable by group or other — which is what a plain
+/// `create_dir_all` followed by a chmod would leave open. A pre-existing directory whose
+/// mode drifted is tightened to `0700`.
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(dir)?;
+
         let mut perms = std::fs::metadata(dir)?.permissions();
         if perms.mode() & 0o777 != 0o700 {
             perms.set_mode(0o700);
             std::fs::set_permissions(dir, perms)?;
         }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)?;
     }
     Ok(())
 }
@@ -110,10 +122,67 @@ fn user_scope() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+
+    /// Serialises every test in this module that reads or writes the process environment.
+    ///
+    /// The environment is process-global while the test harness runs tests on parallel
+    /// threads: `std::env::temp_dir()` (used by the endpoint-name tests) and
+    /// `tempfile::tempdir()` read it, and `set_var`/`remove_var` write it (which is why
+    /// Rust 2024 made them `unsafe`). Holding this lock across both the read and the write
+    /// is the whole safety argument.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    /// Lock the process environment. Hold the guard for the whole test, including the
+    /// env reads (`temp_dir`, `tempdir`) that would otherwise race a sibling's mutation.
+    #[must_use = "the guard must be held while the test reads env vars"]
+    fn lock_env() -> MutexGuard<'static, ()> {
+        // A poisoned lock only means some other test panicked while holding it; the env
+        // state is restored by `EnvGuard::drop`, so it is not invariant-critical here.
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sets `SAPPHIRE_RUNTIME_DIR` while holding `lock`, restoring the previous value
+    /// (present or absent) when dropped — including while unwinding from a panic.
+    ///
+    /// Without the unconditional restore, a panicking assertion would leave the variable
+    /// pointing at a temp directory that the test then deletes, and every later
+    /// `runtime_dir()` in the process would resolve into the void.
+    struct EnvGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set_runtime_dir(lock: MutexGuard<'static, ()>, dir: &Path) -> EnvGuard {
+            let previous = std::env::var_os(RUNTIME_DIR_ENV);
+            // SAFETY: `lock` serialises every read and write of the process environment in
+            // this test binary, and it is held until `drop` has restored the old value.
+            unsafe { std::env::set_var(RUNTIME_DIR_ENV, dir) };
+            EnvGuard {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: `self._lock` still serialises the environment; it is dropped
+                // only after this method returns.
+                Some(value) => unsafe { std::env::set_var(RUNTIME_DIR_ENV, value) },
+                None => unsafe { std::env::remove_var(RUNTIME_DIR_ENV) },
+            }
+        }
+    }
 
     #[test]
     fn an_endpoint_names_its_socket_and_lock_under_its_directory() {
+        let _env = lock_env();
         let dir = std::env::temp_dir().join("sapphire-endpoint-test");
         let ep = Endpoint::in_dir("sapphire-journal", dir.clone());
         assert_eq!(ep.socket_path(), dir.join("sapphire-journal.sock"));
@@ -122,12 +191,14 @@ mod tests {
 
     #[test]
     fn the_bridge_endpoint_is_named_bridge() {
+        let _env = lock_env();
         let ep = Endpoint::in_dir(BRIDGE_NAME, std::env::temp_dir());
         assert_eq!(ep.socket_path().file_name().unwrap(), "bridge.sock");
     }
 
     #[test]
     fn a_pipe_name_is_scoped_to_the_user() {
+        let _env = lock_env();
         let ep = Endpoint::in_dir("sapphire-journal", std::env::temp_dir());
         let name = ep.pipe_name();
         assert!(name.starts_with(r"\\.\pipe\sapphire."), "{name}");
@@ -136,12 +207,11 @@ mod tests {
 
     #[test]
     fn the_runtime_directory_env_var_replaces_the_whole_path() {
+        // The guard locks the environment for the whole test, including `tempdir()`.
+        let lock = lock_env();
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process section; no other thread reads the
-        // environment concurrently in this test binary.
-        unsafe { std::env::set_var("SAPPHIRE_RUNTIME_DIR", tmp.path()) };
+        let _override = EnvGuard::set_runtime_dir(lock, tmp.path());
         let dir = runtime_dir().unwrap();
-        unsafe { std::env::remove_var("SAPPHIRE_RUNTIME_DIR") };
         assert_eq!(dir, tmp.path());
         assert!(dir.is_dir());
     }
@@ -150,10 +220,26 @@ mod tests {
     #[test]
     fn the_runtime_directory_is_private() {
         use std::os::unix::fs::PermissionsExt;
+        let _env = lock_env();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("run");
         ensure_private_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_dir_creates_a_missing_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // The guard locks the environment for the whole test, including `tempdir()`.
+        let lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        let _override = EnvGuard::set_runtime_dir(lock, &dir);
+        let resolved = runtime_dir().unwrap();
+        assert_eq!(resolved, dir);
+        let mode = std::fs::metadata(&resolved).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
     }
 }
