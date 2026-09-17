@@ -91,11 +91,12 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済（#90 で git/自動同期/device を撤去） |
 | `sapphire-framework-rpc` | client/server 共有 JSON-RPC 型/メソッド定義（serde-only・wasm-safe） | ✅ |
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の JSON-RPC、ルータ、自動起動） | ✅ |
+| `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・ワークスペース多重管理・アイドル終了・`ServerCommand`） | ✅ |
 | `sapphire-framework-remote-client` | JSON-RPC 差分同期クライアント（reqwest, `RemoteClient`） | ✅ |
 | `sapphire-framework-remote-server` | axum JSON-RPC 同期/検索サーバ（v1=ファイル原本+redb cache+change_log） | ✅ |
 | `sapphire-framework-blob` | バイナリブロブ抽象 `BlobStore`（`FsBlobStore`／将来 OPFS/S3） | ✅ |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） | ✅ |
-| `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + Local/Remote 実装、`BackendEvent` | ✅（MVP） |
+| `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + Local/Remote 実装、`BackendEvent`、IPC 実装 `IpcBackend` | ✅（MVP） |
 | `sapphire-framework-mcp` | rmcp ベース MCP 骨格（`RecallServer` 汎用化 + stdio/http transport） | ⬜ |
 | `sapphire-framework-cache-wasm` | wasm 専用: IndexedDB/OPFS の track/entries + substring 検索 | ⬜ |
 

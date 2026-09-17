@@ -97,6 +97,12 @@ pub mod prelude {
         WorkspaceEntry, WorkspaceLocator, WorkspaceRegistry, WorkspaceSelection, WorkspaceSource,
     };
 
+    // A UI leaves the cache to the app server: `IpcBackend` implements
+    // `WorkspaceBackend` over IPC, and `protocol` names the `workspace.*`
+    // methods and their types for both sides of the connection.
+    #[cfg(feature = "backend")]
+    pub use crate::backend::{IpcBackend, protocol};
+
     // `backend` already re-exports `RemoteClient`; only pull it from the client
     // crate when the backend module isn't present, to avoid a duplicate name.
     #[cfg(all(feature = "remote-client", not(feature = "backend")))]
@@ -119,4 +125,10 @@ pub mod prelude {
     // from `remote-server` only when it is not (the same trick as `RemoteClient`).
     #[cfg(all(feature = "remote-server", not(feature = "registry")))]
     pub use crate::remote_server::GrainId;
+
+    // The app server skeleton: an application builds one of these, adds its own
+    // methods, and runs it. `WorkspaceHost` is here for handlers that reach a
+    // workspace the same way the framework's own do.
+    #[cfg(feature = "server")]
+    pub use sapphire_framework_server::{AppServer, ServerCommand, WorkspaceHost};
 }

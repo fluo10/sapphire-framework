@@ -31,5 +31,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tracing.workspace = true
 
 [dev-dependencies]
+# Default features turn the redb store on (`first_pins_the_problem` needs a real
+# exclusive file lock to pin), while the lib dependency above keeps the server
+# itself store-agnostic.
+sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend" }
 sapphire-framework-server = { path = ".", features = ["test-util"] }
 tempfile = "3"

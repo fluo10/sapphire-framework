@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use sapphire_backend::LocalBackend;
 use sapphire_workspace::{AppContext, Workspace, WorkspaceState};
 
@@ -28,6 +30,12 @@ struct Open {
 pub struct WorkspaceHost {
     ctx: &'static AppContext,
     open: Mutex<HashMap<PathBuf, Open>>,
+    /// Get-or-open of one root, one caller at a time.
+    ///
+    /// redb takes an exclusive lock on its file, so two concurrent
+    /// [`WorkspaceState::open`]s of one workspace fail with `Database already open`.
+    /// Held across the blocking open so the loser waits instead of failing.
+    opening: AsyncMutex<()>,
     max_open: usize,
     idle: Duration,
 }
@@ -53,6 +61,7 @@ impl WorkspaceHost {
         WorkspaceHost {
             ctx,
             open: Mutex::new(HashMap::new()),
+            opening: AsyncMutex::new(()),
             max_open: max_open.max(1),
             idle,
         }
@@ -61,9 +70,22 @@ impl WorkspaceHost {
     /// The backend for `root`, opening the workspace if it is not already open.
     ///
     /// Two callers naming the same root get the same `Arc`, so the cache is opened once.
+    /// Concurrent first callers are serialised: redb takes an exclusive lock on its file,
+    /// so an open that overlaps another of the same workspace fails rather than waits.
     pub async fn backend(&self, root: &Path) -> Result<Arc<LocalBackend>> {
         let key = canonical(root)?;
 
+        if let Some(backend) = self.touch(&key) {
+            return Ok(backend);
+        }
+
+        // One open at a time, whatever the roots: `WorkspaceState::open` is rare next to
+        // request handling, and a single async mutex keeps the map and the database
+        // consistent without a per-root registry.
+        let _opening = self.opening.lock().await;
+
+        // The fast path above cannot tell whether a caller that raced us has already
+        // finished its open; re-check under the lock before touching the database.
         if let Some(backend) = self.touch(&key) {
             return Ok(backend);
         }
@@ -80,9 +102,7 @@ impl WorkspaceHost {
         let backend = Arc::new(LocalBackend::new(Arc::new(state)));
 
         let mut open = self.open.lock().expect("host mutex");
-        // Another task may have opened the same workspace while this one was blocking.
-        // Keep whichever is already in the map, so the "one workspace, one database"
-        // invariant holds even under a race.
+        // Unreachable for a second caller: the re-check above saw the winner's entry.
         let entry = open.entry(key).or_insert_with(|| Open {
             backend: Arc::clone(&backend),
             last_used: Instant::now(),
@@ -323,6 +343,37 @@ mod tests {
         host.backend(&root)
             .await
             .expect("the database must have been released");
+    }
+
+    /// Eight callers naming one workspace at once get one backend, not eight opens.
+    ///
+    /// redb takes an exclusive lock on its file, so a second `WorkspaceState::open` of the
+    /// same workspace while the first is still open fails. The host must serialise the
+    /// get-or-open of one root: this test fails with `Database already open` if two
+    /// concurrent first callers both reach the open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_opens_of_one_workspace_are_serialised() {
+        let guard = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = init_ctx(guard, tmp.path());
+        let root = workspace(tmp.path(), "ws");
+        let host = Arc::new(WorkspaceHost::new(&CTX));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let host = Arc::clone(&host);
+            let root = root.clone();
+            tasks.push(tokio::spawn(async move { host.backend(&root).await }));
+        }
+        let mut backends = Vec::new();
+        for task in tasks {
+            backends.push(task.await.expect("the task").expect("the open"));
+        }
+        assert!(
+            backends.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])),
+            "every caller must receive the same backend"
+        );
+        assert_eq!(host.open_count(), 1);
     }
 
     #[tokio::test]
