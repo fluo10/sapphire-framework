@@ -3683,6 +3683,7 @@ dependencies = [
  "sapphire-framework-remote-server",
  "sapphire-framework-retrieve",
  "sapphire-framework-rpc",
+ "sapphire-framework-server",
  "sapphire-framework-sync",
  "sapphire-framework-track",
  "sapphire-framework-workspace",
@@ -3823,6 +3824,23 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "sapphire-framework-server"
+version = "0.14.0"
+dependencies = [
+ "clap",
+ "sapphire-framework-backend",
+ "sapphire-framework-ipc",
+ "sapphire-framework-server",
+ "sapphire-framework-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

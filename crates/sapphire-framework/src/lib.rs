@@ -27,6 +27,7 @@
 //! | `track` | [`track`] | `sapphire-framework-track` |
 //! | `sync` | [`sync`] | `sapphire-framework-sync` |
 //! | `ipc` | [`ipc`] | `sapphire-framework-ipc` |
+//! | `server` | [`server`] | `sapphire-framework-server` |
 //! | `rpc` | [`rpc`] | `sapphire-framework-rpc` |
 //! | `registry` | [`registry`] | `sapphire-framework-registry` |
 //! | `blob` | [`blob`] | `sapphire-framework-blob` |
@@ -55,6 +56,9 @@ pub use sapphire_framework_sync as sync;
 
 #[cfg(feature = "ipc")]
 pub use sapphire_framework_ipc as ipc;
+
+#[cfg(feature = "server")]
+pub use sapphire_framework_server as server;
 
 #[cfg(feature = "rpc")]
 pub use sapphire_framework_rpc as rpc;

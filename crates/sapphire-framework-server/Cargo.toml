@@ -1,0 +1,35 @@
+[package]
+name = "sapphire-framework-server"
+version.workspace = true
+edition.workspace = true
+description = "App server skeleton for sapphire-framework: owns a workspace's cache and serves it over IPC"
+license.workspace = true
+repository.workspace = true
+keywords = ["server", "ipc", "local-first", "workspace"]
+categories = ["asynchronous"]
+
+[features]
+default = ["redb-store"]
+redb-store = ["sapphire-backend/redb-store"]
+# Builds the test-only app server binary used by the integration tests.
+test-util = []
+
+[[bin]]
+name = "server-test-app"
+path = "src/bin/server-test-app.rs"
+required-features = ["test-util"]
+
+[dependencies]
+sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend", default-features = false }
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
+sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.14.0", path = "../sapphire-framework-workspace", default-features = false }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing.workspace = true
+
+[dev-dependencies]
+sapphire-framework-server = { path = ".", features = ["test-util"] }
+tempfile = "3"

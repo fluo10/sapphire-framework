@@ -21,6 +21,7 @@ retrieve = ["dep:sapphire-framework-retrieve"]
 track = ["dep:sapphire-framework-track"]
 sync = ["dep:sapphire-framework-sync"]
 ipc = ["dep:sapphire-framework-ipc"]
+server = ["dep:sapphire-framework-server", "backend"]
 rpc = ["dep:sapphire-framework-rpc"]
 registry = ["dep:sapphire-framework-registry"]
 blob = ["dep:sapphire-framework-blob"]
@@ -45,6 +46,7 @@ sapphire-framework-retrieve = { version = "0.14.0", path = "../sapphire-framewor
 sapphire-framework-track = { version = "0.14.0", path = "../sapphire-framework-track", optional = true }
 sapphire-framework-sync = { version = "0.14.0", path = "../sapphire-framework-sync", optional = true }
 sapphire-framework-ipc = { version = "0.14.0", path = "../sapphire-framework-ipc", optional = true }
+sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", optional = true }
 sapphire-framework-rpc = { version = "0.14.0", path = "../sapphire-framework-rpc", optional = true }
 sapphire-framework-registry = { version = "0.14.0", path = "../sapphire-framework-registry", optional = true }
 sapphire-framework-blob = { version = "0.14.0", path = "../sapphire-framework-blob", optional = true }
