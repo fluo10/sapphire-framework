@@ -26,6 +26,7 @@ use tokio::sync::broadcast;
 
 mod error;
 mod local;
+pub mod protocol;
 mod remote;
 mod source;
 
@@ -46,7 +47,7 @@ pub use sapphire_workspace::{FileSearchResult, SearchMode, WorkspaceState};
 pub use sapphire_remote_client::RemoteClient;
 
 /// Result of a sync cycle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SyncSummary {
     /// Number of documents added or updated.
     pub upserted: usize,
@@ -55,7 +56,7 @@ pub struct SyncSummary {
 }
 
 /// Events published by a backend so a UI can react without polling.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BackendEvent {
     /// A sync cycle finished.
     Synced {

@@ -15,6 +15,7 @@ redb-store = ["sapphire-workspace/redb-store"]
 [dependencies]
 sapphire-workspace = { package = "sapphire-framework-workspace", version = "0.14.0", path = "../sapphire-framework-workspace", default-features = false }
 sapphire-remote-client = { package = "sapphire-framework-remote-client", version = "0.14.0", path = "../sapphire-framework-remote-client" }
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
 sapphire-rpc = { package = "sapphire-framework-rpc", version = "0.14.0", path = "../sapphire-framework-rpc" }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait.workspace = true
@@ -30,3 +31,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 axum.workspace = true
 tempfile = "3"
 toml.workspace = true
+serde_json.workspace = true

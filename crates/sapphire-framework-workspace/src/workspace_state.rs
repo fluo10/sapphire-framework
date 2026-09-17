@@ -24,7 +24,8 @@ use crate::{
 use sapphire_retrieve::build_embedder;
 
 /// Controls which retrieval strategy [`WorkspaceState::retrieve_files`] uses.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     /// Full-text search only (BM25 / trigram).
     Fts,
