@@ -65,6 +65,7 @@ impl IpcBackend {
                     Ok(n) if n.method == proto::EVENT => {
                         let Ok(params) = serde_json::from_value::<proto::EventParams>(n.params)
                         else {
+                            tracing::warn!("dropping malformed event notification");
                             continue;
                         };
                         if params.ws == ws {
