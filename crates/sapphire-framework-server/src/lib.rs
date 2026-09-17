@@ -29,6 +29,7 @@ use sapphire_backend::protocol as proto;
 use sapphire_ipc::{Endpoint, ManagedBy, Router, ServerInfo, serve};
 use sapphire_workspace::AppContext;
 
+mod command;
 mod error;
 mod events;
 mod handlers;
@@ -36,6 +37,7 @@ mod host;
 #[cfg(test)]
 mod test_support;
 
+pub use command::{RunArgs, ServerCommand};
 pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::workspace_router;
