@@ -17,12 +17,16 @@ mod endpoint;
 mod error;
 mod handshake;
 mod message;
+#[cfg(unix)]
+mod unix;
 
 pub use conn::{Connection, Sender};
 pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};
 pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
+#[cfg(unix)]
+pub use unix::{UnixListenerHandle, bind, peer_uid};
 
 /// The IPC protocol version this build speaks. Bumped on a breaking change to the
 /// envelope or the handshake.
