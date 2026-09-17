@@ -3677,6 +3677,7 @@ dependencies = [
  "sapphire-framework-backend",
  "sapphire-framework-blob",
  "sapphire-framework-gui",
+ "sapphire-framework-ipc",
  "sapphire-framework-registry",
  "sapphire-framework-remote-client",
  "sapphire-framework-remote-server",
@@ -3723,6 +3724,22 @@ dependencies = [
  "egui",
  "rfd",
  "sapphire-framework-backend",
+]
+
+[[package]]
+name = "sapphire-framework-ipc"
+version = "0.14.0"
+dependencies = [
+ "dirs",
+ "libc",
+ "sapphire-framework-ipc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
