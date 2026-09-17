@@ -152,28 +152,21 @@ fn canonical(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     use super::*;
     use sapphire_workspace::{AppContext, AppKind};
 
+    use crate::test_support;
+
     static CTX: AppContext = AppContext::new("sapphire-hosttest");
 
-    /// Serialises every test in this module that reads or writes the process environment.
-    ///
-    /// The environment is process-global while the test harness runs tests on parallel
-    /// threads: `set_var` writes it (which is why Rust 2024 made that `unsafe`), and
-    /// `tempfile::tempdir()` reads it. Holding this lock across both the write and the
-    /// reads is the whole safety argument, so the tests below may run in any order and
-    /// still each point the context's directories at their own scratch tree.
-    static ENV: Mutex<()> = Mutex::new(());
-
-    /// Lock the process environment. Hold the guard for the whole test, including the
-    /// `tempdir()` read that would otherwise race a sibling's mutation.
     fn lock_env() -> MutexGuard<'static, ()> {
-        // A poisoned lock only means some other test panicked while holding it; the env
-        // state is restored by `EnvGuard::drop`, so it is not invariant-critical here.
-        ENV.lock().unwrap_or_else(|e| e.into_inner())
+        // The lock is crate-wide (`test_support`): the `handlers` module's tests mutate
+        // the same process environment, so one mutex must guard both. A poisoned lock
+        // only means some other test panicked while holding it; the env state is
+        // restored by `EnvGuard::drop`, so it is not invariant-critical here.
+        test_support::lock()
     }
 
     /// Point the three context directories at `tmp` while holding `lock`, restoring the
@@ -197,10 +190,12 @@ mod tests {
         fn set_dirs(lock: MutexGuard<'static, ()>, tmp: &std::path::Path) -> EnvGuard {
             let previous = DIR_VARS.map(std::env::var_os);
             let dirs = ["cache", "data", "config"].map(|cat| tmp.join(cat));
-            // SAFETY: `lock` serialises every read and write of the process environment in
-            // this test binary, and it is held until `drop` has restored the old values.
+            // SAFETY (via `test_support::set`): `lock` serialises every read and write of
+            // the process environment in this test binary — the `handlers` module's
+            // tests share the same lock — and it is held until `drop` has restored the
+            // old values.
             for (name, dir) in DIR_VARS.iter().zip(dirs) {
-                unsafe { std::env::set_var(name, dir) };
+                test_support::set(name, &dir);
             }
             EnvGuard {
                 previous,
@@ -216,7 +211,7 @@ mod tests {
             for (name, previous) in DIR_VARS.iter().zip(self.previous.iter_mut()) {
                 match previous.take() {
                     Some(value) => unsafe { std::env::set_var(name, value) },
-                    None => unsafe { std::env::remove_var(name) },
+                    None => test_support::remove(name),
                 }
             }
         }
