@@ -14,10 +14,11 @@ use crate::host::WorkspaceHost;
 
 /// Add `workspace.subscribe` to `router`.
 ///
-/// The method opens the named workspace, subscribes to its [`BackendEvent`] broadcast and
-/// spawns a task that forwards each event to that client as a `workspace.event`
-/// notification. The task stops when the client disconnects — `PeerHandle::notify` fails
-/// once the connection is gone — so a client that comes and goes does not leak tasks.
+/// The method opens the named workspace, subscribes to its
+/// [`BackendEvent`](sapphire_backend::BackendEvent) broadcast and spawns a task that
+/// forwards each event to that client as a `workspace.event` notification. The task stops
+/// when the client disconnects — `PeerHandle::notify` fails once the connection is gone —
+/// so a client that comes and goes does not leak tasks.
 ///
 /// Subscribing twice from the same connection to the same workspace still acknowledges,
 /// but starts no second pump, so a client cannot double its own event stream.
