@@ -17,6 +17,7 @@ mod endpoint;
 mod error;
 mod handshake;
 mod message;
+mod router;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -27,6 +28,7 @@ pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};
 pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
+pub use router::{HANDSHAKE_METHOD, HandlerFuture, PeerHandle, RequestCtx, Router, serve};
 #[cfg(unix)]
 pub use unix::{UnixListenerHandle, bind, peer_uid};
 #[cfg(windows)]
