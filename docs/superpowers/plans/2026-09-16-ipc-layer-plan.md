@@ -2746,7 +2746,10 @@ git commit -m "feat(ipc): add the client with multiplexed calls and notification
 - Create: `crates/sapphire-framework-ipc/src/spawn.rs`
 - Create: `crates/sapphire-framework-ipc/src/bin/ipc-test-server.rs`
 - Modify: `crates/sapphire-framework-ipc/src/lib.rs`
-- Test: inline `#[cfg(test)] mod tests` in `spawn.rs`; `crates/sapphire-framework-ipc/tests/race.rs`
+- Test: `crates/sapphire-framework-ipc/tests/spawn.rs` (the spawn tests live in an
+  integration-test target, not inline in `spawn.rs` — Cargo defines `CARGO_BIN_EXE_*`
+  only for integration-test/bench targets, so inline lib unit tests cannot read it);
+  `crates/sapphire-framework-ipc/tests/race.rs`
 
 **Interfaces:**
 - Consumes: `Client` (Task 7), `Endpoint` (Task 3), the platform `connect` / `probe`
@@ -2853,7 +2856,8 @@ async fn serve_forever(
 
 - [ ] **Step 2: Write the failing tests**
 
-`crates/sapphire-framework-ipc/src/spawn.rs`, at the bottom:
+`crates/sapphire-framework-ipc/tests/spawn.rs` (integration-test target — see the
+Files note: `env!("CARGO_BIN_EXE_ipc-test-server")` only resolves in test targets):
 
 ```rust
 #[cfg(test)]
