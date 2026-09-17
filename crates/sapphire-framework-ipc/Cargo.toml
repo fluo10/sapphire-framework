@@ -1,0 +1,42 @@
+[package]
+name = "sapphire-framework-ipc"
+version.workspace = true
+edition.workspace = true
+description = "Local inter-process JSON-RPC transport for sapphire-framework apps"
+license.workspace = true
+repository.workspace = true
+keywords = ["ipc", "json-rpc", "unix-socket", "named-pipe"]
+categories = ["network-programming"]
+
+[features]
+# Builds the test-only echo server binary used by the integration tests.
+test-util = []
+
+[[bin]]
+name = "ipc-test-server"
+path = "src/bin/ipc-test-server.rs"
+required-features = ["test-util"]
+
+[dependencies]
+dirs.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "sync", "process", "time"] }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+sapphire-framework-ipc = { path = ".", features = ["test-util"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

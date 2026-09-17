@@ -28,3 +28,31 @@ jobs:
 
       - name: Test
         run: cargo test --all-features --locked
+
+  # The Windows named pipe carrier (crates/sapphire-framework-ipc/src/windows.rs) sits
+  # behind `#[cfg(windows)]`, so the job above never compiles it. This job runs that
+  # crate's tests on Windows, where the pipe, the DACL and the SID lookup are real.
+  #
+  # Scoped to the ipc crate on purpose. The crate's own dependency graph is portable
+  # (serde, tokio, windows-sys, …), so this job needs no extra setup and its signal is
+  # unambiguous. A workspace-wide Windows job is a separate, larger change: other
+  # members pull in fastembed/ort and grain-id (protoc + cmake) and ring/aws-lc-sys
+  # (C toolchain), so widening this job would mean solving their Windows build first.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (ipc)
+        run: cargo clippy -p sapphire-framework-ipc --all-targets --all-features -- -D warnings
+
+      - name: Test (ipc)
+        run: cargo test -p sapphire-framework-ipc --all-features --locked
