@@ -34,6 +34,7 @@ mod error;
 mod events;
 mod handlers;
 mod host;
+pub mod privilege;
 #[cfg(test)]
 mod test_support;
 
@@ -42,6 +43,7 @@ pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::workspace_router;
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
+pub use privilege::{HelperSpec, PrivilegeConfig, UserSpec};
 
 /// How long a spawned server stays up with nothing to do.
 pub const DEFAULT_IDLE_EXIT: Duration = Duration::from_secs(15 * 60);

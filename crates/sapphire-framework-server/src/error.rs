@@ -22,6 +22,13 @@ pub enum Error {
     /// The request named a directory that is not a workspace of this application.
     #[error("{0} is not a {1} workspace")]
     UnknownWorkspace(std::path::PathBuf, &'static str),
+
+    /// Privilege separation could not be set up.
+    ///
+    /// Always fatal: a server that meant to drop privileges and did not must never go on to
+    /// serve requests.
+    #[error("privilege separation failed: {0}")]
+    Privilege(String),
 }
 
 /// Convenience alias for server results.
