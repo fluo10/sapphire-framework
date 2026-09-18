@@ -4,6 +4,7 @@ use sapphire_ipc::{ClientInfo, Endpoint, SpawnConfig, ensure_server};
 
 use crate::AppServer;
 use crate::error::Result;
+use crate::privilege::PrivilegeConfig;
 
 /// Subcommands for managing this application's server.
 #[derive(Debug, clap::Subcommand)]
@@ -43,6 +44,18 @@ impl ServerCommand {
             ServerCommand::Status => status(&Endpoint::for_app(app)?, app, version).await,
             ServerCommand::Stop => stop(&Endpoint::for_app(app)?, app, version).await,
         }
+    }
+}
+
+/// The [`SpawnConfig`] an application's CLI should use.
+///
+/// An application configured for privilege separation runs its server as root, and a CLI
+/// running as the human user cannot start one (spec §2.6, §3). Saying so up front is much
+/// clearer than letting the spawn fail somewhere inside the service manager's territory.
+pub fn spawn_config_for(privileges: Option<&PrivilegeConfig>) -> SpawnConfig {
+    match privileges {
+        Some(_) => SpawnConfig::disabled(),
+        None => SpawnConfig::default(),
     }
 }
 
@@ -142,5 +155,52 @@ mod tests {
         let endpoint = sapphire_ipc::Endpoint::in_dir("stop-test", tmp.path().to_path_buf());
         let code = stop(&endpoint, "stop-test", "0.0.0").await.unwrap();
         assert_eq!(code, 1);
+    }
+}
+
+#[cfg(test)]
+mod spawn_policy_tests {
+    use super::*;
+    use crate::privilege::{PrivilegeConfig, UserSpec};
+
+    #[test]
+    fn an_ordinary_app_may_start_its_own_server() {
+        assert!(spawn_config_for(None).allow_spawn);
+    }
+
+    #[test]
+    fn a_privilege_separated_app_may_not() {
+        let config = PrivilegeConfig {
+            run_as: UserSpec::Name("alice".into()),
+            helper: None,
+        };
+        assert!(!spawn_config_for(Some(&config)).allow_spawn);
+    }
+
+    #[tokio::test]
+    async fn the_error_says_to_start_the_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = sapphire_ipc::Endpoint::in_dir("privsep-cli-test", tmp.path().to_path_buf());
+        let config = PrivilegeConfig {
+            run_as: UserSpec::Name("alice".into()),
+            helper: None,
+        };
+
+        let err = sapphire_ipc::ensure_server(
+            &endpoint,
+            "privsep-cli-test",
+            sapphire_ipc::ClientInfo {
+                kind: "cli".into(),
+                version: "0.0.0".into(),
+                pid: std::process::id(),
+            },
+            &spawn_config_for(Some(&config)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not allowed to start one"),
+            "{err}"
+        );
     }
 }

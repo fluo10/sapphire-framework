@@ -38,7 +38,7 @@ pub mod privilege;
 #[cfg(test)]
 mod test_support;
 
-pub use command::{RunArgs, ServerCommand};
+pub use command::{RunArgs, ServerCommand, spawn_config_for};
 pub use error::{Error, Result};
 pub use events::subscribe_method;
 pub use handlers::workspace_router;

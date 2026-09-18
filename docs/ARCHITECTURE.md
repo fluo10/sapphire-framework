@@ -91,7 +91,7 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 | `sapphire-framework-workspace` | `AppContext`/`Workspace`/`WorkspaceState`/`IndexHook`（旧ルートlib） | ✅ 移設済（#90 で git/自動同期/device を撤去） |
 | `sapphire-framework-rpc` | client/server 共有 JSON-RPC 型/メソッド定義（serde-only・wasm-safe） | ✅ |
 | `sapphire-framework-ipc` | ローカル IPC（UDS / 名前付きパイプ / プロセス内チャネル上の JSON-RPC、ルータ、自動起動） | ✅ |
-| `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・ワークスペース多重管理・アイドル終了・`ServerCommand`） | ✅ |
+| `sapphire-framework-server` | アプリサーバ骨格（`workspace.*` 名前空間・ワークスペース多重管理・アイドル終了・`ServerCommand`・**特権分離**） | ✅ |
 | `sapphire-framework-remote-client` | JSON-RPC 差分同期クライアント（reqwest, `RemoteClient`） | ✅ |
 | `sapphire-framework-remote-server` | axum JSON-RPC 同期/検索サーバ（v1=ファイル原本+redb cache+change_log） | ✅ |
 | `sapphire-framework-blob` | バイナリブロブ抽象 `BlobStore`（`FsBlobStore`／将来 OPFS/S3） | ✅ |
@@ -158,6 +158,11 @@ search.semantic     {ws, q, limit}                           -> 当面 fts フ�
 > `sapphire-framework-ipc` 経由でアプリサーバに接続し、ホストごとの常駐 `sapphire-bridge`
 > が同期を仲介する。設計は
 > `docs/superpowers/specs/2026-09-16-process-architecture-design.md`。
+
+> **特権分離（Unix のみ）**: root で起動したサーバは、ワークスペース・キャッシュ・ソケットを
+> 人間ユーザーに渡し、shell / 汎用 fs ツール用のヘルパーだけを別ユーザーで fork してから、
+> 恒久的に降格する。降格は検証付きで、root は残らない。設計は上記 spec の §3、
+> 動機は `sapphire-agent` #257。
 
 ## アプリディレクトリ構成と CLI 規約（#128 / #129）
 
