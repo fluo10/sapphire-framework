@@ -11,9 +11,11 @@
 
 mod dir;
 mod error;
+mod routes;
 
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use error::{Error, Result};
+pub use routes::{Route, RouteTable};
 
 #[cfg(test)]
 mod tests {
