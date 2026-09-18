@@ -5004,6 +5004,7 @@ dependencies = [
 name = "sapphire-framework-bridge"
 version = "0.14.0"
 dependencies = [
+ "async-trait",
  "clap",
  "dirs",
  "getrandom 0.4.3",

@@ -41,6 +41,10 @@ pub enum Error {
     /// A configuration file is unreadable or invalid.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A peer could not be reached, or a peer stream failed.
+    #[error("{0}")]
+    Peer(String),
 }
 
 /// Convenience alias for bridge results.
