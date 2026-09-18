@@ -5,6 +5,7 @@ members = [
     "crates/sapphire-framework-sync",
     "crates/sapphire-framework-ipc",
     "crates/sapphire-framework-bridge-api",
+    "crates/sapphire-framework-bridge",
     "crates/sapphire-framework-server",
     "crates/sapphire-framework-retrieve",
     "crates/sapphire-framework-workspace",

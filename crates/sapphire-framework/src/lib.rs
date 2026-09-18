@@ -30,6 +30,7 @@
 //! | `server` | [`server`] | `sapphire-framework-server` |
 //! | `rpc` | [`rpc`] | `sapphire-framework-rpc` |
 //! | `registry` | [`registry`] | `sapphire-framework-registry` |
+//! | `bridge` | [`bridge`] | `sapphire-framework-bridge` |
 //! | `blob` | [`blob`] | `sapphire-framework-blob` |
 //! | `backend` | [`backend`] | `sapphire-framework-backend` |
 //! | `remote-client` | [`remote_client`] | `sapphire-framework-remote-client` |
@@ -65,6 +66,9 @@ pub use sapphire_framework_rpc as rpc;
 
 #[cfg(feature = "registry")]
 pub use sapphire_framework_registry as registry;
+
+#[cfg(feature = "bridge")]
+pub use sapphire_framework_bridge as bridge;
 
 #[cfg(feature = "blob")]
 pub use sapphire_framework_blob as blob;

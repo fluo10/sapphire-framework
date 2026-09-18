@@ -24,6 +24,7 @@ ipc = ["dep:sapphire-framework-ipc"]
 server = ["dep:sapphire-framework-server", "backend"]
 rpc = ["dep:sapphire-framework-rpc"]
 registry = ["dep:sapphire-framework-registry"]
+bridge = ["dep:sapphire-framework-bridge"]
 blob = ["dep:sapphire-framework-blob"]
 backend = ["dep:sapphire-framework-backend", "workspace"]
 gui = ["dep:sapphire-framework-gui", "backend"]
@@ -49,6 +50,7 @@ sapphire-framework-ipc = { version = "0.14.0", path = "../sapphire-framework-ipc
 sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", optional = true }
 sapphire-framework-rpc = { version = "0.14.0", path = "../sapphire-framework-rpc", optional = true }
 sapphire-framework-registry = { version = "0.14.0", path = "../sapphire-framework-registry", optional = true }
+sapphire-framework-bridge = { version = "0.14.0", path = "../sapphire-framework-bridge", optional = true }
 sapphire-framework-blob = { version = "0.14.0", path = "../sapphire-framework-blob", optional = true }
 sapphire-framework-backend = { version = "0.14.0", path = "../sapphire-framework-backend", optional = true, default-features = false }
 sapphire-framework-gui = { version = "0.14.0", path = "../sapphire-framework-gui", optional = true }
