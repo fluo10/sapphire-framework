@@ -1,0 +1,495 @@
+//! The data plane: one header line, then bytes.
+//!
+//! Nothing here looks at what it is copying. The bridge decides *whether* bytes may flow and
+//! *where* they go; the replication protocol runs end to end between the app servers at
+//! either end.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use grain_id::GrainId;
+use sapphire_bridge_api::{DataAck, DataHeader, INCOMING, IncomingParams};
+use sapphire_ipc::{Endpoint, RawStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use crate::Bridge;
+use crate::error::{Error, Result};
+use crate::net::NetConfig;
+use crate::peer::BoxedStream;
+
+/// How long an unclaimed inbound stream is held.
+///
+/// Long enough for a stopped app server to start (`wake_on_sync`), short enough that a peer
+/// that vanishes does not pin a stream for ever.
+pub(crate) const TICKET_TTL: Duration = Duration::from_secs(60);
+
+/// An inbound stream waiting for its owner, and when it arrived.
+struct Pending {
+    stream: BoxedStream,
+    created: Instant,
+}
+
+/// Inbound streams waiting for their owner to claim them.
+///
+/// Single use, and expiring: an app server that never comes back must not leave a peer's
+/// stream open for the rest of the bridge's life. Pruning happens on every call, so a bridge
+/// whose owner never reconnects still releases what it holds.
+#[derive(Default)]
+pub(crate) struct Tickets {
+    pending: Mutex<HashMap<String, Pending>>,
+}
+
+impl Tickets {
+    /// Park a stream and return its single-use ticket.
+    pub(crate) fn park(&self, stream: BoxedStream) -> String {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("the system random source");
+        let ticket = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut pending = self.pending.lock().expect("tickets");
+        pending.retain(|_, p| !expired(p));
+        pending.insert(
+            ticket.clone(),
+            Pending {
+                stream,
+                created: Instant::now(),
+            },
+        );
+        ticket
+    }
+
+    /// Take a stream. A ticket works once; presenting it again finds nothing.
+    pub(crate) fn claim(&self, ticket: &str) -> Option<BoxedStream> {
+        let mut pending = self.pending.lock().expect("tickets");
+        pending.retain(|_, p| !expired(p));
+        pending.remove(ticket).map(|p| p.stream)
+    }
+
+    /// Backdate every parked stream, so a test reaches the expiry path without waiting out
+    /// [`TICKET_TTL`].
+    #[cfg(test)]
+    fn age(&self, by: Duration) {
+        for pending in self.pending.lock().expect("tickets").values_mut() {
+            if let Some(earlier) = pending.created.checked_sub(by) {
+                pending.created = earlier;
+            }
+        }
+    }
+}
+
+/// Has this stream waited longer than [`TICKET_TTL`]?
+fn expired(pending: &Pending) -> bool {
+    pending.created.elapsed() >= TICKET_TTL
+}
+
+/// Read the header line, without consuming any of the bytes that follow it.
+pub(crate) async fn read_header<S>(stream: &mut S) -> Result<DataHeader>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    // Capacity 1: a larger buffer would read past the newline and swallow payload bytes. The
+    // reader is not kept afterwards, because the bytes after the newline belong to the relay.
+    let mut reader = BufReader::with_capacity(1, stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    serde_json::from_str(line.trim())
+        .map_err(|e| Error::Protocol(format!("bad data-plane header: {e}")))
+}
+
+/// Answer a header, as one JSON line.
+pub(crate) async fn write_ack<S>(stream: &mut S, ack: DataAck) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let mut line = serde_json::to_vec(&ack).map_err(|e| Error::Protocol(e.to_string()))?;
+    line.push(b'\n');
+    stream.write_all(&line).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Copy bytes in both directions until either side closes.
+///
+/// The bridge never looks at what it is copying: the replication protocol runs end to end
+/// between two app servers.
+pub(crate) async fn splice<A, B>(mut a: A, mut b: B)
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if let Err(err) = tokio::io::copy_bidirectional(&mut a, &mut b).await {
+        tracing::debug!("a relayed stream ended: {err}");
+    }
+}
+
+// ── the data listener ───────────────────────────────────────────────────────
+
+/// Serve the data endpoint until it fails.
+///
+/// Each connection is dispatched on its own task, so one long relay does not delay the
+/// streams queued behind it.
+pub(crate) async fn listen(bridge: Arc<Bridge>, endpoint: Endpoint) -> Result<()> {
+    #[cfg(unix)]
+    let listener = sapphire_ipc::bind(&endpoint).await?;
+    #[cfg(windows)]
+    let mut listener = sapphire_ipc::bind(&endpoint)?;
+
+    loop {
+        let stream = listener.accept_raw().await?;
+        let bridge = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            if let Err(err) = serve(bridge, stream).await {
+                tracing::debug!("a data-plane connection ended: {err}");
+            }
+        });
+    }
+}
+
+/// Answer one data-plane connection.
+async fn serve(bridge: Arc<Bridge>, mut stream: RawStream) -> Result<()> {
+    let header = match read_header(&mut stream).await {
+        Ok(header) => header,
+        // There is no header to answer: whatever arrived was too mangled to name a reason to.
+        Err(err) => {
+            tracing::debug!("a data-plane connection sent no usable header: {err}");
+            return Err(err);
+        }
+    };
+
+    match header {
+        DataHeader::Open {
+            workspace_id,
+            device_id,
+        } => open(bridge, stream, workspace_id, device_id).await,
+        DataHeader::Accept { ticket } => accept(bridge, stream, &ticket).await,
+    }
+}
+
+/// `Open`: dial the peer that owns `workspace_id`, then relay this connection to it.
+async fn open(
+    bridge: Arc<Bridge>,
+    mut stream: RawStream,
+    workspace_id: GrainId,
+    device_id: GrainId,
+) -> Result<()> {
+    match dial(&bridge, workspace_id, device_id).await {
+        Ok(peer) => {
+            write_ack(
+                &mut stream,
+                DataAck {
+                    ok: true,
+                    error: None,
+                },
+            )
+            .await?;
+            splice(stream, peer).await;
+            Ok(())
+        }
+        // A refusal is the answer to this connection, not a failure of the bridge: the app
+        // server is told why, and the listener keeps serving.
+        Err(err) => {
+            tracing::debug!("refused an open: {err}");
+            refuse(&mut stream, err).await
+        }
+    }
+}
+
+/// Open a stream to the device that owns `workspace_id`, as this host knows it.
+async fn dial(bridge: &Bridge, workspace_id: GrainId, device_id: GrainId) -> Result<BoxedStream> {
+    // Is this a workspace an app server on this host owns? If not, there is nowhere to go.
+    if bridge.route(workspace_id).is_none() {
+        return Err(Error::UnknownWorkspace(workspace_id));
+    }
+
+    let workgroup = bridge.workgroup()?.ok_or(Error::NoWorkgroup)?;
+    let devices = workgroup.devices()?;
+    let device = devices
+        .get(device_id)
+        .ok_or_else(|| Error::Peer(format!("no device {device_id} in this host's workgroup")))?;
+    let node_id = device.node_id.clone().ok_or_else(|| {
+        Error::Peer(format!(
+            "the device {} has not announced a node id yet",
+            device.name
+        ))
+    })?;
+    // Whether that device may still be dialed is a live question: a retired device is not a
+    // peer, and dialing one would hand this app server a stream that is dropped on arrival.
+    workgroup.authorize(&node_id)?;
+
+    bridge.transport().open(&node_id, workspace_id).await
+}
+
+/// `Accept`: hand the app server the stream an [`IncomingParams`] announcement named.
+async fn accept(bridge: Arc<Bridge>, mut stream: RawStream, ticket: &str) -> Result<()> {
+    match bridge.tickets().claim(ticket) {
+        Some(peer) => {
+            write_ack(
+                &mut stream,
+                DataAck {
+                    ok: true,
+                    error: None,
+                },
+            )
+            .await?;
+            splice(stream, peer).await;
+            Ok(())
+        }
+        None => {
+            refuse(
+                &mut stream,
+                Error::Protocol("no such ticket, or it has already been used".to_owned()),
+            )
+            .await
+        }
+    }
+}
+
+/// Answer a data-plane request with a refusal, in the one line its caller is reading.
+async fn refuse<S>(stream: &mut S, err: Error) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    write_ack(
+        stream,
+        DataAck {
+            ok: false,
+            error: Some(err.to_string()),
+        },
+    )
+    .await
+}
+
+// ── the inbound loop ────────────────────────────────────────────────────────
+
+/// Accept peer streams, authorize them, and park them for the app server that owns them.
+///
+/// `_net` is taken now for the waking rule the next step of this plan adds (`wake_on_sync`):
+/// this loop is the only place that sees a peer asking for a workspace whose owner is not
+/// running.
+pub(crate) async fn inbound(bridge: Arc<Bridge>, _net: NetConfig) -> Result<()> {
+    loop {
+        let (peer_node_id, workspace_id, stream) = bridge.transport().accept().await?;
+
+        // 1. Authorize before anything else knows a stranger called.
+        //
+        // Deliberately before step 2: an unauthorized peer must not be able to learn which
+        // workspaces this host holds by watching which requests are answered differently.
+        // Nothing is ever sent back on a stream that fails this test.
+        let Some(workgroup) = bridge.workgroup()? else {
+            tracing::warn!("a peer called, and this host has no workgroup");
+            drop(stream);
+            continue;
+        };
+        let device = match workgroup.authorize(&peer_node_id) {
+            Ok(device) => device,
+            Err(err) => {
+                tracing::debug!(peer = %peer_node_id, "refused an inbound stream: {err}");
+                drop(stream);
+                continue;
+            }
+        };
+
+        // 2. Whose workspace is it?
+        let Some(route) = bridge.route(workspace_id) else {
+            tracing::debug!(
+                workspace = %workspace_id,
+                "no app server on this host owns that workspace"
+            );
+            drop(stream);
+            continue;
+        };
+
+        // 3. Park it, so its owner can claim it by ticket, then announce it.
+        let ticket = bridge.tickets().park(stream);
+        let params = IncomingParams {
+            workspace_id,
+            peer_device_id: device.id,
+            ticket,
+        };
+        match bridge.owners().peer(&route.app_name) {
+            Some(peer) => match serde_json::to_value(params) {
+                Ok(params) => {
+                    if let Err(err) = peer.notify(INCOMING, params).await {
+                        tracing::warn!(app = %route.app_name, "could not announce a peer: {err}");
+                    }
+                }
+                Err(err) => {
+                    // Infallible in practice: every field of `IncomingParams` serialises.
+                    tracing::warn!(
+                        app = %route.app_name,
+                        "could not serialise an announcement: {err}"
+                    );
+                }
+            },
+            // 4. Nobody home. `wake_on_sync` is the next step of this plan; here the
+            //    workspace is reported as one whose owner is not connected, and the ticket
+            //    expires if the owner never turns up to claim it.
+            None => tracing::info!(app = %route.app_name, "the owner is not connected"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn stream() -> BoxedStream {
+        let (mine, _theirs) = tokio::io::duplex(64);
+        Box::new(mine)
+    }
+
+    #[tokio::test]
+    async fn a_ticket_is_consumed_the_first_time_it_is_presented() {
+        let tickets = Tickets::default();
+        let ticket = tickets.park(stream());
+        assert!(tickets.claim(&ticket).is_some());
+        assert!(
+            tickets.claim(&ticket).is_none(),
+            "a single-use ticket that works twice leaves a stream nobody can account for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_nobody_claims_expires_rather_than_holding_a_stream_open() {
+        let tickets = Tickets::default();
+        let ticket = tickets.park(stream());
+        tickets.age(TICKET_TTL + Duration::from_secs(1));
+        assert!(tickets.claim(&ticket).is_none());
+
+        // A ticket still inside its lifetime is still claimable.
+        let fresh = tickets.park(stream());
+        tickets.age(Duration::from_millis(1));
+        assert!(tickets.claim(&fresh).is_some());
+    }
+
+    #[tokio::test]
+    async fn parking_a_stream_sweeps_out_the_ones_that_expired() {
+        let tickets = Tickets::default();
+        let old = tickets.park(stream());
+        tickets.age(TICKET_TTL + Duration::from_secs(1));
+        let _new = tickets.park(stream());
+        assert!(
+            tickets.claim(&old).is_none(),
+            "parking must drop what has expired"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_parked_streams_get_different_tickets() {
+        let tickets = Tickets::default();
+        assert_ne!(tickets.park(stream()), tickets.park(stream()));
+    }
+
+    #[tokio::test]
+    async fn reading_a_header_leaves_the_payload_on_the_stream() {
+        let (mut mine, mut theirs) = tokio::io::duplex(256);
+        let header = DataHeader::Open {
+            workspace_id: GrainId::random(),
+            device_id: GrainId::random(),
+        };
+        let mut line = serde_json::to_vec(&header).unwrap();
+        line.push(b'\n');
+        line.extend_from_slice(b"raw bytes, not JSON");
+
+        let reader = tokio::spawn(async move {
+            let read = read_header(&mut mine).await.unwrap();
+            let mut payload = Vec::new();
+            mine.read_to_end(&mut payload).await.unwrap();
+            (read, payload)
+        });
+
+        theirs.write_all(&line).await.unwrap();
+        drop(theirs);
+        let (read, payload) = reader.await.unwrap();
+
+        assert_eq!(read, header);
+        assert_eq!(
+            payload, b"raw bytes, not JSON",
+            "the relay gets the bytes the header did not consume"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_header_is_read_as_soon_as_its_newline_arrives() {
+        // Nothing follows the line, and the peer holds the stream open: the read must return
+        // rather than wait for bytes that belong to the payload.
+        let (mut mine, mut theirs) = tokio::io::duplex(256);
+        let header = DataHeader::Accept {
+            ticket: "abc".into(),
+        };
+        let mut line = serde_json::to_vec(&header).unwrap();
+        line.push(b'\n');
+        theirs.write_all(&line).await.unwrap();
+
+        let read = tokio::time::timeout(Duration::from_secs(5), read_header(&mut mine))
+            .await
+            .expect("the header must be read without waiting for more bytes")
+            .unwrap();
+        assert_eq!(read, header);
+    }
+
+    #[tokio::test]
+    async fn a_bad_header_is_a_protocol_error_that_names_itself() {
+        let (mut mine, mut theirs) = tokio::io::duplex(64);
+        theirs
+            .write_all(b"{\"kind\":\"sideways\"}\n")
+            .await
+            .unwrap();
+        drop(theirs);
+        let err = read_header(&mut mine).await.unwrap_err();
+        assert!(err.to_string().contains("header"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_is_one_json_line() {
+        let (mut mine, mut theirs) = tokio::io::duplex(256);
+        write_ack(
+            &mut mine,
+            DataAck {
+                ok: true,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        drop(mine);
+
+        let mut line = String::new();
+        BufReader::new(&mut theirs)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let ack: DataAck = serde_json::from_str(line.trim()).unwrap();
+        assert!(ack.ok);
+    }
+
+    #[tokio::test]
+    async fn the_relay_carries_bytes_both_ways_until_one_side_closes() {
+        // `app_mine` is the app server's end and `peer_theirs` the peer's; the relay owns the
+        // other two halves, exactly as it does in a running bridge.
+        let (mut app_mine, app_theirs) = tokio::io::duplex(256);
+        let (peer_mine, mut peer_theirs) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            splice(app_theirs, peer_mine).await;
+        });
+
+        app_mine.write_all(b"to the peer").await.unwrap();
+        let mut out = [0u8; 11];
+        peer_theirs.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"to the peer");
+
+        peer_theirs.write_all(b"to the app").await.unwrap();
+        let mut back = [0u8; 10];
+        app_mine.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"to the app");
+
+        drop(peer_theirs);
+        let mut end = [0u8; 1];
+        assert_eq!(
+            app_mine.read(&mut end).await.unwrap(),
+            0,
+            "closing one side must show as end of file on the other"
+        );
+    }
+}

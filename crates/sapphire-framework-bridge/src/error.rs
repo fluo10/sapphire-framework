@@ -42,6 +42,10 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// A peer sent something the data plane could not make sense of.
+    #[error("{0}")]
+    Protocol(String),
+
     /// A peer could not be reached, or a peer stream failed.
     #[error("{0}")]
     Peer(String),

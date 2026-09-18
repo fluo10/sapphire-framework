@@ -56,6 +56,20 @@ pub trait PeerTransport: Send + Sync + 'static {
 
     /// This host's node id.
     fn node_id(&self) -> String;
+
+    /// Whether this host can currently reach `node_id`.
+    ///
+    /// An app server is told which devices of its workgroup are connected
+    /// ([`PeerInfo::connected`](sapphire_bridge_api::PeerInfo)), and only the carrier can
+    /// answer that: whether a peer is reachable is a property of the network, not of the
+    /// ledger.
+    ///
+    /// Defaults to `false` rather than guessing. A transport that cannot tell must not report
+    /// a peer as connected, because the answer is what an app server shows and acts on.
+    fn is_connected(&self, node_id: &str) -> bool {
+        let _ = node_id;
+        false
+    }
 }
 
 // ── loopback ────────────────────────────────────────────────────────────────
@@ -118,6 +132,9 @@ impl PeerTransport for LoopbackTransport {
                 "no such node on the loopback network: {node_id}"
             )));
         };
+        if inbox.is_closed() {
+            return Err(Error::Peer(format!("{node_id} is no longer listening")));
+        }
         let (mine, theirs) = tokio::io::duplex(LOOPBACK_BUFFER);
         inbox
             .send((self.node_id.clone(), workspace_id, theirs))
@@ -135,6 +152,16 @@ impl PeerTransport for LoopbackTransport {
 
     fn node_id(&self) -> String {
         self.node_id.clone()
+    }
+
+    fn is_connected(&self, node_id: &str) -> bool {
+        // On the loopback, "connected" is exactly "registered and still listening": there is
+        // no connection to establish or lose in between.
+        self.nodes
+            .lock()
+            .expect("loopback network")
+            .get(node_id)
+            .is_some_and(|inbox| !inbox.is_closed())
     }
 }
 
@@ -206,5 +233,39 @@ mod tests {
         drop(opened);
         let mut buf = [0u8; 1];
         assert_eq!(accepted.read(&mut buf).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_registered_node_is_connected_and_an_unknown_one_is_not() {
+        let net = LoopbackNetwork::new();
+        let a = net.transport("node-a");
+        let _b = net.transport("node-b");
+
+        assert!(a.is_connected("node-b"));
+        assert!(
+            !a.is_connected("node-nowhere"),
+            "an unknown node is not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transport_that_cannot_tell_reports_nothing_connected() {
+        // The default is what matters here: an implementation that has no live set must not
+        // claim a peer is reachable.
+        struct Blind;
+        #[async_trait::async_trait]
+        impl PeerTransport for Blind {
+            async fn open(&self, _: &str, _: GrainId) -> Result<BoxedStream> {
+                Err(Error::Peer("no".to_owned()))
+            }
+            async fn accept(&self) -> Result<(String, GrainId, BoxedStream)> {
+                Err(Error::Peer("no".to_owned()))
+            }
+            fn node_id(&self) -> String {
+                "blind".to_owned()
+            }
+        }
+
+        assert!(!Blind.is_connected("anybody"));
     }
 }
