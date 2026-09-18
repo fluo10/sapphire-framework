@@ -34,7 +34,7 @@ pub use peer::{LoopbackNetwork, LoopbackTransport};
 pub use routes::{Route, RouteTable};
 pub use workgroup::Workgroup;
 
-use crate::control::Owners;
+use crate::control::{Owners, Wakes};
 use crate::data::Tickets;
 
 /// The switchboard: one control plane, one data plane, and the tables they share.
@@ -65,6 +65,8 @@ pub struct Bridge {
     owners: Owners,
     /// Inbound streams waiting for their owner.
     tickets: Tickets,
+    /// When each application was last started by `wake_on_sync`.
+    wakes: Wakes,
 }
 
 impl Bridge {
@@ -89,6 +91,7 @@ impl Bridge {
             routes: Mutex::new(routes),
             owners: Owners::default(),
             tickets: Tickets::default(),
+            wakes: Wakes::default(),
         })
     }
 
@@ -205,6 +208,11 @@ impl Bridge {
     /// Inbound streams waiting for their owner.
     pub(crate) fn tickets(&self) -> &Tickets {
         &self.tickets
+    }
+
+    /// When each application was last started by `wake_on_sync`.
+    pub(crate) fn wakes(&self) -> &Wakes {
+        &self.wakes
     }
 }
 

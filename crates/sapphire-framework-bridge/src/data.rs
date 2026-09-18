@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use grain_id::GrainId;
-use sapphire_bridge_api::{DataAck, DataHeader, INCOMING, IncomingParams};
+use sapphire_bridge_api::{DataAck, DataHeader, INCOMING, IncomingParams, ManagedBy};
 use sapphire_ipc::{Endpoint, RawStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -17,6 +17,7 @@ use crate::Bridge;
 use crate::error::{Error, Result};
 use crate::net::NetConfig;
 use crate::peer::BoxedStream;
+use crate::routes::Route;
 
 /// How long an unclaimed inbound stream is held.
 ///
@@ -259,14 +260,47 @@ where
     .await
 }
 
+/// Start a stopped app server.
+///
+/// Detached, with no inherited stdio: the bridge is not its parent in any useful sense, and a
+/// server that outlives this call is exactly what is wanted.
+///
+/// Only a route whose `managed_by` is [`ManagedBy::Spawned`] is ever passed here. A
+/// service-managed server belongs to the OS service manager, and starting a second copy of
+/// one would fight it.
+fn wake(route: &Route) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(&route.exe_path);
+    command
+        .args(["server", "run"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe and is the documented way to detach. Nothing
+        // else happens between fork and exec, which is what `pre_exec` requires.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            })
+        };
+    }
+    let child = command.spawn()?;
+    // The server outlives us; do not reap it.
+    std::mem::forget(child);
+    Ok(())
+}
+
 // ── the inbound loop ────────────────────────────────────────────────────────
 
 /// Accept peer streams, authorize them, and park them for the app server that owns them.
 ///
-/// `_net` is taken now for the waking rule the next step of this plan adds (`wake_on_sync`):
-/// this loop is the only place that sees a peer asking for a workspace whose owner is not
-/// running.
-pub(crate) async fn inbound(bridge: Arc<Bridge>, _net: NetConfig) -> Result<()> {
+/// This loop is the only place that sees a peer asking for a workspace whose owner is not
+/// running, so `net.wake_on_sync` is decided here: the ask is the cue to start a stopped
+/// owner.
+pub(crate) async fn inbound(bridge: Arc<Bridge>, net: NetConfig) -> Result<()> {
     loop {
         let (peer_node_id, workspace_id, stream) = bridge.transport().accept().await?;
 
@@ -321,10 +355,27 @@ pub(crate) async fn inbound(bridge: Arc<Bridge>, _net: NetConfig) -> Result<()> 
                     );
                 }
             },
-            // 4. Nobody home. `wake_on_sync` is the next step of this plan; here the
-            //    workspace is reported as one whose owner is not connected, and the ticket
-            //    expires if the owner never turns up to claim it.
-            None => tracing::info!(app = %route.app_name, "the owner is not connected"),
+            // 4. Nobody home.
+            //
+            // The ticket is already parked, and its TTL is what gives an owner the bridge
+            // starts here the time to start, connect and claim it. A `Service` owner is
+            // never started: it runs as root (spec §3), and the bridge — running as the
+            // human user — can no more start it than a CLI can. Its workspace is reported
+            // offline, and its service manager is left to answer for it.
+            None if net.wake_on_sync && route.managed_by == ManagedBy::Spawned => {
+                // `claim` first, and unconditionally: it is what records the attempt, and a
+                // failed start must not be retried on every ask either.
+                if bridge.wakes().claim(&route.app_name)
+                    && let Err(err) = wake(&route)
+                {
+                    tracing::warn!(app = %route.app_name, "could not start the owner: {err}");
+                }
+            }
+            None => tracing::info!(
+                app = %route.app_name,
+                managed_by = ?route.managed_by,
+                "the owner is not connected; reporting the workspace as offline"
+            ),
         }
     }
 }

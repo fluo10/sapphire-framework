@@ -56,6 +56,41 @@ impl Owners {
     }
 }
 
+/// How long an application is left alone after the bridge tried to start it.
+///
+/// A peer that reconnects in a loop asks for the same workspace over and over, and each ask
+/// finds the owner still starting up. Without a floor between attempts the bridge would fork
+/// the app server once per ask — a fork bomb any device of the workgroup could trigger.
+pub(crate) const WAKE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// When the bridge last tried to start each application.
+///
+/// Beside [`Owners`], because it is the same kind of fact about the same subject: what the
+/// bridge knows about the app servers of this host, rather than about their workspaces.
+#[derive(Debug, Default)]
+pub(crate) struct Wakes {
+    last: Mutex<HashMap<String, std::time::Instant>>,
+}
+
+impl Wakes {
+    /// Whether `app_name` may be started now, recording the attempt if so.
+    ///
+    /// The window is [`WAKE_INTERVAL`]. Refusing is not an error: the ticket for the stream
+    /// that prompted this attempt stays parked, so the owner that is already starting has
+    /// that ask — and every ask that arrives while it starts — waiting for it.
+    pub(crate) fn claim(&self, app_name: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last.lock().expect("wakes");
+        match last.get(app_name) {
+            Some(previous) if now.duration_since(*previous) < WAKE_INTERVAL => false,
+            _ => {
+                last.insert(app_name.to_owned(), now);
+                true
+            }
+        }
+    }
+}
+
 /// The app servers one control connection has registered.
 ///
 /// The bridge holds a [`PeerHandle`] per app, but nothing asks whether that handle still
@@ -357,6 +392,28 @@ mod tests {
 
     async fn call(client: &Client, method: &str, params: Value) -> Value {
         client.call::<_, Value>(method, params).await.unwrap()
+    }
+
+    #[test]
+    fn a_wake_claim_is_granted_once_per_window_and_per_application() {
+        let wakes = Wakes::default();
+        assert!(wakes.claim("test-app"), "the first attempt is granted");
+        assert!(
+            !wakes.claim("test-app"),
+            "a second attempt inside the window must be refused"
+        );
+        assert!(
+            wakes.claim("other-app"),
+            "the window is per application, not global"
+        );
+
+        // After the window, the owner may be tried again: it may have crashed on start.
+        wakes
+            .last
+            .lock()
+            .unwrap()
+            .insert("test-app".into(), std::time::Instant::now() - WAKE_INTERVAL);
+        assert!(wakes.claim("test-app"));
     }
 
     #[tokio::test]
