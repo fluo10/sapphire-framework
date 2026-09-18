@@ -26,6 +26,10 @@ pub enum Error {
     #[error("this host has not joined a workgroup")]
     NoWorkgroup,
 
+    /// A peer may not connect: it is not a device of this workgroup, or it is retired.
+    #[error("{0}")]
+    Unauthorized(String),
+
     /// No app server on this host owns that workspace.
     #[error("no app server on this host owns workspace {0}")]
     UnknownWorkspace(GrainId),

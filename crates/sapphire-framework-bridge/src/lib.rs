@@ -11,11 +11,15 @@
 
 mod dir;
 mod error;
+mod net;
 mod routes;
+mod workgroup;
 
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use error::{Error, Result};
+pub use net::NetConfig;
 pub use routes::{Route, RouteTable};
+pub use workgroup::Workgroup;
 
 #[cfg(test)]
 mod tests {
