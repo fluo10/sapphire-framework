@@ -13,6 +13,8 @@ mod control;
 mod data;
 mod dir;
 mod error;
+#[cfg(feature = "node")]
+mod iroh;
 mod net;
 mod peer;
 mod routes;
@@ -27,6 +29,8 @@ use sapphire_ipc::{Endpoint, ServerInfo};
 
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use error::{Error, Result};
+#[cfg(feature = "node")]
+pub use iroh::{IrohTransport, NodeAddr};
 pub use net::NetConfig;
 pub use peer::{BoxedStream, PeerStream, PeerTransport, StreamRequest};
 #[cfg(any(test, feature = "test-util"))]
