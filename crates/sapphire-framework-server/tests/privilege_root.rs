@@ -16,6 +16,7 @@
 
 #![cfg(unix)]
 
+use std::os::fd::AsRawFd;
 use std::process::Command;
 
 use sapphire_framework_server::privilege::{self, HelperSpec, PrivilegeConfig, UserSpec};
@@ -179,6 +180,114 @@ fn the_helper_runs_as_the_other_user() {
         .unwrap()
         .uid;
     assert_eq!(helper_uid, tools_uid, "the helper ran as the wrong user");
+}
+
+/// The helper must start with nothing beyond its three stdio descriptors — spec §3.1
+/// step 4: *close every fd but the child end of the socketpair*. The fd the helper could
+/// not otherwise have is the point: the parent holds the workspace database open as root
+/// before the fork, so the helper user would be reading a file it cannot open by path.
+///
+/// The leak this closes is not hypothetical std behaviour: the fixture is a raw descriptor
+/// from `dup(2)`, which carries no close-on-exec flag, exactly like a redb handle opened
+/// through libc.
+#[test]
+#[ignore = "needs root and the sapphire-human / sapphire-tools accounts"]
+fn the_helper_starts_with_no_descriptors_beyond_stdio() {
+    require_root();
+
+    let report = std::path::Path::new("/tmp/sapphire-privsep-fd-report");
+    let _ = std::fs::remove_file(report);
+    let dir = std::path::Path::new("/tmp/sapphire-privsep-e");
+    let _ = std::fs::remove_dir_all(dir);
+
+    let code = in_child(|| {
+        let report = std::path::Path::new("/tmp/sapphire-privsep-fd-report");
+        // The workspace database, open while still root: everything a leak would expose.
+        // Mode 0600 root-owned, so `sapphire-tools` could never open it by path.
+        let db = match std::fs::File::create("/tmp/sapphire-privsep-e-database") {
+            Ok(db) => db,
+            Err(_) => return 20,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            "/tmp/sapphire-privsep-e-database",
+            std::fs::Permissions::from_mode(0o600),
+        );
+        // SAFETY: `dup` of a valid fd yields a fresh descriptor on success. The raw
+        // descriptor is what the test holds: it has no close-on-exec flag, which is the
+        // leak class under test, and is closed by exec if the fix holds.
+        let leaked = unsafe { libc::dup(db.as_raw_fd()) };
+        if leaked < 0 {
+            return 21;
+        }
+
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return 22,
+        };
+        let code = runtime.block_on(async {
+            let config = PrivilegeConfig {
+                run_as: UserSpec::Name(HUMAN.into()),
+                helper: Some(HelperSpec {
+                    user: UserSpec::Name(TOOLS.into()),
+                    program: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        format!("ls -l /proc/self/fd > {}", report.display()),
+                    ],
+                }),
+            };
+            let tmp = std::path::Path::new("/tmp/sapphire-privsep-e");
+            let _ = std::fs::create_dir_all(tmp);
+            let Ok(privileges) = privilege::apply(&config, &[tmp]) else {
+                return 10;
+            };
+            if privileges.helper.is_none() {
+                return 11;
+            }
+            // Give the helper a moment to write the listing before the child exits.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            0
+        });
+        // The descriptor is ours to close, not the leak check's: dropping the OwningFd
+        // types here is enough for the parent, which exits right after.
+        let _ = leaked;
+        let _ = db;
+        code
+    });
+    assert_eq!(code, 0, "apply failed (code {code})");
+
+    // The helper ran as `sapphire-tools`, which cannot open a 0600 file owned by root
+    // (/tmp is sticky, so the fix's uninstall path would be: leak the fd, read through
+    // it). The assertion below is on the fd *table*: either way, what the table shows is
+    // what the exec let the helper keep.
+    let listed = std::fs::read_to_string(report).expect("the helper must have run");
+    let mut stdio = 0;
+    for line in listed.lines() {
+        let Some((number, target)) = line.split_once(" -> ") else {
+            continue; // the directory handle `ls` itself holds while listing
+        };
+        let number = number
+            .split_whitespace()
+            .last()
+            .expect("an ls -l line has a name");
+        if target.starts_with("/proc/") {
+            continue; // ls's own handle, described above
+        }
+        assert!(
+            matches!(number, "0" | "1" | "2"),
+            "the helper holds fd {number}: {line}\n{listed}"
+        );
+        stdio += 1;
+    }
+    assert_eq!(stdio, 3, "fds 0, 1 and 2 must all be there: {listed}");
+    assert!(
+        !listed.contains("privsep-e-database"),
+        "the workspace database leaked to the helper: {listed}"
+    );
 }
 
 #[test]

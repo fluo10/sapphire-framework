@@ -36,6 +36,11 @@ impl std::fmt::Debug for HelperHandle {
 /// Must be called while still root when `user` differs from the current one. The child does
 /// `setgroups` / `setgid` / `setuid` in its `pre_exec` hook, where only async-signal-safe
 /// calls are allowed — which is why the identity change is three libc calls and nothing else.
+///
+/// The child keeps nothing of ours across the exec beyond stdio: descriptors are handed over
+/// close-on-exec and swept on the parent side, so a file the server has open — the workspace
+/// database, a log — does not follow the fork into the less trusted half. See
+/// [`cloak_fds_above_stderr`].
 pub fn spawn_helper(spec: &HelperSpec, user: &ResolvedUser) -> Result<HelperHandle> {
     let (parent, child) = socketpair()?;
 
@@ -81,6 +86,17 @@ pub fn spawn_helper(spec: &HelperSpec, user: &ResolvedUser) -> Result<HelperHand
         });
     }
 
+    // SAFETY: the closure runs between fork and exec, so it may call only async-signal-safe
+    // functions. `close_range` is a direct syscall — see `close_inherited_fds` — and nothing
+    // here allocates.
+    unsafe {
+        command.pre_exec(|| close_inherited_fds());
+    }
+
+    // The sweep, before the fork, so even the parent window between two helpers stays
+    // clean and the table is already marked when `fork` copies it.
+    cloak_fds_above_stderr();
+
     let child_process = command.spawn().map_err(|e| {
         Error::Privilege(format!(
             "could not start the helper {}: {e}",
@@ -103,6 +119,72 @@ pub fn spawn_helper(spec: &HelperSpec, user: &ResolvedUser) -> Result<HelperHand
         user: user.clone(),
         socket,
     })
+}
+
+/// Mark every descriptor above stdio close-on-exec, in the child, before the exec.
+///
+/// Spec §3.1 step 4: *fork/exec the helper … close every fd but the child end of the
+/// socketpair*. By hook time std's plumbing is in place — fd 0 is the socketpair's child
+/// end, 1 is `/dev/null`, 2 is our stderr — so everything from 3 up is inherited and must
+/// not survive. The exec closing each marked descriptor is what delivers the requirement.
+///
+/// Marking rather than closing is deliberate. `std::process::Command` reports an exec
+/// failure by writing to a socketpair whose child end is still open, and counts on that
+/// end being closed *by the exec*: closing descriptors here, before the exec, turns the
+/// report into `EBADF` and leaves the child aborting with a report the parent reads as
+/// ordinary end of file — a helper that never started would come back as success. The
+/// close-on-exec flag does the same closing, one instruction later, with the report path
+/// intact; observed from the execed program the effect is identical.
+///
+/// On Linux this is `close_range(3, .., CLOSE_RANGE_CLOEXEC)`, a direct syscall and
+/// async-signal-safe (kernel ≥ 5.9). Elsewhere the table cannot be enumerated from an
+/// async-signal-safe hook (`/proc` is Linux-only), so the hook reports the gap back
+/// through `spawn` instead of pretending; the parent-side sweep
+/// ([`cloak_fds_above_stderr`]) still covers what this process opened through libc.
+#[cfg(target_os = "linux")]
+unsafe fn close_inherited_fds() -> std::io::Result<()> {
+    // The socketpair child end, after `dup2` onto fd 0, sits below 3; keeping std's stdio
+    // plumbing intact means touching only 3 and up.
+    // SAFETY: the arguments are plain integers and the call has no further preconditions.
+    let flags = libc::CLOSE_RANGE_CLOEXEC as libc::c_int;
+    if unsafe { libc::close_range(3, u32::MAX, flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The non-Linux hook: the sweep below is the only guarantee, so say so through `spawn`.
+#[cfg(not(target_os = "linux"))]
+unsafe fn close_inherited_fds() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "closing inherited fds before exec is only implemented for Linux",
+    ))
+}
+
+/// The parent half of the same guarantee: hand *this process's* open descriptors to the
+/// next helper close-on-exec.
+///
+/// Rust's std cloexecs what it opens, but a server reaches files through libc too — a redb
+/// database, an openat handle — and `open(2)` without `O_CLOEXEC` is exactly the leak the
+/// spec closes: such a descriptor crosses the fork unmarked and, unmarked, survives the
+/// exec into the helper. Sweeping here closes that class at the moment a helper is forked.
+/// Only fds of this process are touched — descriptors are not shared across processes.
+fn cloak_fds_above_stderr() {
+    #[cfg(target_os = "linux")]
+    {
+        // Best effort by design: an old kernel rejects the call, and a failure leaves the
+        // exec-time hook as the remaining guard rather than failing a start that would
+        // otherwise work.
+        // SAFETY: the arguments are plain integers and the call has no preconditions.
+        let flags = libc::CLOSE_RANGE_CLOEXEC as libc::c_int;
+        let _ = unsafe { libc::close_range(3, u32::MAX, flags) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Without close_range the table cannot be swept safely from a signal-safe context
+        // and the process may not even have /proc; the child-side hook reports the gap.
+    }
 }
 
 /// A connected pair of Unix stream sockets.
@@ -223,5 +305,79 @@ mod tests {
         };
         let err = spawn_helper(&spec, &me()).unwrap_err();
         assert!(err.to_string().contains("helper-9f3a"), "{err}");
+    }
+
+    /// The helper must start with nothing above stdio: the leak this closes is a plain fd
+    /// to the workspace database, which the helper user could never open by path.
+    ///
+    /// The `sh` below walks `/proc/self/fd` and writes the table to a file the test reads
+    /// after the helper exits. The assertion is strict — nothing at all beyond fds 0–2 —
+    /// so it fails the moment the parent leaks anything, whatever the descriptor points at
+    /// and whatever std opens next.
+    #[tokio::test]
+    async fn the_helper_inherits_no_descriptors_beyond_stdio() {
+        if skip_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cache.redb");
+        std::fs::write(&db, b"sapphire-fixture").unwrap();
+        // A descriptor std never cloexecs: a raw dup of stderr. Whether it survives the
+        // exec is the kernel's business, not the helper's to inherit as a *third* copy —
+        // keep it here so the test would catch it if it did.
+        let dup = {
+            // SAFETY: `dup` of a valid fd yields a fresh descriptor on success.
+            let fd = unsafe { libc::dup(2) };
+            assert!(fd >= 0);
+            // SAFETY: a fresh descriptor from `dup`, owned by nobody else.
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        };
+
+        let report = dir.path().join("fds.txt");
+        let spec = HelperSpec {
+            user: super::super::UserSpec::Uid(super::super::current_uid()),
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("ls -l /proc/self/fd > {}", report.display()),
+            ],
+        };
+        let mut handle = spawn_helper(&spec, &me()).unwrap();
+        drop(dup);
+        let mut buf = [0u8; 1];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.socket.read(&mut buf),
+        )
+        .await
+        .expect("the helper must exit promptly")
+        .unwrap();
+
+        let listed = std::fs::read_to_string(&report).unwrap();
+        // One line per open descriptor, `N -> target`. Three stdio lines, `ls`'s own handle
+        // on the directory it is reading, and nothing else — anything above that is a leak.
+        let mut stdio = 0;
+        for line in listed.lines() {
+            let Some((number, target)) = line.split_once(" -> ") else {
+                continue; // the directory handle, described above
+            };
+            let number = number
+                .split_whitespace()
+                .last()
+                .expect("an ls -l line has a name");
+            if target.starts_with("/proc/") {
+                continue; // ls's own handle again, this time with an arrow
+            }
+            assert!(
+                matches!(number, "0" | "1" | "2"),
+                "the helper holds fd {number}: {line}\n{listed}"
+            );
+            stdio += 1;
+        }
+        assert_eq!(stdio, 3, "fds 0, 1 and 2 must all be there: {listed}");
+        assert!(
+            !listed.contains("cache.redb"),
+            "the workspace database leaked to the helper: {listed}"
+        );
     }
 }
