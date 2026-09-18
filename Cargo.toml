@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/sapphire-bridge",
     "crates/sapphire-framework-track",
     "crates/sapphire-framework-sync",
     "crates/sapphire-framework-ipc",

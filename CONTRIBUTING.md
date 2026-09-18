@@ -9,7 +9,9 @@ Thank you for helping with sapphire-framework. A couple of conventions keep the 
 
 ## Repository layout
 
-- **Binary crates** live in a directory named after the short name (`cli/`, `desktop/`, `server/`) directly under the repo root.
+- **Binary crates that ship as part of the framework** live in `apps/`, in a directory named
+  after the binary (`apps/sapphire-bridge/`). An application with its own repository stays in
+  that repository.
 - **Library crates** live under `crates/`, in a directory named after the full crate name.
 - Non-crate directories (docs, editor extensions, etc.) stay at the repo root.
 
@@ -25,6 +27,6 @@ Thank you for helping with sapphire-framework. A couple of conventions keep the 
 
 ## リポジトリ構成
 
-- **バイナリ用クレート**は、短い名前（`cli/`, `desktop/`, `server/`）のディレクトリをリポジトリ直下に置きます。
+- **フレームワークの一部として配布するバイナリ用クレート**は `apps/` 直下に、バイナリ名のディレクトリで置きます（`apps/sapphire-bridge/`）。独自リポジトリを持つアプリケーションはそちらに留まります。
 - **ライブラリ用クレート**は `crates/` 直下に、正式なクレート名のディレクトリで置きます。
 - クレートではないディレクトリ（docs やエディタ拡張など）はリポジトリ直下のままにします。

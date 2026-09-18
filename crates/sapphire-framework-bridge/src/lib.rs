@@ -9,6 +9,7 @@
 
 #![warn(missing_docs)]
 
+mod command;
 mod control;
 mod data;
 mod dir;
@@ -27,6 +28,7 @@ use grain_id::GrainId;
 use sapphire_bridge_api::{BRIDGE_DATA_NAME, BRIDGE_NAME, ManagedBy, WorkspaceRegistration};
 use sapphire_ipc::{Endpoint, ServerInfo};
 
+pub use command::BridgeCommand;
 pub use dir::{BRIDGE_DIR_ENV, BRIDGE_FORMAT_VERSION, BridgeDir, InstanceLock};
 pub use error::{Error, Result};
 #[cfg(feature = "node")]

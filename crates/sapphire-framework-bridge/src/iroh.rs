@@ -290,6 +290,15 @@ fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     }
 }
 
+/// This host's node id, from the key at `key_path`, creating the key if it is absent.
+///
+/// Derived without binding an endpoint, which is what a one-shot command needs: founding a
+/// workgroup records this host's node id, and that happens before — sometimes long before —
+/// a bridge is running to ask.
+pub fn load_or_create_node_id(key_path: &Path) -> Result<String> {
+    Ok(load_or_create_key(key_path)?.public().to_string())
+}
+
 /// Interpret the bytes of a key file.
 fn parse_key(path: &Path, bytes: &[u8]) -> Result<SecretKey> {
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
@@ -377,6 +386,30 @@ mod tests {
         };
         let err = relay_mode(&net).unwrap_err();
         assert!(err.to_string().contains("not a url"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_node_id_follows_from_the_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("node.key");
+
+        // Derived without an endpoint, and stable across calls.
+        let id = load_or_create_node_id(&path).unwrap();
+        assert_eq!(
+            id.len(),
+            64,
+            "a node id is 64 lowercase hex characters: {id}"
+        );
+        assert_eq!(load_or_create_node_id(&path).unwrap(), id);
+
+        // The same identity the transport binds.
+        let net = NetConfig {
+            wake_on_sync: false,
+            discovery: false,
+            relays: vec![],
+        };
+        let transport = IrohTransport::new(&path, &net).await.unwrap();
+        assert_eq!(transport.node_id(), id);
     }
 
     #[test]

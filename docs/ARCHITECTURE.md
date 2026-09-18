@@ -97,6 +97,9 @@ Cargo workspace（モノレポ）。既存済み ✅ / 予定 ⬜。
 | `sapphire-framework-blob` | バイナリブロブ抽象 `BlobStore`（`FsBlobStore`／将来 OPFS/S3） | ✅ |
 | `sapphire-framework-registry` | デバイス台帳（`<dir>/<grain-id>.toml` を 1 デバイス 1 ファイル。`node_id` を保持。users は撤去） | ✅ |
 | `sapphire-framework-backend` | GUI 向け**非同期** `WorkspaceBackend` + Local/Remote 実装、`BackendEvent`、IPC 実装 `IpcBackend` | ✅（MVP） |
+| `sapphire-framework-bridge-api` | bridge 制御プレーンのプロトコルとクライアント（serde のみ・iroh 非依存） | ✅ |
+| `sapphire-framework-bridge` | ホスト常駐デーモン本体（デバイス識別・workgroup 認可・交換台・iroh） | ✅ |
+| `apps/sapphire-bridge` | 上記のバイナリ | ✅ |
 | `sapphire-framework-mcp` | rmcp ベース MCP 骨格（`RecallServer` 汎用化 + stdio/http transport） | ⬜ |
 | `sapphire-framework-cache-wasm` | wasm 専用: IndexedDB/OPFS の track/entries + substring 検索 | ⬜ |
 

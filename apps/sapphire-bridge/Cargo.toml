@@ -1,0 +1,17 @@
+[package]
+name = "sapphire-bridge"
+version.workspace = true
+edition.workspace = true
+description = "Host-wide sapphire daemon: device identity, workgroup authorization and sync routing"
+license.workspace = true
+repository.workspace = true
+keywords = ["sync", "p2p", "daemon", "local-first"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+sapphire-bridge = { package = "sapphire-framework-bridge", version = "0.14.0", path = "../../crates/sapphire-framework-bridge", features = ["node"] }
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
+# The `env-filter` feature is what makes `EnvFilter` exist at all; it is not a default.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

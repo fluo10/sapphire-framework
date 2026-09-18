@@ -4949,6 +4949,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sapphire-bridge"
+version = "0.14.0"
+dependencies = [
+ "clap",
+ "sapphire-framework-bridge",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sapphire-framework"
 version = "0.14.0"
 dependencies = [
