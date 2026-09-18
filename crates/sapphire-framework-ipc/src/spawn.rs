@@ -8,6 +8,7 @@ use crate::conn::Connection;
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
 use crate::handshake::{ClientInfo, ManagedBy, ServerInfo};
+use crate::raw::RawStream;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
@@ -32,6 +33,21 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
     #[cfg(windows)]
     {
         crate::windows::connect(endpoint).await
+    }
+}
+
+/// Connect to `endpoint` and hand back the byte stream, unframed.
+///
+/// The bridge's data plane speaks one JSON line and then raw bytes, so it cannot use
+/// [`Connection`](crate::Connection).
+pub async fn connect_raw(endpoint: &Endpoint) -> Result<RawStream> {
+    #[cfg(unix)]
+    {
+        crate::unix::connect_raw(endpoint).await
+    }
+    #[cfg(windows)]
+    {
+        crate::windows::connect_raw(endpoint).await
     }
 }
 

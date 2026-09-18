@@ -16,6 +16,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use crate::conn::Connection;
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
+use crate::raw::RawStream;
 
 /// How many bytes a pipe instance buffers in each direction.
 const PIPE_BUFFER: u32 = 64 * 1024;
@@ -167,13 +168,26 @@ impl PipeListener {
 
     /// Accept one connection.
     pub async fn accept(&mut self) -> Result<Connection> {
+        Ok(Connection::from_io(self.accept_stream().await?))
+    }
+
+    /// Accept one connection and hand back the byte stream, unframed.
+    ///
+    /// The pipe's DACL admits only this user, so the same check the framed path relies on
+    /// covers this path too.
+    pub async fn accept_raw(&mut self) -> Result<RawStream> {
+        Ok(Box::new(self.accept_stream().await?))
+    }
+
+    /// Accept the next connected instance, unframed.
+    async fn accept_stream(&mut self) -> Result<NamedPipeServer> {
         let server = match self.next.take() {
             Some(s) => s,
             None => Self::create_instance(&self.name, false)?,
         };
         server.connect().await?;
         self.next = Some(Self::create_instance(&self.name, false)?);
-        Ok(Connection::from_io(server))
+        Ok(server)
     }
 }
 
@@ -190,16 +204,12 @@ pub fn bind(endpoint: &Endpoint) -> Result<PipeListener> {
     })
 }
 
-/// Connect to `endpoint`, waiting briefly while every instance is busy.
-// Only the tests call this until the spawn step re-exports a platform-independent
-// `connect`; it is deliberately not re-exported from the crate root yet (see lib.rs).
-#[allow(dead_code)]
-pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
-    let name = endpoint.pipe_name();
+/// Open the pipe `name`, waiting briefly while every instance is busy.
+async fn open_pipe(name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match ClientOptions::new().open(&name) {
-            Ok(client) => return Ok(Connection::from_io(client)),
+        match ClientOptions::new().open(name) {
+            Ok(client) => return Ok(client),
             Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::Timeout("a free pipe instance"));
@@ -211,13 +221,20 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
     }
 }
 
+/// Connect to `endpoint`.
+pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
+    Ok(Connection::from_io(open_pipe(&endpoint.pipe_name()).await?))
+}
+
+/// Connect to `endpoint` and hand back the byte stream, unframed.
+pub async fn connect_raw(endpoint: &Endpoint) -> Result<RawStream> {
+    Ok(Box::new(open_pipe(&endpoint.pipe_name()).await?))
+}
+
 /// Is a server listening on `endpoint`?
 ///
 /// Unlike the Unix carrier there is no file to go stale: the name exists exactly while a
 /// process holds an instance.
-// Only the tests call this until the spawn step re-exports a platform-independent
-// `probe`; it is deliberately not re-exported from the crate root yet (see lib.rs).
-#[allow(dead_code)]
 pub async fn probe(endpoint: &Endpoint) -> Result<bool> {
     match ClientOptions::new().open(endpoint.pipe_name()) {
         Ok(_) => Ok(true),
@@ -234,6 +251,7 @@ mod tests {
 
     use super::*;
     use crate::message::{Message, Notification};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn endpoint(name: &str) -> Endpoint {
         Endpoint::in_dir(name, std::env::temp_dir())
@@ -309,6 +327,24 @@ mod tests {
         });
         client.send(msg.clone()).await.unwrap();
         assert_eq!(server.await.unwrap(), msg);
+    }
+
+    #[tokio::test]
+    async fn a_raw_client_carries_bytes_without_framing_them() {
+        let ep = endpoint(&format!("ipc-raw-{}", std::process::id()));
+        let mut listener = bind(&ep).unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept_raw().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read_exact(&mut buf).await.unwrap();
+            buf
+        });
+
+        let mut client = connect_raw(&ep).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(&server.await.unwrap(), b"hello");
     }
 
     #[tokio::test]

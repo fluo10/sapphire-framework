@@ -1,0 +1,21 @@
+[package]
+name = "sapphire-framework-bridge-api"
+version.workspace = true
+edition.workspace = true
+description = "Control-plane protocol and client for the sapphire-framework bridge"
+license.workspace = true
+repository.workspace = true
+keywords = ["bridge", "ipc", "protocol", "local-first"]
+categories = ["network-programming"]
+
+[dependencies]
+sapphire-ipc = { package = "sapphire-framework-ipc", version = "0.14.0", path = "../sapphire-framework-ipc" }
+grain-id.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

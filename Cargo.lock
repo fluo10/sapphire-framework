@@ -3722,6 +3722,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sapphire-framework-bridge-api"
+version = "0.14.0"
+dependencies = [
+ "grain-id",
+ "sapphire-framework-ipc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sapphire-framework-gui"
 version = "0.14.0"
 dependencies = [

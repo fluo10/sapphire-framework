@@ -7,6 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::conn::Connection;
 use crate::endpoint::{Endpoint, ensure_private_dir};
 use crate::error::{Error, Result};
+use crate::raw::RawStream;
 
 /// A bound listener that removes its socket file when dropped.
 #[derive(Debug)]
@@ -26,12 +27,25 @@ impl UnixListenerHandle {
     /// A rejected peer is disconnected and the wait continues, so one hostile connection
     /// cannot stop the server from serving legitimate ones.
     pub async fn accept(&self) -> Result<Connection> {
+        Ok(Connection::from_io(self.accept_stream().await?))
+    }
+
+    /// Accept one connection and hand back the byte stream, unframed.
+    ///
+    /// The same-user check [`accept`](Self::accept) makes is made here too: a data
+    /// connection is no more trusted than a control connection.
+    pub async fn accept_raw(&self) -> Result<RawStream> {
+        Ok(Box::new(self.accept_stream().await?))
+    }
+
+    /// Accept one same-user connection, checked but unframed.
+    async fn accept_stream(&self) -> Result<UnixStream> {
         loop {
             let (stream, _) = self.listener.accept().await?;
             // SAFETY: getuid has no preconditions.
             let ours = unsafe { libc::getuid() };
             match peer_uid(&stream) {
-                Ok(uid) if uid == ours => return Ok(Connection::from_io(stream)),
+                Ok(uid) if uid == ours => return Ok(stream),
                 Ok(uid) => {
                     tracing::warn!(
                         peer_uid = uid,
@@ -69,12 +83,18 @@ pub async fn bind(endpoint: &Endpoint) -> Result<UnixListenerHandle> {
 }
 
 /// Connect to `endpoint`.
-// Only the tests call this until the spawn step re-exports a platform-independent
-// `connect`; it is deliberately not re-exported from the crate root yet (see lib.rs).
-#[allow(dead_code)]
 pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
-    let stream = UnixStream::connect(endpoint.socket_path()).await?;
-    Ok(Connection::from_io(stream))
+    Ok(Connection::from_io(connect_stream(endpoint).await?))
+}
+
+/// Connect to `endpoint` and hand back the byte stream, unframed.
+pub async fn connect_raw(endpoint: &Endpoint) -> Result<RawStream> {
+    Ok(Box::new(connect_stream(endpoint).await?))
+}
+
+/// Connect to `endpoint` and hand back the raw carrier.
+async fn connect_stream(endpoint: &Endpoint) -> Result<UnixStream> {
+    Ok(UnixStream::connect(endpoint.socket_path()).await?)
 }
 
 /// Is a server listening on `endpoint`?
@@ -144,6 +164,7 @@ pub fn peer_uid(stream: &UnixStream) -> Result<u32> {
 mod tests {
     use super::*;
     use crate::message::{Message, Notification};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn endpoint(dir: &std::path::Path) -> Endpoint {
         Endpoint::in_dir("test-app", dir.to_path_buf())
@@ -167,6 +188,25 @@ mod tests {
         });
         client.send(msg.clone()).await.unwrap();
         assert_eq!(server.await.unwrap(), msg);
+    }
+
+    #[tokio::test]
+    async fn a_raw_client_carries_bytes_without_framing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ep = endpoint(tmp.path());
+        let listener = bind(&ep).await.unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept_raw().await.unwrap();
+            let mut buf = [0u8; 5];
+            stream.read_exact(&mut buf).await.unwrap();
+            buf
+        });
+
+        let mut client = connect_raw(&ep).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(&server.await.unwrap(), b"hello");
     }
 
     #[tokio::test]

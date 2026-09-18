@@ -18,6 +18,7 @@ mod endpoint;
 mod error;
 mod handshake;
 mod message;
+mod raw;
 mod router;
 mod spawn;
 #[cfg(unix)]
@@ -31,8 +32,11 @@ pub use endpoint::{BRIDGE_NAME, Endpoint, RUNTIME_DIR_ENV, runtime_dir};
 pub use error::{Error, Result};
 pub use handshake::{ClientInfo, Hello, ManagedBy, ServerInfo, Welcome};
 pub use message::{Message, Notification, Request, Response, ResponsePayload, RpcError, codes};
+pub use raw::{RawIo, RawStream};
 pub use router::{HANDSHAKE_METHOD, HandlerFuture, PeerHandle, RequestCtx, Router, serve};
-pub use spawn::{SHUTDOWN_METHOD, STALE_LOCK_AGE, SpawnConfig, connect, ensure_server, probe};
+pub use spawn::{
+    SHUTDOWN_METHOD, STALE_LOCK_AGE, SpawnConfig, connect, connect_raw, ensure_server, probe,
+};
 #[cfg(unix)]
 pub use unix::{UnixListenerHandle, bind, peer_uid};
 #[cfg(windows)]
