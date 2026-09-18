@@ -14,10 +14,14 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 mod drop;
 #[cfg(unix)]
+mod helper;
+#[cfg(unix)]
 mod users;
 
 #[cfg(unix)]
 pub use drop::{drop_to, hand_over, is_root};
+#[cfg(unix)]
+pub use helper::{HelperHandle, spawn_helper};
 #[cfg(unix)]
 pub use users::{ResolvedUser, current_uid, resolve};
 
