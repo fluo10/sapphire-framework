@@ -42,7 +42,7 @@ mod test_support;
 pub use command::{RunArgs, ServerCommand, spawn_config_for};
 pub use error::{Error, Result};
 pub use events::subscribe_method;
-pub use handlers::workspace_router;
+pub use handlers::{workspace_router, workspace_router_with_sync};
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
 pub use privilege::{HelperSpec, PrivilegeConfig, UserSpec};
 pub use sync::{SyncRuntime, SyncStatus, sync_router};
@@ -66,6 +66,7 @@ pub struct AppServer {
     workspace_idle: Duration,
     idle_exit: Option<Duration>,
     host: Arc<WorkspaceHost>,
+    sync: Option<Arc<SyncRuntime>>,
     extend: Option<Box<dyn FnOnce(Router) -> Router + Send>>,
 }
 
@@ -84,6 +85,7 @@ impl AppServer {
             workspace_idle: DEFAULT_IDLE,
             idle_exit: Some(DEFAULT_IDLE_EXIT),
             host: Arc::new(WorkspaceHost::new(ctx)),
+            sync: None,
             extend: None,
         }
     }
@@ -114,6 +116,17 @@ impl AppServer {
         self
     }
 
+    /// Serve `sync.enable`, `sync.disable` and `sync.status`, and keep a replica of each
+    /// synced workspace in step with its files.
+    ///
+    /// Without this the server has no sync at all: an application that does not call it
+    /// never talks to the bridge. The runtime is built by the caller because it needs the
+    /// bridge connection, which is the caller's to open and to close.
+    pub fn sync(mut self, runtime: Arc<SyncRuntime>) -> AppServer {
+        self.sync = Some(runtime);
+        self
+    }
+
     /// Add the application's own methods.
     pub fn extend(mut self, f: impl FnOnce(Router) -> Router + Send + 'static) -> AppServer {
         self.extend = Some(Box::new(f));
@@ -134,6 +147,7 @@ impl AppServer {
             endpoint,
             managed_by,
             host,
+            sync,
             extend,
             idle_exit,
             ..
@@ -153,7 +167,16 @@ impl AppServer {
         let live = Arc::new(AtomicU64::new(0));
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
 
-        let mut router = subscribe_method(Arc::clone(&host), workspace_router(Arc::clone(&host)));
+        let mut router = subscribe_method(
+            Arc::clone(&host),
+            workspace_router_with_sync(Arc::clone(&host), sync.clone()),
+        );
+        if let Some(runtime) = &sync {
+            // `sync_router` is applied *under* the framework's own methods so a later
+            // `extend` can still replace one, and after `subscribe_method` so the
+            // `workspace.*` namespace is complete.
+            router = sync_router(Arc::clone(runtime), router);
+        }
         router = router
             .method(proto::SERVER_INFO, {
                 let info = info.clone();
@@ -185,6 +208,29 @@ impl AppServer {
         let listener = sapphire_ipc::bind(&endpoint).await?;
         #[cfg(windows)]
         let mut listener = sapphire_ipc::bind(&endpoint)?;
+
+        // The watcher and the bridge announcement loop, if sync is on. Started only once the
+        // socket is bound, so an early `?` above cannot leave two tasks running for a server
+        // that never served. Both are allowed to fail: only sync stops when they do, and the
+        // app server keeps serving files (spec §10). They are aborted with the server.
+        let _sync_tasks = match &sync {
+            Some(runtime) => {
+                let driver = Arc::clone(runtime);
+                let announcements = tokio::spawn(async move {
+                    if let Err(err) = driver.run().await {
+                        tracing::warn!("the bridge announcement loop ended: {err}");
+                    }
+                });
+                let changing = Arc::clone(runtime);
+                let watching = tokio::spawn(async move {
+                    if let Err(err) = changing.watch_changes().await {
+                        tracing::warn!("the file watcher ended: {err}");
+                    }
+                });
+                Some((announcements, watching))
+            }
+            None => None,
+        };
 
         // Close cold workspaces, and stop when nothing has used us for a while.
         let ticker = {
@@ -246,6 +292,10 @@ impl AppServer {
         }
 
         ticker.abort();
+        if let Some((announcements, watching)) = _sync_tasks {
+            announcements.abort();
+            watching.abort();
+        }
         host.close_all();
         drop(listener); // removes the socket file on Unix
         Ok(())

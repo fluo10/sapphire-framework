@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::error::Error;
 use crate::host::WorkspaceHost;
+use crate::sync::SyncRuntime;
 
 /// Turn a server error into a JSON-RPC error.
 ///
@@ -59,14 +60,47 @@ fn ok<T: serde::Serialize>(value: T) -> std::result::Result<Value, RpcError> {
 }
 
 /// Every `workspace.*` method except `workspace.subscribe`, which needs the event pump.
+///
+/// A server with sync uses [`workspace_router_with_sync`] instead; this is the variant for
+/// one without, and for tests.
 pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
+    workspace_router_with_sync(host, None)
+}
+
+/// The [`workspace_router`] for a server that syncs.
+///
+/// The three methods that change a file take the exact path: after the write succeeds, the
+/// replica is told to [`scan`], so the change is committed without waiting for the watcher's
+/// debounce. The watcher is the safety net for edits the server did not make; this is the
+/// main route, and it is not optional for the same reason the watcher is not — a skipped
+/// scan loses an edit until the next one.
+///
+/// [`scan`]: SyncRuntime::scan
+pub fn workspace_router_with_sync(
+    host: Arc<WorkspaceHost>,
+    sync: Option<Arc<SyncRuntime>>,
+) -> Router {
     let read = Arc::clone(&host);
     let write = Arc::clone(&host);
+    let write_sync = sync.clone();
     let append = Arc::clone(&host);
+    let append_sync = sync.clone();
     let delete = Arc::clone(&host);
+    let delete_sync = sync;
     let list = Arc::clone(&host);
     let search = Arc::clone(&host);
     let reindex = Arc::clone(&host);
+
+    /// Scan `root` after a write, if this server syncs. A failed scan is logged, not
+    /// returned: the caller's write succeeded, and reporting a sync problem as a write
+    /// failure would make an unrelated outage look like the caller's.
+    async fn scanned(sync: Option<Arc<SyncRuntime>>, root: &std::path::Path, what: &str) {
+        if let Some(runtime) = sync
+            && let Err(err) = runtime.scan(root).await
+        {
+            tracing::warn!(root = %root.display(), "scan after {what} failed: {err}");
+        }
+    }
 
     Router::new()
         .method(proto::READ_FILE, move |ctx| {
@@ -83,6 +117,7 @@ pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
         })
         .method(proto::WRITE_FILE, move |ctx| {
             let host = Arc::clone(&write);
+            let sync = write_sync.clone();
             async move {
                 let p: proto::ContentParams = params(&ctx)?;
                 let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
@@ -90,11 +125,13 @@ pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
                     .write_file(&p.path, &p.content)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
+                scanned(sync, &p.ws, "a write").await;
                 ok(Ack {})
             }
         })
         .method(proto::APPEND_FILE, move |ctx| {
             let host = Arc::clone(&append);
+            let sync = append_sync.clone();
             async move {
                 let p: proto::ContentParams = params(&ctx)?;
                 let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
@@ -102,11 +139,13 @@ pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
                     .append_file(&p.path, &p.content)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
+                scanned(sync, &p.ws, "an append").await;
                 ok(Ack {})
             }
         })
         .method(proto::DELETE_FILE, move |ctx| {
             let host = Arc::clone(&delete);
+            let sync = delete_sync.clone();
             async move {
                 let p: proto::PathParams = params(&ctx)?;
                 let backend = host.backend(&p.ws).await.map_err(|e| rpc_error(&e))?;
@@ -114,6 +153,7 @@ pub fn workspace_router(host: Arc<WorkspaceHost>) -> Router {
                     .delete_file(&p.path)
                     .await
                     .map_err(|e| rpc_error(&Error::Backend(e)))?;
+                scanned(sync, &p.ws, "a delete").await;
                 ok(Ack {})
             }
         })

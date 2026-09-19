@@ -13,15 +13,17 @@ use grain_id::GrainId;
 use sapphire_bridge_api::{BridgeClient, ManagedBy, RegisterParams, WorkspaceRegistration};
 use sapphire_sync::{PauseReason, Replica, ReplicaConfig, ScanOutcome, SystemClock};
 use sapphire_workspace::{AppContext, Workspace};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 
 pub mod id;
 mod methods;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
+mod watch;
 
 pub use id::{SYNC_ID_FILE, sync_id, sync_id_path};
 pub use methods::sync_router;
+pub use watch::{DEBOUNCE, Watcher};
 
 use crate::error::{Error, Result};
 
@@ -67,6 +69,16 @@ pub struct SyncRuntime {
     ///
     /// [`enable`]: SyncRuntime::enable
     device_id: OnceCell<GrainId>,
+    /// The file watcher, once [`watch_changes`] has started it.
+    ///
+    /// The runtime owns it because the spec puts it here: the sync runtime is a watcher and
+    /// a replica per registered root, and the two must agree on which roots are synced.
+    /// [`enable`] and [`disable`] keep them in step.
+    ///
+    /// [`watch_changes`]: SyncRuntime::watch_changes
+    /// [`enable`]: SyncRuntime::enable
+    /// [`disable`]: SyncRuntime::disable
+    watcher: OnceCell<Arc<Watcher>>,
 }
 
 impl SyncRuntime {
@@ -84,6 +96,7 @@ impl SyncRuntime {
             managed_by,
             synced: Mutex::new(HashMap::new()),
             device_id: OnceCell::new(),
+            watcher: OnceCell::new(),
         }
     }
 
@@ -93,6 +106,7 @@ impl SyncRuntime {
     /// nothing.
     pub async fn enable(&self, root: &Path) -> Result<GrainId> {
         let key = root.canonicalize().map_err(Error::Io)?;
+        let watch_key = key.clone();
         let workspace_id = sync_id(self.ctx.app_name, &key)?;
 
         // The map stays locked across opening the replica, so two simultaneous `enable`s for
@@ -119,6 +133,15 @@ impl SyncRuntime {
             );
         }
 
+        // Watch the new root too, so an edit made outside the server from now on is seen.
+        // Not fatal if it fails: the app server's own writes take the exact path in
+        // `handlers.rs`, and the next `watch_changes` re-reads the root set anyway.
+        if let Some(watcher) = self.watcher.get()
+            && let Err(err) = watcher.watch(&watch_key)
+        {
+            tracing::warn!(root = %watch_key.display(), "could not watch: {err}");
+        }
+
         // Register only once the replica is open, so a registration never names a workspace
         // that cannot serve a session.
         self.reregister().await?;
@@ -132,6 +155,11 @@ impl SyncRuntime {
             return Ok(());
         };
         let removed = self.synced.lock().await.remove(&key);
+        if removed.is_some()
+            && let Some(watcher) = self.watcher.get()
+        {
+            watcher.unwatch(&key);
+        }
         if let Some(removed) = removed {
             self.bridge
                 .unregister(removed.workspace_id)
@@ -302,6 +330,44 @@ impl SyncRuntime {
     /// Every synced root, for the watcher.
     pub async fn roots(&self) -> Vec<PathBuf> {
         self.synced.lock().await.keys().cloned().collect()
+    }
+
+    /// Watch the synced roots and, on a debounced report, scan and dial.
+    ///
+    /// This is the safety net for everything the app server did not do itself — a file
+    /// edited in an editor, a `git checkout`. The exact path is [`scan`] called from
+    /// `handlers.rs` right after a write the server made. A scan that finds nothing is
+    /// cheap; a scan that is skipped loses an edit until the next one.
+    ///
+    /// Returns when the reporting channel closes — that is, when the [`Watcher`] this
+    /// runtime holds is dropped, which happens when the runtime itself is.
+    ///
+    /// [`scan`]: SyncRuntime::scan
+    pub async fn watch_changes(self: Arc<Self>) -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let watcher = Arc::new(Watcher::start(self.roots().await, tx)?);
+        let _ = self.watcher.set(Arc::clone(&watcher));
+
+        // A root enabled between `roots()` above and the `set` just now was not in the
+        // starting set, and `enable` could not reach a watcher that did not exist yet.
+        // Watching the current set again is idempotent on `notify`'s side.
+        for root in self.roots().await {
+            if let Err(err) = watcher.watch(&root) {
+                tracing::warn!(root = %root.display(), "could not watch: {err}");
+            }
+        }
+
+        while let Some(root) = rx.recv().await {
+            // Logged, not fatal: a failed scan or dial leaves the replica behind, and the
+            // next report tries again. Neither may take the app server down (spec §10).
+            if let Err(err) = self.scan(&root).await {
+                tracing::warn!(root = %root.display(), "scan after a local edit failed: {err}");
+            }
+            if let Err(err) = self.sync_now(&root).await {
+                tracing::warn!(root = %root.display(), "dial after a local edit failed: {err}");
+            }
+        }
+        Ok(())
     }
 
     /// Tell the bridge the complete current set. A registration is not a delta.
@@ -596,6 +662,64 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
 
         assert!(f.runtime.enable(&plain).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_through_the_workspace_router_is_committed_to_the_replica() {
+        // The brief's "main path": a write the app server itself made is scanned straight
+        // after, not left to the watcher's debounce. Asserted against the replica's own
+        // state, which is the only thing that can tell the two paths apart — reading the
+        // file back would pass even if the scan never ran.
+        let f = fixture().await;
+        f.runtime.enable(&f.root).await.unwrap();
+
+        let host = Arc::new(crate::WorkspaceHost::new(&CTX));
+        let router = Arc::new(crate::workspace_router_with_sync(
+            host,
+            Some(Arc::clone(&f.runtime)),
+        ));
+        let (client_conn, server_conn) = sapphire_ipc::Connection::pair();
+        tokio::spawn(async move {
+            let info = sapphire_ipc::ServerInfo {
+                version: "0.0.0".into(),
+                pid: std::process::id(),
+                managed_by: ManagedBy::Spawned,
+            };
+            let _ = sapphire_ipc::serve(server_conn, router, "sapphire-synctest", info).await;
+        });
+        let info = sapphire_ipc::ClientInfo {
+            kind: "test".into(),
+            version: "0.0.0".into(),
+            pid: std::process::id(),
+        };
+        let (client, _) = sapphire_ipc::Client::handshake(client_conn, "sapphire-synctest", info)
+            .await
+            .unwrap();
+
+        let _: sapphire_backend::protocol::Ack = client
+            .call(
+                sapphire_backend::protocol::WRITE_FILE,
+                sapphire_backend::protocol::ContentParams {
+                    ws: f.root.clone(),
+                    path: PathBuf::from("through-the-server.md"),
+                    content: "written by the server".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // `scan` runs before the reply is written, so by the time the call returns the
+        // replica must already know the path.
+        let synced = f.runtime.synced.lock().await;
+        let entry = synced.get(&f.root).expect("enabled above");
+        let replica = entry.replica.lock().await;
+        let state = replica
+            .state("through-the-server.md")
+            .expect("a readable state");
+        assert!(
+            state.is_some(),
+            "a write through the server must be scanned into the replica, not left to the watcher"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

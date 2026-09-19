@@ -1,5 +1,6 @@
 //! A bridge that records what it was told, for testing `SyncRuntime` without a real one.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sapphire_bridge_api::{
@@ -25,6 +26,11 @@ pub struct StubBridge {
     pub device_id: GrainId,
     /// The workgroup id it answers registrations with.
     pub workgroup_id: GrainId,
+    /// How many `bridge.peers` it has been asked for.
+    ///
+    /// Dials and status reports both ask; a test that watches this grow after touching a
+    /// file has proof the runtime was driven, without reaching into a replica.
+    peers_queries: Arc<AtomicUsize>,
     announcer: sapphire_ipc::Sender,
 }
 
@@ -34,6 +40,7 @@ impl StubBridge {
         let seen = Arc::new(Mutex::new(Seen::default()));
         let device_id = GrainId::random();
         let workgroup_id = GrainId::random();
+        let peers_queries = Arc::new(AtomicUsize::new(0));
 
         let (client_conn, server_conn) = Connection::pair();
         let announcer = server_conn.sender();
@@ -77,9 +84,16 @@ impl StubBridge {
                         }
                     }
                 })
-                .method(sapphire_bridge_api::PEERS, |_| async move {
-                    serde_json::to_value(PeersResult { peers: vec![] })
-                        .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                .method(sapphire_bridge_api::PEERS, {
+                    let peers_queries = Arc::clone(&peers_queries);
+                    move |_| {
+                        let peers_queries = Arc::clone(&peers_queries);
+                        async move {
+                            peers_queries.fetch_add(1, Ordering::Relaxed);
+                            serde_json::to_value(PeersResult { peers: vec![] })
+                                .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                        }
+                    }
                 })
                 .method(sapphire_bridge_api::STATUS, |_| async move {
                     serde_json::to_value(StatusResult {
@@ -119,6 +133,7 @@ impl StubBridge {
                 seen,
                 device_id,
                 workgroup_id,
+                peers_queries,
                 announcer,
             },
             client,
@@ -141,6 +156,11 @@ impl StubBridge {
                 },
             ))
             .await;
+    }
+
+    /// How many `bridge.peers` calls it has answered.
+    pub fn peers_queries(&self) -> usize {
+        self.peers_queries.load(Ordering::Relaxed)
     }
 
     /// The last registration's workspace list.
