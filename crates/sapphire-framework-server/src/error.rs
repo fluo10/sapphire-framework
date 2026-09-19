@@ -23,6 +23,14 @@ pub enum Error {
     #[error("{0} is not a {1} workspace")]
     UnknownWorkspace(std::path::PathBuf, &'static str),
 
+    /// A workspace's sync identity could not be read or written.
+    ///
+    /// Never repaired by minting a new identity: the workspace may already exist on
+    /// another device, and a second identity would make the two sync as unrelated
+    /// workspaces for ever.
+    #[error("{0}")]
+    SyncId(String),
+
     /// Privilege separation could not be set up.
     ///
     /// Always fatal: a server that meant to drop privileges and did not must never go on to

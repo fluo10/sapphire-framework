@@ -5161,6 +5161,7 @@ name = "sapphire-framework-server"
 version = "0.14.0"
 dependencies = [
  "clap",
+ "grain-id",
  "libc",
  "sapphire-framework-backend",
  "sapphire-framework-ipc",

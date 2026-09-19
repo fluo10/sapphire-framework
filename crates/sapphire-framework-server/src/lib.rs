@@ -35,6 +35,7 @@ mod events;
 mod handlers;
 mod host;
 pub mod privilege;
+pub mod sync;
 #[cfg(test)]
 mod test_support;
 
