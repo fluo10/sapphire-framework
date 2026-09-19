@@ -5243,6 +5243,7 @@ dependencies = [
  "libc",
  "notify",
  "sapphire-framework-backend",
+ "sapphire-framework-bridge",
  "sapphire-framework-bridge-api",
  "sapphire-framework-ipc",
  "sapphire-framework-server",

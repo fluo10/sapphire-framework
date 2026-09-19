@@ -201,3 +201,56 @@ async fn two_clients_are_served_concurrently() {
     seen.sort_unstable();
     assert_eq!(seen, vec![0, 1]);
 }
+
+/// A call made *after* the server has gone must fail, not wait forever.
+///
+/// This is the socket version of `client`'s in-process test, and it is the one that pins the
+/// real bug: an in-process carrier fails the `send` because the peer's receiver drops, while
+/// a socket buffers the write, so the request is accepted and then nothing ever answers.
+/// That is exactly the shape of a bridge that died while an app server was still talking to
+/// it — the app server's next call hung for good.
+#[tokio::test]
+async fn a_call_made_after_the_server_has_gone_fails_rather_than_hanging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::in_dir("gone-app", tmp.path().to_path_buf());
+
+    #[cfg(unix)]
+    let listener = sapphire_framework_ipc::bind(&endpoint).await.unwrap();
+    #[cfg(windows)]
+    let mut listener = sapphire_framework_ipc::bind(&endpoint).unwrap();
+
+    // Served inline rather than in a spawned task, so that stopping this task drops the
+    // connection — which is what a dying process does, and the whole point of the test.
+    let server = tokio::spawn(async move {
+        while let Ok(conn) = listener.accept().await {
+            let _ = serve(conn, router(), "gone-app", server_info()).await;
+        }
+    });
+
+    let conn = sapphire_framework_ipc::connect(&endpoint).await.unwrap();
+    let (client, _) = Client::handshake(conn, "gone-app", client_info())
+        .await
+        .unwrap();
+
+    // Still alive: this much must work, or the test is not about "after".
+    let echoed: serde_json::Value = client.call("echo", serde_json::json!(1)).await.unwrap();
+    assert_eq!(echoed, serde_json::json!(1));
+
+    // The server goes away, and the client's reader has seen the close by the time the next
+    // call starts.
+    server.abort();
+    let _ = server.await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.call::<_, serde_json::Value>("echo", serde_json::json!(2)),
+    )
+    .await
+    .expect("a call on a closed connection must fail, not wait forever")
+    .unwrap_err();
+    assert!(
+        matches!(err, sapphire_framework_ipc::Error::Closed),
+        "got {err:?}"
+    );
+}

@@ -26,6 +26,7 @@ pub use methods::sync_router;
 pub use watch::{DEBOUNCE, Watcher};
 
 use crate::error::{Error, Result};
+use crate::host::WorkspaceHost;
 
 /// What `sync.status` reports.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -79,6 +80,20 @@ pub struct SyncRuntime {
     /// [`enable`]: SyncRuntime::enable
     /// [`disable`]: SyncRuntime::disable
     watcher: OnceCell<Arc<Watcher>>,
+    /// The app server that owns these workspaces' caches, once it has told us.
+    ///
+    /// A replication session writes files, and the search index is not part of a session: the
+    /// index belongs to the app server, which holds the workspace open. Reaching it through
+    /// the host is what keeps a received file and its index moving together, and it is the
+    /// *same* [`WorkspaceState`](sapphire_workspace::WorkspaceState) the server serves from —
+    /// opening a second one would collide on the retrieve store's exclusive lock.
+    ///
+    /// Absent for a runtime nobody has wired to an app server (a test stub driving the
+    /// replica directly). Nothing then indexes, which is correct: nothing owns an index.
+    host: OnceCell<Arc<WorkspaceHost>>,
+    /// Serialises re-indexing, so two sessions finishing at once do not both sweep the
+    /// workspace through the same store.
+    reindexing: Mutex<()>,
 }
 
 impl SyncRuntime {
@@ -97,7 +112,17 @@ impl SyncRuntime {
             synced: Mutex::new(HashMap::new()),
             device_id: OnceCell::new(),
             watcher: OnceCell::new(),
+            host: OnceCell::new(),
+            reindexing: Mutex::new(()),
         }
+    }
+
+    /// Tell the runtime which app server owns these workspaces' caches.
+    ///
+    /// Called by [`AppServer::sync`](crate::AppServer::sync). First writer wins: a runtime
+    /// belongs to the server that wired it.
+    pub(crate) fn set_host(&self, host: Arc<WorkspaceHost>) {
+        let _ = self.host.set(host);
     }
 
     /// Start syncing `root`, returning its identity across devices.
@@ -123,7 +148,7 @@ impl SyncRuntime {
             let replica = Replica::open(config, Arc::new(SystemClock))
                 .map_err(|e| Error::Sync(e.to_string()))?;
             synced.insert(
-                key,
+                key.clone(),
                 Synced {
                     workspace_id,
                     replica: Arc::new(Mutex::new(replica)),
@@ -145,6 +170,18 @@ impl SyncRuntime {
         // Register only once the replica is open, so a registration never names a workspace
         // that cannot serve a session.
         self.reregister().await?;
+
+        // Dial now, so enabling a workspace converges it rather than waiting for the next
+        // local edit to trigger a session. This is what catches a host up when it returns:
+        // the peer that has been running is the one the returning host has to ask, and no
+        // watcher on either side fires for a file that was never written locally.
+        //
+        // Best-effort: a workspace is enabled whether or not any peer is up, and a failure
+        // here is not a failure to enable. A session is symmetric, so dialing is enough —
+        // this side sends its own view, and the peer answers with what this side lacks.
+        if let Err(err) = self.sync_now(&key).await {
+            tracing::warn!(root = %key.display(), "the first session after enabling failed: {err}");
+        }
         Ok(workspace_id)
     }
 
@@ -238,6 +275,53 @@ impl SyncRuntime {
         Ok(())
     }
 
+    /// Bring the search index up to date with files a session has written.
+    ///
+    /// A replication session moves files, not index rows: the index belongs to the app
+    /// server, and the sync core is deliberately free of it. So the side that *applied* a
+    /// change re-indexes, which is what makes a file that arrived from a peer searchable
+    /// without a manual reindex — the claim the whole architecture rests on.
+    ///
+    /// Incremental, not a full rebuild: the workspace's mtime/size stamps mean only what
+    /// actually changed is read back. A file the session wrote has a new stamp, so it is
+    /// picked up; one that was already indexed and untouched is skipped.
+    ///
+    /// Best-effort by contract: the caller's session has already succeeded, and a failure
+    /// here must not be reported as the session's. It is logged and the next session, local
+    /// edit or explicit `workspace.reindex` tries again.
+    async fn reindex(&self, root: &Path) {
+        let Some(host) = self.host.get() else {
+            return;
+        };
+        let host = Arc::clone(host);
+        let root = root.to_owned();
+        // One sweep at a time: two sessions that finish together would otherwise both walk
+        // the workspace through the same retrieve store.
+        let _serialised = self.reindexing.lock().await;
+        // Opening the workspace is itself blocking work, and it is where the exclusive
+        // retrieve-store lock is taken, so it happens here rather than inside the sweep.
+        let backend = match host.backend(&root).await {
+            Ok(backend) => backend,
+            Err(err) => {
+                tracing::warn!(root = %root.display(), "re-indexing after a session failed: {err}");
+                return;
+            }
+        };
+        let state = Arc::clone(backend.state());
+        let result = tokio::task::spawn_blocking(move || state.sync_retrieve()).await;
+        match result {
+            Ok(Ok(report)) => {
+                tracing::debug!(root = %root.display(), ?report, "re-indexed after a session");
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(root = %root.display(), "re-indexing after a session failed: {err}");
+            }
+            Err(err) => {
+                tracing::warn!(root = %root.display(), "re-indexing after a session failed: {err}");
+            }
+        }
+    }
+
     /// Open a session with every peer that will take one.
     pub async fn sync_now(&self, root: &Path) -> Result<()> {
         let Ok(key) = root.canonicalize() else {
@@ -272,6 +356,10 @@ impl SyncRuntime {
             {
                 tracing::warn!(peer = %peer.name, "session failed: {err}");
             }
+            drop(replica);
+            // The session wrote files; the index has to catch up before this workspace is
+            // searchable again.
+            self.reindex(&key).await;
         }
         Ok(())
     }
@@ -289,14 +377,14 @@ impl SyncRuntime {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             };
 
-            let replica = {
+            let found = {
                 let synced = self.synced.lock().await;
                 synced
-                    .values()
-                    .find(|s| s.workspace_id == announcement.workspace_id)
-                    .map(|s| Arc::clone(&s.replica))
+                    .iter()
+                    .find(|(_, s)| s.workspace_id == announcement.workspace_id)
+                    .map(|(root, s)| (root.clone(), Arc::clone(&s.replica)))
             };
-            let Some(replica) = replica else {
+            let Some((root, replica)) = found else {
                 // The bridge routed to us for a workspace we no longer hold. Not fatal:
                 // ignore it and let the ticket expire.
                 tracing::debug!(
@@ -308,6 +396,7 @@ impl SyncRuntime {
 
             let bridge = Arc::clone(&self.bridge);
             let workspace_id = announcement.workspace_id;
+            let driver = Arc::clone(&self);
             tokio::spawn(async move {
                 let stream = match bridge.accept_stream(announcement.ticket).await {
                     Ok(stream) => stream,
@@ -323,6 +412,10 @@ impl SyncRuntime {
                 {
                     tracing::warn!("an inbound session failed: {err}");
                 }
+                drop(replica);
+                // This is the receiving side: the files are on disk now and nobody else will
+                // index them.
+                driver.reindex(&root).await;
             });
         }
     }

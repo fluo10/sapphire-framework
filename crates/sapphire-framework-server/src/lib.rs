@@ -123,6 +123,9 @@ impl AppServer {
     /// never talks to the bridge. The runtime is built by the caller because it needs the
     /// bridge connection, which is the caller's to open and to close.
     pub fn sync(mut self, runtime: Arc<SyncRuntime>) -> AppServer {
+        // The runtime re-indexes what a session writes, and the index belongs to this host:
+        // tell it where the workspaces live before anything can arrive.
+        runtime.set_host(Arc::clone(&self.host));
         self.sync = Some(runtime);
         self
     }

@@ -44,6 +44,9 @@ libc = "0.2"
 # exclusive file lock to pin), while the lib dependency above keeps the server
 # itself store-agnostic.
 sapphire-backend = { package = "sapphire-framework-backend", version = "0.14.0", path = "../sapphire-framework-backend" }
+# The end-to-end test builds two real bridges, which only a `test-util` build exports
+# (`LoopbackNetwork`, `NetConfig`, and the constructors that take an explicit endpoint).
+sapphire-framework-bridge = { package = "sapphire-framework-bridge", version = "0.14.0", path = "../sapphire-framework-bridge", features = ["test-util"] }
 sapphire-framework-server = { path = ".", features = ["test-util"] }
 tempfile = "3"
 toml.workspace = true

@@ -18,8 +18,59 @@ use crate::router::HANDSHAKE_METHOD;
 /// How many notifications may queue for a subscriber before it starts losing the oldest.
 pub const NOTIFICATION_CAPACITY: usize = 256;
 
-type Pending =
-    Arc<Mutex<HashMap<u64, oneshot::Sender<std::result::Result<serde_json::Value, RpcError>>>>>;
+/// The calls in flight, and whether the connection has closed under them.
+///
+/// The two travel together under **one** lock, and that is the point. Closed-ness has to be
+/// read and a call registered as a single step: were they separate, a call could see an open
+/// connection, register itself, and then have the reader drain the map and exit before that
+/// registration — leaving a caller waiting on an answer nothing will ever send. That is not
+/// hypothetical: it is what an app server did to `sync.status` every time its bridge died.
+#[derive(Debug, Default)]
+struct Shared {
+    closed: bool,
+    pending: HashMap<u64, oneshot::Sender<std::result::Result<serde_json::Value, RpcError>>>,
+}
+
+impl Shared {
+    /// Register a call, or refuse it because the connection is already closed.
+    ///
+    /// Refusing here is what makes a call on a dead connection fail promptly instead of
+    /// hanging: nothing is left to answer it, and no later event will arrive to notice.
+    fn register(
+        &mut self,
+        id: u64,
+        tx: oneshot::Sender<std::result::Result<serde_json::Value, RpcError>>,
+    ) -> Result<()> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
+        self.pending.insert(id, tx);
+        Ok(())
+    }
+
+    /// Forget a call whose request could not be sent.
+    fn forget(&mut self, id: u64) {
+        self.pending.remove(&id);
+    }
+
+    /// Deliver a response, if anyone is still waiting for it.
+    fn resolve(&mut self, id: u64, payload: std::result::Result<serde_json::Value, RpcError>) {
+        if let Some(tx) = self.pending.remove(&id) {
+            let _ = tx.send(payload);
+        } else {
+            tracing::debug!(id, "response for an unknown request");
+        }
+    }
+
+    /// The connection is gone: mark it closed and fail everything still in flight.
+    ///
+    /// Closing and draining under the same lock is what leaves no gap — no call can slip in
+    /// between the two and survive.
+    fn close(&mut self) {
+        self.closed = true;
+        self.pending.clear();
+    }
+}
 
 /// A connected client.
 ///
@@ -28,7 +79,7 @@ type Pending =
 #[derive(Debug)]
 pub struct Client {
     sender: Sender,
-    pending: Pending,
+    shared: Arc<Mutex<Shared>>,
     events: broadcast::Sender<Notification>,
     next_id: AtomicU64,
     server: ServerInfo,
@@ -81,27 +132,25 @@ impl Client {
             });
         }
 
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let shared: Arc<Mutex<Shared>> = Arc::new(Mutex::new(Shared::default()));
         let (events, _) = broadcast::channel(NOTIFICATION_CAPACITY);
 
         let reader = tokio::spawn({
-            let pending = Arc::clone(&pending);
+            let shared = Arc::clone(&shared);
             let events = events.clone();
             async move {
                 let mut conn = conn;
                 while let Some(incoming) = conn.recv().await {
                     match incoming {
                         Ok(Message::Response(resp)) => {
-                            let waiter = pending.lock().expect("pending mutex").remove(&resp.id);
-                            if let Some(tx) = waiter {
-                                let payload = match resp.payload {
-                                    ResponsePayload::Ok(v) => Ok(v),
-                                    ResponsePayload::Err(e) => Err(e),
-                                };
-                                let _ = tx.send(payload);
-                            } else {
-                                tracing::debug!(id = resp.id, "response for an unknown request");
-                            }
+                            let payload = match resp.payload {
+                                ResponsePayload::Ok(v) => Ok(v),
+                                ResponsePayload::Err(e) => Err(e),
+                            };
+                            shared
+                                .lock()
+                                .expect("shared mutex")
+                                .resolve(resp.id, payload);
                         }
                         Ok(Message::Notification(n)) => {
                             let _ = events.send(n);
@@ -112,22 +161,17 @@ impl Client {
                         Err(err) => tracing::debug!("dropping a bad frame: {err}"),
                     }
                 }
-                // The connection closed: fail every pending call rather than leaving
-                // callers waiting forever.
-                let waiters: Vec<_> = pending
-                    .lock()
-                    .expect("pending mutex")
-                    .drain()
-                    .map(|(_, tx)| tx)
-                    .collect();
-                drop(waiters);
+                // The connection closed: mark it, so a call starting from here is refused,
+                // and fail every call still in flight rather than leaving callers waiting
+                // forever. Both happen under one lock; see [`Shared`].
+                shared.lock().expect("shared mutex").close();
             }
         });
 
         let server = welcome.server.clone();
         let client = Client {
             sender,
-            pending,
+            shared,
             events,
             next_id: AtomicU64::new(1),
             server: welcome.server,
@@ -144,7 +188,9 @@ impl Client {
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().expect("pending mutex").insert(id, tx);
+        // Refuses when the connection is already closed, rather than registering a caller
+        // nothing will answer.
+        self.shared.lock().expect("shared mutex").register(id, tx)?;
 
         let send = self
             .sender
@@ -155,7 +201,7 @@ impl Client {
             }))
             .await;
         if let Err(err) = send {
-            self.pending.lock().expect("pending mutex").remove(&id);
+            self.shared.lock().expect("shared mutex").forget(id);
             return Err(err);
         }
 
