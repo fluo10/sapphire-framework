@@ -4974,6 +4974,7 @@ dependencies = [
  "sapphire-framework-retrieve",
  "sapphire-framework-rpc",
  "sapphire-framework-server",
+ "sapphire-framework-session",
  "sapphire-framework-sync",
  "sapphire-framework-track",
  "sapphire-framework-workspace",
@@ -5171,6 +5172,20 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "sapphire-framework-session"
+version = "0.14.0"
+dependencies = [
+ "grain-id",
+ "sapphire-framework-sync",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 

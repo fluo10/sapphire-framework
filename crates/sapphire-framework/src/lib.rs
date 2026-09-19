@@ -26,6 +26,7 @@
 //! | `retrieve` | [`retrieve`] | `sapphire-framework-retrieve` |
 //! | `track` | [`track`] | `sapphire-framework-track` |
 //! | `sync` | [`sync`] | `sapphire-framework-sync` |
+//! | `session` | [`session`] | `sapphire-framework-session` |
 //! | `ipc` | [`ipc`] | `sapphire-framework-ipc` |
 //! | `server` | [`server`] | `sapphire-framework-server` |
 //! | `rpc` | [`rpc`] | `sapphire-framework-rpc` |
@@ -54,6 +55,9 @@ pub use sapphire_framework_track as track;
 
 #[cfg(feature = "sync")]
 pub use sapphire_framework_sync as sync;
+
+#[cfg(feature = "session")]
+pub use sapphire_framework_session as session;
 
 #[cfg(feature = "ipc")]
 pub use sapphire_framework_ipc as ipc;

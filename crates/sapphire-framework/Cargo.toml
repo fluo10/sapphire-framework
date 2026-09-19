@@ -20,6 +20,7 @@ workspace = ["dep:sapphire-framework-workspace"]
 retrieve = ["dep:sapphire-framework-retrieve"]
 track = ["dep:sapphire-framework-track"]
 sync = ["dep:sapphire-framework-sync"]
+session = ["dep:sapphire-framework-session"]
 ipc = ["dep:sapphire-framework-ipc"]
 server = ["dep:sapphire-framework-server", "backend"]
 rpc = ["dep:sapphire-framework-rpc"]
@@ -46,6 +47,7 @@ sapphire-framework-workspace = { version = "0.14.0", path = "../sapphire-framewo
 sapphire-framework-retrieve = { version = "0.14.0", path = "../sapphire-framework-retrieve", optional = true, default-features = false }
 sapphire-framework-track = { version = "0.14.0", path = "../sapphire-framework-track", optional = true }
 sapphire-framework-sync = { version = "0.14.0", path = "../sapphire-framework-sync", optional = true }
+sapphire-framework-session = { version = "0.14.0", path = "../sapphire-framework-session", optional = true }
 sapphire-framework-ipc = { version = "0.14.0", path = "../sapphire-framework-ipc", optional = true }
 sapphire-framework-server = { version = "0.14.0", path = "../sapphire-framework-server", optional = true }
 sapphire-framework-rpc = { version = "0.14.0", path = "../sapphire-framework-rpc", optional = true }
