@@ -16,10 +16,12 @@ use sapphire_workspace::{AppContext, Workspace};
 use tokio::sync::{Mutex, OnceCell};
 
 pub mod id;
+mod methods;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 
 pub use id::{SYNC_ID_FILE, sync_id, sync_id_path};
+pub use methods::sync_router;
 
 use crate::error::{Error, Result};
 

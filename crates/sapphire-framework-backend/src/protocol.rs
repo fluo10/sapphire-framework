@@ -245,3 +245,34 @@ mod tests {
         assert_eq!(EVENT, "workspace.event");
     }
 }
+
+/// Start syncing a workspace.
+pub const SYNC_ENABLE: &str = "sync.enable";
+/// Stop syncing a workspace. Files stay.
+pub const SYNC_DISABLE: &str = "sync.disable";
+/// Report a workspace's replication state.
+pub const SYNC_STATUS: &str = "sync.status";
+
+/// Result of [`SYNC_ENABLE`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SyncEnableResult {
+    /// The workspace's identity across devices.
+    pub workspace_id: grain_id::GrainId,
+}
+
+/// Result of [`SYNC_STATUS`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SyncStatusResult {
+    /// Whether this workspace is synced.
+    pub enabled: bool,
+    /// Its identity across devices, when it is.
+    pub workspace_id: Option<grain_id::GrainId>,
+    /// How many other devices the workgroup has.
+    pub peers: usize,
+    /// Why replication is paused, if it is.
+    pub paused: Option<String>,
+    /// The last failure, if any.
+    pub last_error: Option<String>,
+    /// Whether the bridge is reachable. `false` does not mean the app server is down.
+    pub bridge_available: bool,
+}

@@ -14,14 +14,16 @@ use crate::host::WorkspaceHost;
 /// Turn a server error into a JSON-RPC error.
 ///
 /// Only a caller's mistake is `INVALID_PARAMS`: a path outside the workspace, a directory
-/// that is not a workspace, a parameter object that does not fit. A failing database is the
-/// server's problem, and the caller cannot fix it by asking differently.
+/// that is not a workspace, an unreadable sync id, a parameter object that does not fit. A
+/// failing database or an unreachable bridge is the server's problem, and the caller cannot
+/// fix it by asking differently.
 pub(crate) fn rpc_error(err: &Error) -> RpcError {
     use sapphire_workspace::Error as WsError;
 
     let caller_error = matches!(
         err,
         Error::UnknownWorkspace(..)
+            | Error::SyncId(..)
             | Error::Workspace(
                 WsError::PathEscapesWorkspace { .. }
                     | WsError::MarkerDirMissing { .. }

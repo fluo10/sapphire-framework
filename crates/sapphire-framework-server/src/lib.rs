@@ -45,7 +45,7 @@ pub use events::subscribe_method;
 pub use handlers::workspace_router;
 pub use host::{DEFAULT_IDLE, DEFAULT_MAX_OPEN, WorkspaceHost};
 pub use privilege::{HelperSpec, PrivilegeConfig, UserSpec};
-pub use sync::{SyncRuntime, SyncStatus};
+pub use sync::{SyncRuntime, SyncStatus, sync_router};
 
 /// How long a spawned server stays up with nothing to do.
 pub const DEFAULT_IDLE_EXIT: Duration = Duration::from_secs(15 * 60);
