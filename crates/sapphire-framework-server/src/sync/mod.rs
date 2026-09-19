@@ -490,6 +490,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn no_later_registration_clears_this_apps_routes() {
+        // The device id is asked of the bridge once, on the first `enable`, with an empty
+        // workspace list — the one moment that is safe, because no route exists yet. Every
+        // later registration must name the complete set: one with an empty list would
+        // briefly clear this application's routes, and a peer asking for a workspace this
+        // server owns would be told nobody has it.
+        let f = fixture().await;
+        let second_root = f.second_root();
+
+        f.runtime.enable(&f.root).await.unwrap();
+        f.runtime.enable(&second_root).await.unwrap();
+        f.runtime.sync_now(&f.root).await.unwrap();
+        f.runtime.disable(&f.root).await.unwrap();
+
+        let seen = f.stub.seen.lock().expect("stub");
+        let first_full = seen
+            .registrations
+            .iter()
+            .position(|r| !r.workspaces.is_empty())
+            .expect("enabling registers the workspace");
+        let emptied_afterwards = seen.registrations[first_full + 1..]
+            .iter()
+            .filter(|r| r.workspaces.is_empty())
+            .count();
+        assert_eq!(
+            emptied_afterwards, 0,
+            "a registration after the first workspace must still name the whole set"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn disabling_unregisters_and_leaves_the_files_alone() {
         let f = fixture().await;
         std::fs::write(f.root.join("keep.md"), "content").unwrap();
