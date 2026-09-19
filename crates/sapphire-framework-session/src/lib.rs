@@ -11,10 +11,12 @@
 mod error;
 mod frame;
 mod message;
+mod session;
 
 pub use error::{Error, Result};
 pub use frame::{Frame, read_frame, write_blob, write_control};
 pub use message::Message;
+pub use session::{SessionOutcome, run_session};
 
 /// The session format this build speaks. Sent in the first message and checked.
 pub const SESSION_FORMAT_VERSION: u32 = 1;

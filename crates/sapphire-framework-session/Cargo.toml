@@ -14,7 +14,9 @@ grain-id.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+# `rt` and `sync` for the writer task and its channel; `io-util` for split and the
+# AsyncRead/AsyncWrite traits.
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "sync"] }
 tracing.workspace = true
 
 [dev-dependencies]

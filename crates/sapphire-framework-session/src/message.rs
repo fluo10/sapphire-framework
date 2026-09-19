@@ -20,12 +20,19 @@ pub enum Message {
     },
     /// A page of path states the peer's version vector does not cover.
     Updates(Vec<PathUpdate>),
-    /// The sender has sent everything it had at `Hello` time.
+    /// The sender has sent every `Updates` page it had.
     Done,
     /// The sender needs the content behind this hash.
     Want(ContentHash),
     /// The sender does not have the content behind this hash either.
     Missing(ContentHash),
+    /// The sender will ask for nothing further, and has answered every `Want` it will get.
+    ///
+    /// Sent after the peer's `Done`, once this side's want list is empty — at which point it
+    /// cannot grow again. Without it a side that stopped reading at `Done` would drop the
+    /// `Want` the peer sends after applying a page, and every file over the inline limit
+    /// would silently never arrive.
+    Settled,
     /// The sender will not continue, and why.
     Refused(String),
 }
@@ -58,6 +65,7 @@ mod tests {
     #[test]
     fn the_payload_free_messages_round_trip() {
         assert!(matches!(round_trip(&Message::Done), Message::Done));
+        assert!(matches!(round_trip(&Message::Settled), Message::Settled));
     }
 
     #[test]
