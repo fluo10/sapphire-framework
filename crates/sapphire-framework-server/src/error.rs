@@ -31,6 +31,24 @@ pub enum Error {
     #[error("{0}")]
     SyncId(String),
 
+    /// The replication core failed.
+    ///
+    /// Carries its error's `Display`, not the error: the core's own type is an internal
+    /// detail, while the message is what status and the logs need.
+    #[error("replication failed: {0}")]
+    Sync(String),
+
+    /// The bridge refused a request, or could not be reached.
+    ///
+    /// Not fatal to the app server: the bridge carries replication, and everything the
+    /// application itself does works without it (spec §10).
+    #[error("the bridge could not be reached: {0}")]
+    Bridge(String),
+
+    /// A replication session failed.
+    #[error(transparent)]
+    Session(#[from] sapphire_framework_session::Error),
+
     /// Privilege separation could not be set up.
     ///
     /// Always fatal: a server that meant to drop privileges and did not must never go on to

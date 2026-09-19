@@ -1,0 +1,156 @@
+//! A bridge that records what it was told, for testing `SyncRuntime` without a real one.
+
+use std::sync::{Arc, Mutex};
+
+use sapphire_bridge_api::{
+    Ack, BridgeClient, GrainId, IncomingParams, PeersResult, RegisterParams, RegisterResult,
+    StatusResult, UnregisterParams,
+};
+use sapphire_ipc::{ClientInfo, Connection, ManagedBy, Router, ServerInfo, serve};
+
+/// What a `StubBridge` saw.
+#[derive(Clone, Debug, Default)]
+pub struct Seen {
+    /// Every `bridge.register` it received, in order.
+    pub registrations: Vec<RegisterParams>,
+    /// Every `bridge.unregister` it received.
+    pub unregistrations: Vec<GrainId>,
+}
+
+/// A stand-in for the bridge's control plane.
+pub struct StubBridge {
+    /// What it has been told.
+    pub seen: Arc<Mutex<Seen>>,
+    /// The device id it answers registrations with.
+    pub device_id: GrainId,
+    /// The workgroup id it answers registrations with.
+    pub workgroup_id: GrainId,
+    announcer: sapphire_ipc::Sender,
+}
+
+impl StubBridge {
+    /// Start a stub on one end of an in-process connection and return a client for the other.
+    pub async fn start() -> (StubBridge, Arc<BridgeClient>) {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let device_id = GrainId::random();
+        let workgroup_id = GrainId::random();
+
+        let (client_conn, server_conn) = Connection::pair();
+        let announcer = server_conn.sender();
+
+        let router = Arc::new(
+            Router::new()
+                .method(sapphire_bridge_api::REGISTER, {
+                    let seen = Arc::clone(&seen);
+                    move |ctx| {
+                        let seen = Arc::clone(&seen);
+                        async move {
+                            let params: RegisterParams = serde_json::from_value(ctx.params)
+                                .map_err(|e| {
+                                    sapphire_ipc::RpcError::invalid_params(e.to_string())
+                                })?;
+                            seen.lock().expect("stub").registrations.push(params);
+                            serde_json::to_value(RegisterResult {
+                                device_id,
+                                node_id: "stub".into(),
+                                workgroup_id,
+                            })
+                            .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                        }
+                    }
+                })
+                .method(sapphire_bridge_api::UNREGISTER, {
+                    let seen = Arc::clone(&seen);
+                    move |ctx| {
+                        let seen = Arc::clone(&seen);
+                        async move {
+                            let params: UnregisterParams = serde_json::from_value(ctx.params)
+                                .map_err(|e| {
+                                    sapphire_ipc::RpcError::invalid_params(e.to_string())
+                                })?;
+                            seen.lock()
+                                .expect("stub")
+                                .unregistrations
+                                .push(params.workspace_id);
+                            serde_json::to_value(Ack {})
+                                .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                        }
+                    }
+                })
+                .method(sapphire_bridge_api::PEERS, |_| async move {
+                    serde_json::to_value(PeersResult { peers: vec![] })
+                        .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                })
+                .method(sapphire_bridge_api::STATUS, |_| async move {
+                    serde_json::to_value(StatusResult {
+                        version: "stub".into(),
+                        node_id: "stub".into(),
+                        workgroup: None,
+                        routes: vec![],
+                    })
+                    .map_err(|e| sapphire_ipc::RpcError::internal(e.to_string()))
+                }),
+        );
+
+        tokio::spawn(async move {
+            let info = ServerInfo {
+                version: "stub".into(),
+                pid: std::process::id(),
+                managed_by: ManagedBy::Service,
+            };
+            let _ = serve(server_conn, router, "bridge", info).await;
+        });
+
+        let info = ClientInfo {
+            kind: "test".into(),
+            version: "stub".into(),
+            pid: std::process::id(),
+        };
+        let (client, _) = sapphire_ipc::Client::handshake(client_conn, "bridge", info)
+            .await
+            .expect("the stub handshake");
+        let client = Arc::new(BridgeClient::from_client(
+            Arc::new(client),
+            std::env::temp_dir(),
+        ));
+
+        (
+            StubBridge {
+                seen,
+                device_id,
+                workgroup_id,
+                announcer,
+            },
+            client,
+        )
+    }
+
+    /// Pretend a peer wants `workspace_id`.
+    pub async fn announce(&self, workspace_id: GrainId, ticket: &str) {
+        let params = IncomingParams {
+            workspace_id,
+            peer_device_id: GrainId::random(),
+            ticket: ticket.to_owned(),
+        };
+        let _ = self
+            .announcer
+            .send(sapphire_ipc::Message::Notification(
+                sapphire_ipc::Notification {
+                    method: sapphire_bridge_api::INCOMING.to_owned(),
+                    params: serde_json::to_value(params).expect("announcement"),
+                },
+            ))
+            .await;
+    }
+
+    /// The last registration's workspace list.
+    pub fn last_workspaces(&self) -> Vec<GrainId> {
+        self.seen
+            .lock()
+            .expect("stub")
+            .registrations
+            .last()
+            .map(|r| r.workspaces.iter().map(|w| w.workspace_id).collect())
+            .unwrap_or_default()
+    }
+}

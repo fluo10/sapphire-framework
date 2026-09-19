@@ -74,8 +74,11 @@ pub struct Replica {
     fault: Option<crate::testing::FaultPoint>,
     /// Fires once after the next path a scan reconciles. Lets a test change the
     /// filesystem in the middle of a scan.
+    ///
+    /// `Send` so that a replica held across a `tokio::spawn` still is: the app server keeps
+    /// one behind a mutex and moves it into a task per session.
     #[cfg(any(test, feature = "test-util"))]
-    reconcile_hook: Option<Box<dyn FnOnce()>>,
+    reconcile_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
 fn now_ns() -> i64 {
@@ -943,7 +946,7 @@ impl Replica {
     }
 
     /// Run `hook` once after the next path a scan reconciles, then clear it.
-    pub fn inject_after_reconcile(&mut self, hook: Box<dyn FnOnce()>) {
+    pub fn inject_after_reconcile(&mut self, hook: Box<dyn FnOnce() + Send>) {
         self.reconcile_hook = Some(hook);
     }
 
